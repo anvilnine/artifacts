@@ -347,6 +347,10 @@ app.all('/mcp', (req, res) => {
 // Misc
 // ---------------------------------------------------------------------------
 
+app.get('/favicon.ico', (req, res) => {
+  res.status(204).end();
+});
+
 app.get('/robots.txt', (req, res) => {
   res.type('text/plain').send('User-agent: *\nDisallow: /\n');
 });

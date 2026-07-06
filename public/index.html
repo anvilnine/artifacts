@@ -6,132 +6,333 @@
 <meta name="robots" content="noindex, nofollow">
 <title>artifacts</title>
 <style>
-  :root { color-scheme: light dark; }
+  :root { color-scheme: dark; }
   * { box-sizing: border-box; }
   body {
     font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-    max-width: 860px; margin: 0 auto; padding: 24px 16px 60px;
+    margin: 0; min-height: 100vh;
     background: #0d1117; color: #e6edf3;
   }
-  h1 { font-size: 20px; margin: 0 0 20px; }
-  h1 span { color: #7d8590; font-weight: 400; }
-  label { display: block; font-size: 12px; color: #7d8590; margin: 12px 0 4px; }
   input, select, textarea {
-    width: 100%; padding: 8px 10px; border-radius: 6px;
+    padding: 8px 10px; border-radius: 6px;
     border: 1px solid #30363d; background: #161b22; color: #e6edf3;
     font-size: 14px; font-family: inherit;
   }
-  textarea { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; min-height: 320px; font-size: 13px; }
-  .row { display: flex; gap: 12px; }
-  .row > div { flex: 1; }
   button {
-    margin-top: 16px; padding: 10px 20px; border: none; border-radius: 6px;
+    padding: 8px 16px; border: none; border-radius: 6px;
     background: #238636; color: #fff; font-size: 14px; font-weight: 600; cursor: pointer;
   }
   button:hover { background: #2ea043; }
-  #result { margin-top: 16px; padding: 12px; border-radius: 6px; display: none; font-size: 14px; }
-  #result.ok { display: block; background: #12261e; border: 1px solid #238636; }
-  #result.err { display: block; background: #2d1215; border: 1px solid #da3633; }
-  #result a { color: #58a6ff; word-break: break-all; }
+  button.ghost { background: transparent; border: 1px solid #30363d; color: #7d8590; font-weight: 400; }
+  button.ghost:hover { color: #e6edf3; border-color: #7d8590; background: transparent; }
+
+  /* ---- lock screen ---- */
+  #lock {
+    display: flex; align-items: center; justify-content: center;
+    min-height: 100vh;
+  }
+  #lock .card {
+    width: 320px; padding: 32px; border: 1px solid #21262d; border-radius: 12px;
+    background: #161b22; text-align: center;
+  }
+  #lock h1 { font-size: 22px; margin: 0 0 4px; }
+  #lock p { color: #7d8590; font-size: 13px; margin: 0 0 20px; }
+  #lock input { width: 100%; text-align: center; margin-bottom: 12px; }
+  #lock button { width: 100%; }
+  #lockError { color: #f85149; font-size: 13px; margin-top: 10px; min-height: 18px; }
+  .shake { animation: shake .35s; }
+  @keyframes shake {
+    0%,100% { transform: translateX(0); }
+    25% { transform: translateX(-8px); } 75% { transform: translateX(8px); }
+  }
+
+  /* ---- app ---- */
+  #app { display: none; max-width: 860px; margin: 0 auto; padding: 24px 16px 60px; }
+  header { display: flex; align-items: baseline; justify-content: space-between; margin-bottom: 20px; }
+  header h1 { font-size: 20px; margin: 0; }
+  header h1 span { color: #7d8590; font-weight: 400; font-size: 14px; }
+
+  #drop {
+    border: 2px dashed #30363d; border-radius: 12px;
+    padding: 48px 20px; text-align: center; cursor: pointer;
+    color: #7d8590; transition: border-color .15s, background .15s;
+  }
+  #drop.over { border-color: #2ea043; background: #12261e; color: #e6edf3; }
+  #drop strong { color: #e6edf3; }
+  #drop .hint { font-size: 12px; margin-top: 8px; }
+
+  #results { margin-top: 16px; display: flex; flex-direction: column; gap: 8px; }
+  .result {
+    display: flex; align-items: center; gap: 10px;
+    padding: 10px 14px; border-radius: 8px; font-size: 14px;
+    background: #12261e; border: 1px solid #238636;
+  }
+  .result.err { background: #2d1215; border-color: #da3633; }
+  .result .name { color: #7d8590; font-size: 13px; white-space: nowrap; }
+  .result a { color: #58a6ff; word-break: break-all; flex: 1; }
+  .result .msg { flex: 1; color: #f85149; }
+  .result button { padding: 4px 10px; font-size: 12px; }
+
+  details { margin-top: 28px; }
+  summary { cursor: pointer; color: #7d8590; font-size: 14px; user-select: none; }
+  .paste-form { margin-top: 12px; display: flex; flex-direction: column; gap: 10px; }
+  .paste-form .row { display: flex; gap: 10px; }
+  .paste-form .row > * { flex: 1; }
+  .paste-form textarea { min-height: 220px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px; }
+  .paste-form button { align-self: flex-start; }
+
   #list { margin-top: 32px; }
   #list h2 { font-size: 14px; color: #7d8590; }
   #list table { width: 100%; border-collapse: collapse; font-size: 13px; }
   #list td, #list th { text-align: left; padding: 6px 8px; border-bottom: 1px solid #21262d; }
   #list a { color: #58a6ff; text-decoration: none; }
-  #list .del { color: #f85149; cursor: pointer; background: none; border: none; padding: 0; margin: 0; font-size: 13px; }
+  #list .del { color: #f85149; cursor: pointer; background: none; border: none; padding: 0; font-size: 13px; font-weight: 400; }
+  #list .del:hover { background: none; text-decoration: underline; }
 </style>
 </head>
 <body>
-<h1>artifacts <span>— publish HTML / JSX / Markdown</span></h1>
 
-<label>API key (stored in this browser)</label>
-<input id="key" type="password" placeholder="ARTIFACTS_API_KEY">
-
-<div class="row">
-  <div>
-    <label>Type</label>
-    <select id="type">
-      <option value="html">html</option>
-      <option value="jsx">jsx</option>
-      <option value="tsx">tsx</option>
-      <option value="md">md</option>
-    </select>
-  </div>
-  <div>
-    <label>Custom slug (optional)</label>
-    <input id="slug" placeholder="random if empty">
-  </div>
-  <div>
-    <label>Title (optional)</label>
-    <input id="title" placeholder="artifact title">
+<div id="lock">
+  <div class="card" id="lockCard">
+    <h1>artifacts</h1>
+    <p>Enter API key to unlock</p>
+    <input id="lockKey" type="password" placeholder="API key" autofocus>
+    <button id="unlock">Unlock</button>
+    <div id="lockError"></div>
   </div>
 </div>
 
-<label>Content</label>
-<textarea id="content" placeholder="Paste your HTML, a React component with a default export, or Markdown…" spellcheck="false"></textarea>
+<div id="app">
+  <header>
+    <h1>artifacts <span>— drop to publish</span></h1>
+    <button class="ghost" id="logout">Lock</button>
+  </header>
 
-<button id="publish">Publish</button>
-<div id="result"></div>
+  <div id="drop">
+    <strong>Drag &amp; drop files here</strong> — or click to browse<br>
+    <div class="hint">.html · .jsx · .tsx · .md — published instantly, URL copied per file</div>
+  </div>
+  <input id="file" type="file" accept=".html,.htm,.jsx,.tsx,.md,.markdown" multiple hidden>
 
-<div id="list">
-  <h2>Published artifacts</h2>
-  <table><tbody id="rows"></tbody></table>
+  <div id="results"></div>
+
+  <details>
+    <summary>Paste content instead</summary>
+    <div class="paste-form">
+      <div class="row">
+        <select id="type">
+          <option value="html">html</option>
+          <option value="jsx">jsx</option>
+          <option value="tsx">tsx</option>
+          <option value="md">md</option>
+        </select>
+        <input id="slug" placeholder="custom slug (optional)">
+        <input id="title" placeholder="title (optional)">
+      </div>
+      <textarea id="content" placeholder="Paste HTML, a React component with a default export, or Markdown…" spellcheck="false"></textarea>
+      <button id="publish">Publish</button>
+    </div>
+  </details>
+
+  <div id="list">
+    <h2>Published artifacts</h2>
+    <table><tbody id="rows"></tbody></table>
+  </div>
 </div>
 
 <script>
   const $ = (id) => document.getElementById(id);
-  $('key').value = localStorage.getItem('artifactsKey') || '';
-  $('key').addEventListener('change', () => localStorage.setItem('artifactsKey', $('key').value));
+  let KEY = localStorage.getItem('artifactsKey') || '';
 
   const headers = () => ({
     'Content-Type': 'application/json',
-    'Authorization': 'Bearer ' + $('key').value,
+    'Authorization': 'Bearer ' + KEY,
   });
 
-  function show(cls, html) {
-    const r = $('result');
-    r.className = cls;
-    r.innerHTML = html;
+  const TYPE_BY_EXT = {
+    html: 'html', htm: 'html',
+    jsx: 'jsx', tsx: 'tsx',
+    md: 'md', markdown: 'md',
+  };
+
+  // ---- lock / unlock ----
+
+  async function validateKey(key) {
+    try {
+      const res = await fetch('/api/artifacts', { headers: { 'Authorization': 'Bearer ' + key } });
+      return res.ok;
+    } catch { return false; }
   }
+
+  function showApp() {
+    $('lock').style.display = 'none';
+    $('app').style.display = 'block';
+    loadList();
+  }
+
+  function showLock() {
+    $('lock').style.display = 'flex';
+    $('app').style.display = 'none';
+    $('lockKey').value = '';
+    $('lockKey').focus();
+  }
+
+  async function tryUnlock() {
+    const key = $('lockKey').value.trim();
+    if (!key) return;
+    $('lockError').textContent = '';
+    if (await validateKey(key)) {
+      KEY = key;
+      localStorage.setItem('artifactsKey', key);
+      showApp();
+    } else {
+      $('lockError').textContent = 'Wrong key';
+      $('lockCard').classList.remove('shake');
+      void $('lockCard').offsetWidth;
+      $('lockCard').classList.add('shake');
+    }
+  }
+
+  $('unlock').addEventListener('click', tryUnlock);
+  $('lockKey').addEventListener('keydown', (e) => { if (e.key === 'Enter') tryUnlock(); });
+  $('logout').addEventListener('click', () => {
+    KEY = '';
+    localStorage.removeItem('artifactsKey');
+    showLock();
+  });
+
+  // ---- publish helpers ----
+
+  function slugify(filename) {
+    const base = filename.replace(/\.[^.]+$/, '');
+    let s = base.toLowerCase().replace(/[^a-z0-9-]+/g, '-').replace(/^-+|-+$/g, '');
+    if (s.length < 3) s = s + '-' + Math.random().toString(36).slice(2, 6);
+    return s.slice(0, 64);
+  }
+
+  async function publish(body) {
+    const res = await fetch('/api/artifacts', { method: 'POST', headers: headers(), body: JSON.stringify(body) });
+    const data = await res.json();
+    return { ok: res.ok, status: res.status, data };
+  }
+
+  function addResult(name, urlOrError, ok) {
+    const div = document.createElement('div');
+    div.className = 'result' + (ok ? '' : ' err');
+    if (ok) {
+      div.innerHTML = '<span class="name"></span><a target="_blank"></a><button>Copy</button>';
+      div.querySelector('.name').textContent = name;
+      const a = div.querySelector('a');
+      a.href = urlOrError; a.textContent = urlOrError;
+      div.querySelector('button').addEventListener('click', () => navigator.clipboard.writeText(urlOrError));
+    } else {
+      div.innerHTML = '<span class="name"></span><span class="msg"></span>';
+      div.querySelector('.name').textContent = name;
+      div.querySelector('.msg').textContent = urlOrError;
+    }
+    $('results').prepend(div);
+  }
+
+  async function publishFile(file) {
+    const ext = (file.name.split('.').pop() || '').toLowerCase();
+    const type = TYPE_BY_EXT[ext];
+    if (!type) return addResult(file.name, 'Unsupported type .' + ext + ' (html/jsx/tsx/md only)', false);
+
+    const content = await file.text();
+    let slug = slugify(file.name);
+    let r = await publish({ content, type, slug, title: file.name });
+    if (r.status === 409) {
+      slug = slug.slice(0, 59) + '-' + Math.random().toString(36).slice(2, 6);
+      r = await publish({ content, type, slug, title: file.name });
+    }
+    if (r.ok) {
+      addResult(file.name, r.data.url, true);
+      navigator.clipboard.writeText(r.data.url).catch(() => {});
+      loadList();
+    } else {
+      addResult(file.name, r.data.error || ('HTTP ' + r.status), false);
+    }
+  }
+
+  // ---- drag & drop ----
+
+  const drop = $('drop');
+  drop.addEventListener('click', () => $('file').click());
+  $('file').addEventListener('change', () => {
+    [...$('file').files].forEach(publishFile);
+    $('file').value = '';
+  });
+
+  let dragDepth = 0;
+  document.addEventListener('dragenter', (e) => {
+    e.preventDefault();
+    dragDepth++;
+    drop.classList.add('over');
+  });
+  document.addEventListener('dragleave', (e) => {
+    e.preventDefault();
+    if (--dragDepth <= 0) { dragDepth = 0; drop.classList.remove('over'); }
+  });
+  document.addEventListener('dragover', (e) => e.preventDefault());
+  document.addEventListener('drop', (e) => {
+    e.preventDefault();
+    dragDepth = 0;
+    drop.classList.remove('over');
+    if ($('app').style.display === 'none' || !$('app').style.display) return;
+    [...e.dataTransfer.files].forEach(publishFile);
+  });
+
+  // ---- paste form ----
 
   $('publish').addEventListener('click', async () => {
     const body = { content: $('content').value, type: $('type').value };
     if ($('slug').value) body.slug = $('slug').value;
     if ($('title').value) body.title = $('title').value;
-    try {
-      const res = await fetch('/api/artifacts', { method: 'POST', headers: headers(), body: JSON.stringify(body) });
-      const data = await res.json();
-      if (!res.ok) return show('err', 'Error: ' + (data.error || res.status));
-      show('ok', 'Published: <a href="' + data.url + '" target="_blank">' + data.url + '</a>');
+    const r = await publish(body);
+    if (r.ok) {
+      addResult('pasted ' + body.type, r.data.url, true);
+      navigator.clipboard.writeText(r.data.url).catch(() => {});
+      $('content').value = '';
       loadList();
-    } catch (e) {
-      show('err', 'Request failed: ' + e.message);
+    } else {
+      addResult('pasted ' + body.type, r.data.error || ('HTTP ' + r.status), false);
     }
   });
 
+  // ---- list ----
+
   async function loadList() {
-    if (!$('key').value) return;
     try {
       const res = await fetch('/api/artifacts', { headers: headers() });
       if (!res.ok) return;
       const items = await res.json();
-      $('rows').innerHTML = items.map((a) =>
-        '<tr><td><a href="/a/' + a.slug + '" target="_blank">' + a.slug + '</a></td>' +
-        '<td>' + a.type + '</td><td>' + (a.title || '') + '</td>' +
-        '<td>' + a.updatedAt.slice(0, 16).replace('T', ' ') + '</td>' +
-        '<td><button class="del" data-slug="' + a.slug + '">delete</button></td></tr>'
-      ).join('');
+      $('rows').innerHTML = '';
+      for (const a of items) {
+        const tr = document.createElement('tr');
+        tr.innerHTML = '<td><a target="_blank"></a></td><td></td><td></td><td></td>' +
+          '<td><button class="ghost small">Copy</button></td><td><button class="del">delete</button></td>';
+        const link = tr.querySelector('a');
+        link.href = '/a/' + a.slug; link.textContent = a.slug;
+        tr.children[1].textContent = a.type;
+        tr.children[2].textContent = a.title || '';
+        tr.children[3].textContent = (a.updatedAt || '').slice(0, 16).replace('T', ' ');
+        tr.querySelector('.ghost').addEventListener('click', () =>
+          navigator.clipboard.writeText(location.origin + '/a/' + a.slug));
+        tr.querySelector('.del').addEventListener('click', async () => {
+          await fetch('/api/artifacts/' + a.slug, { method: 'DELETE', headers: headers() });
+          loadList();
+        });
+        $('rows').appendChild(tr);
+      }
     } catch {}
   }
 
-  $('rows').addEventListener('click', async (e) => {
-    const slug = e.target.dataset && e.target.dataset.slug;
-    if (!slug) return;
-    await fetch('/api/artifacts/' + slug, { method: 'DELETE', headers: headers() });
-    loadList();
-  });
+  // ---- boot ----
 
-  loadList();
+  (async () => {
+    if (KEY && await validateKey(KEY)) showApp();
+    else showLock();
+  })();
 </script>
 </body>
 </html>
