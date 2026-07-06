@@ -45,7 +45,7 @@ docker run -p 3000:3000 -v artifacts-data:/data \
 ```
 POST   /api/artifacts        {content, type: html|jsx|tsx|md, slug?, title?} → 201 {slug, url}
 PUT    /api/artifacts/:slug  {content, type, title?}                         → {slug, url}
-PATCH  /api/artifacts/:slug  {slug?}                                         → {slug, url}   (rename: new slug in body)
+PATCH  /api/artifacts/:slug  {slug?, disabled?}                              → {slug, url}   (rename / disable-enable)
 DELETE /api/artifacts/:slug                                                  → {deleted}
 GET    /api/artifacts        list                                            → [{slug, type, title, createdAt, updatedAt}]
 GET    /a/:slug              rendered artifact (public)
@@ -100,6 +100,8 @@ Streamable HTTP endpoint at `/mcp`, bearer-authenticated. Tools:
 | `publish_artifact` | `content`, `type`, `slug?`, `title?` | public URL |
 | `update_artifact` | `slug`, `content`, `type`, `title?` | public URL |
 | `rename_artifact` | `slug`, `newSlug` | new public URL |
+| `disable_artifact` | `slug` | confirmation (URL serves 404, content kept) |
+| `enable_artifact` | `slug` | confirmation |
 | `list_artifacts` | — | JSON list |
 | `delete_artifact` | `slug` | confirmation |
 

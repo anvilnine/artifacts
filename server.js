@@ -126,6 +126,7 @@ async function saveArtifact({ content, type = 'html', slug, title }, { replace =
   await fs.writeFile(path.join(dir, 'index.html'), html);
   await fs.writeFile(path.join(dir, `source.${SOURCE_EXT[type]}`), content);
   const meta = {
+    ...existing,
     slug: finalSlug,
     type,
     title: finalTitle,
@@ -161,6 +162,13 @@ async function patchArtifact(slug, patch) {
     await fs.rename(dir, artifactDir(patch.slug));
     meta.slug = patch.slug;
     dir = artifactDir(patch.slug);
+  }
+
+  if (patch.disabled !== undefined) {
+    if (typeof patch.disabled !== 'boolean') {
+      throw new ApiError(400, 'disabled must be a boolean');
+    }
+    meta.disabled = patch.disabled || undefined;
   }
 
   meta.updatedAt = new Date().toISOString();
@@ -210,7 +218,8 @@ const ARTIFACT_CSP = [
 
 app.get('/a/:slug', async (req, res) => {
   const { slug } = req.params;
-  if (!SLUG_RE.test(slug) || !(await readMeta(slug))) {
+  const meta = SLUG_RE.test(slug) ? await readMeta(slug) : null;
+  if (!meta || meta.disabled) {
     return res.status(404).type('text/plain').send('artifact not found');
   }
   res.set({
@@ -225,7 +234,7 @@ app.get('/a/:slug', async (req, res) => {
 app.get('/a/:slug/source', async (req, res) => {
   const { slug } = req.params;
   const meta = SLUG_RE.test(slug) ? await readMeta(slug) : null;
-  if (!meta) return res.status(404).type('text/plain').send('artifact not found');
+  if (!meta || meta.disabled) return res.status(404).type('text/plain').send('artifact not found');
   res.set({ 'X-Content-Type-Options': 'nosniff', 'Referrer-Policy': 'no-referrer' });
   res.type('text/plain');
   res.sendFile(path.join(artifactDir(slug), `source.${SOURCE_EXT[meta.type]}`));
@@ -329,6 +338,33 @@ function createMcpServer() {
     async ({ slug, newSlug }) => {
       const { url } = await patchArtifact(slug, { slug: newSlug });
       return { content: [{ type: 'text', text: url }] };
+    },
+  );
+
+  server.registerTool(
+    'disable_artifact',
+    {
+      title: 'Disable artifact',
+      description:
+        'Disable an artifact: its public URL returns 404 but the content is kept. Re-enable with enable_artifact.',
+      inputSchema: { slug: z.string() },
+    },
+    async ({ slug }) => {
+      await patchArtifact(slug, { disabled: true });
+      return { content: [{ type: 'text', text: `disabled ${slug}` }] };
+    },
+  );
+
+  server.registerTool(
+    'enable_artifact',
+    {
+      title: 'Enable artifact',
+      description: 'Re-enable a disabled artifact so its public URL serves again.',
+      inputSchema: { slug: z.string() },
+    },
+    async ({ slug }) => {
+      await patchArtifact(slug, { disabled: false });
+      return { content: [{ type: 'text', text: `enabled ${slug}` }] };
     },
   );
 

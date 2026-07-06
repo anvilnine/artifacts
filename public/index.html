@@ -90,6 +90,8 @@
   #list .del:hover { background: none; text-decoration: underline; }
   #list .act { color: #7d8590; cursor: pointer; background: none; border: none; padding: 0; font-size: 13px; font-weight: 400; }
   #list .act:hover { background: none; color: #e6edf3; text-decoration: underline; }
+  #list tr.off td, #list tr.off a { color: #545d68; }
+  #list tr.off a { text-decoration: line-through; }
 </style>
 </head>
 <body>
@@ -314,6 +316,7 @@
         tr.innerHTML = '<td><a target="_blank"></a></td><td></td><td></td><td></td>' +
           '<td><button class="ghost small">Copy</button></td>' +
           '<td><button class="act ren">rename</button></td>' +
+          '<td><button class="act tgl"></button></td>' +
           '<td><button class="del">delete</button></td>';
         const link = tr.querySelector('a');
         link.href = '/a/' + a.slug; link.textContent = a.slug;
@@ -332,6 +335,15 @@
             const d = await res.json().catch(() => ({}));
             alert(d.error || 'rename failed');
           }
+          loadList();
+        });
+        if (a.disabled) tr.classList.add('off');
+        const tgl = tr.querySelector('.tgl');
+        tgl.textContent = a.disabled ? 'enable' : 'disable';
+        tgl.addEventListener('click', async () => {
+          await fetch('/api/artifacts/' + a.slug, {
+            method: 'PATCH', headers: headers(), body: JSON.stringify({ disabled: !a.disabled }),
+          });
           loadList();
         });
         tr.querySelector('.del').addEventListener('click', async () => {
