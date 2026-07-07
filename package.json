@@ -1,7 +1,22 @@
 {
   "name": "artifacts-host",
   "version": "1.0.0",
-  "description": "Self-hosted publishable artifacts: POST HTML/JSX/Markdown, get a public non-crawlable URL",
+  "description": "Self-hosted publishable artifacts: POST HTML/JSX/Markdown/zip, get a public non-crawlable URL",
+  "license": "MIT",
+  "author": "Zonily Jame",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/kuyazee/artifacts"
+  },
+  "keywords": [
+    "self-hosted",
+    "artifacts",
+    "mcp",
+    "claude",
+    "static-hosting",
+    "express",
+    "pastebin"
+  ],
   "type": "module",
   "main": "server.js",
   "scripts": {
