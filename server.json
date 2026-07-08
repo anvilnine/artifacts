@@ -2,7 +2,7 @@
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "io.github.kuyazee/artifacts",
   "title": "Artifacts",
-  "description": "Self-hosted artifact publishing: agents POST HTML/JSX/Markdown/zip sites and get an unguessable public URL on your own domain",
+  "description": "Self-hosted artifact publishing: POST HTML/JSX/Markdown/zip, get an unguessable URL on your domain",
   "repository": {
     "url": "https://github.com/kuyazee/artifacts",
     "source": "github"
