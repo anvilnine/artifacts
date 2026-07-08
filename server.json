@@ -1,0 +1,37 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.kuyazee/artifacts",
+  "title": "Artifacts",
+  "description": "Self-hosted artifact publishing: agents POST HTML/JSX/Markdown/zip sites and get an unguessable public URL on your own domain",
+  "repository": {
+    "url": "https://github.com/kuyazee/artifacts",
+    "source": "github"
+  },
+  "version": "1.0.0",
+  "websiteUrl": "https://github.com/kuyazee/artifacts",
+  "packages": [
+    {
+      "registryType": "oci",
+      "identifier": "ghcr.io/kuyazee/artifacts:latest",
+      "transport": {
+        "type": "streamable-http",
+        "url": "http://localhost:3000/mcp"
+      },
+      "environmentVariables": [
+        {
+          "name": "ARTIFACTS_API_KEY",
+          "description": "Bearer token required for all writes and the MCP endpoint",
+          "isRequired": true,
+          "isSecret": true,
+          "format": "string"
+        },
+        {
+          "name": "BASE_URL",
+          "description": "Public origin used in returned artifact URLs (e.g. https://artifacts.example.com)",
+          "isRequired": false,
+          "format": "string"
+        }
+      ]
+    }
+  ]
+}
