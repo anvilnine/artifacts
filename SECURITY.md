@@ -12,8 +12,9 @@ This service intentionally executes uploaded HTML/JS in the visitor's browser �
 - **Reads are gated by unguessable slugs.** Any way to enumerate or list artifacts without the key is a vulnerability.
 - **The filesystem is contained.** Path traversal out of an artifact's directory (via URLs or zip contents) is a vulnerability.
 - **Artifacts must not be indexable** (`X-Robots-Tag`, `robots.txt`).
+- **Hardening headers stay on artifact responses:** `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`, and a CSP that limits external requests to esm.sh and major CDNs. Regressions here are vulnerabilities.
 
 Not vulnerabilities:
 
-- Uploaded content doing arbitrary things *within its own page* (that's by design — deploy on a dedicated subdomain that serves nothing else and sets no cookies, as the README instructs).
+- Uploaded content doing arbitrary things *within its own page* (that's by design — deploy on a dedicated subdomain that serves nothing else and sets no cookies, as [docs/deploy.md](docs/deploy.md) instructs).
 - Issues requiring possession of the API key.
