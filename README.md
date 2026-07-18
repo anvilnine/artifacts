@@ -15,6 +15,7 @@ AI assistants generate a lot of shareable output — dashboards, prototypes, rep
 - **Four content types:** HTML, JSX/TSX (single React component, no build step), Markdown, and zipped static sites.
 - **Agent-native, human-friendly:** built-in MCP server — Claude Code, Codex, or any MCP client publishes with one tool call. Humans get a drag-and-drop web UI at `/` (locked behind your API key) and a [CLI](docs/cli.md).
 - **Private by default:** unguessable slugs, `noindex` everywhere, bearer-key writes, optional expiry.
+- **Optional viewer frame:** a slim top toolbar (title, copy link, hide) like Claude/Gemini/ChatGPT artifacts — toggle it globally in Settings or per artifact; `?raw=1` always serves the bare content.
 - **Lifecycle controls:** custom slugs, rename, disable without deleting, auto-expire, delete.
 - **Intentionally boring:** one container, no database, no accounts — artifacts are plain files under `/data`.
 

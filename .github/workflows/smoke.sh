@@ -22,10 +22,27 @@ expect_code 401 "$code" "unauth publish"
 code=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/api/artifacts" -H "$AUTH" -H "$JSON" -d '{"content":"<h1>smoke</h1>","type":"html","slug":"ci-smoke"}')
 expect_code 201 "$code" "publish html"
 
-# public read -> 200 and body contains content
+# public raw read -> 200 and body contains content
+body=$(curl -s "$BASE/a/ci-smoke?raw=1")
+echo "$body" | grep -q "<h1>smoke</h1>" || fail "raw artifact body missing content"
+echo "ok: raw artifact body served"
+
+# framed view (frame is on by default) -> wrapper embeds the raw artifact in an iframe
 body=$(curl -s "$BASE/a/ci-smoke")
-echo "$body" | grep -q "smoke" || fail "artifact body missing content"
-echo "ok: artifact body served"
+echo "$body" | grep -q 'iframe' || fail "framed view missing iframe"
+echo "ok: framed view served"
+
+# global config -> defaults to frame enabled + on by default
+curl -s "$BASE/api/config" -H "$AUTH" | grep -q '"enabled":true' || fail "config missing enabled:true"
+echo "ok: config endpoint"
+
+# per-item frame off -> /a/slug serves the bare artifact (no iframe), then reset to inherit
+curl -sf -X PATCH "$BASE/api/artifacts/ci-smoke" -H "$AUTH" -H "$JSON" -d '{"frame":false}' > /dev/null
+body=$(curl -s "$BASE/a/ci-smoke")
+if echo "$body" | grep -q '<iframe'; then fail "frame:false still framed"; fi
+echo "$body" | grep -q "<h1>smoke</h1>" || fail "frame:false body missing content"
+echo "ok: per-item frame off"
+curl -sf -X PATCH "$BASE/api/artifacts/ci-smoke" -H "$AUTH" -H "$JSON" -d '{"frame":null}' > /dev/null
 
 # source endpoint -> 200
 code=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/a/ci-smoke/source")
@@ -81,6 +98,11 @@ echo "ok: cli publish"
 node "$CLI_DIR/cli.js" rename ci-cli ci-cli-2 > /dev/null
 code=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/a/ci-cli-2")
 expect_code 200 "$code" "cli rename"
+node "$CLI_DIR/cli.js" config | grep -q '"enabled"' || fail "cli config get"
+echo "ok: cli config"
+node "$CLI_DIR/cli.js" frame ci-cli-2 off > /dev/null
+if curl -s "$BASE/a/ci-cli-2" | grep -q '<iframe'; then fail "cli frame off still framed"; fi
+echo "ok: cli frame off"
 node "$CLI_DIR/cli.js" deploy "$ZIPDIR/site" --slug ci-cli-zip > /dev/null
 code=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/a/ci-cli-zip/css/s.css")
 expect_code 200 "$code" "cli zip deploy"

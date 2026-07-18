@@ -92,6 +92,14 @@
   #list .act:hover { background: none; color: #e6edf3; text-decoration: underline; }
   #list tr.off td, #list tr.off a { color: #545d68; }
   #list tr.off a { text-decoration: line-through; }
+
+  .settings-form { margin-top: 12px; display: flex; flex-direction: column; gap: 12px; }
+  .settings-form label { display: flex; align-items: center; gap: 8px; font-size: 14px; color: #e6edf3; cursor: pointer; }
+  .settings-form label .desc { color: #7d8590; font-size: 12px; }
+  .settings-form input[type=checkbox] { width: 16px; height: 16px; accent-color: #238636; cursor: pointer; }
+  .settings-form .save-row { display: flex; align-items: center; gap: 12px; }
+  .settings-form .save-row button { align-self: flex-start; }
+  .settings-form .saved { color: #3fb950; font-size: 13px; }
 </style>
 </head>
 <body>
@@ -130,11 +138,34 @@
           <option value="tsx">tsx</option>
           <option value="md">md</option>
         </select>
+        <select id="frame" title="Top viewer frame">
+          <option value="default">frame: default</option>
+          <option value="on">frame: on</option>
+          <option value="off">frame: off</option>
+        </select>
         <input id="slug" placeholder="custom slug (optional)">
         <input id="title" placeholder="title (optional)">
       </div>
       <textarea id="content" placeholder="Paste HTML, a React component with a default export, or Markdown…" spellcheck="false"></textarea>
       <button id="publish">Publish</button>
+    </div>
+  </details>
+
+  <details id="settings">
+    <summary>Settings</summary>
+    <div class="settings-form">
+      <label>
+        <input type="checkbox" id="frameEnabled">
+        <span>Frame enabled globally <span class="desc">— master switch for the top viewer frame</span></span>
+      </label>
+      <label>
+        <input type="checkbox" id="frameDefault">
+        <span>Frame on by default <span class="desc">— applied to artifacts with no per-item setting</span></span>
+      </label>
+      <div class="save-row">
+        <button id="saveSettings">Save settings</button>
+        <span class="saved" id="settingsSaved"></span>
+      </div>
     </div>
   </details>
 
@@ -172,6 +203,7 @@
     $('lock').style.display = 'none';
     $('app').style.display = 'block';
     loadList();
+    loadConfig();
   }
 
   function showLock() {
@@ -310,6 +342,7 @@
     const body = { content: $('content').value, type: $('type').value };
     if ($('slug').value) body.slug = $('slug').value;
     if ($('title').value) body.title = $('title').value;
+    if ($('frame').value !== 'default') body.frame = $('frame').value === 'on';
     const r = await publish(body);
     if (r.ok) {
       addResult('pasted ' + body.type, r.data.url, true);
@@ -334,6 +367,7 @@
         tr.innerHTML = '<td><a target="_blank"></a></td><td></td><td></td><td></td>' +
           '<td><button class="ghost small">Copy</button></td>' +
           '<td><button class="act ren">rename</button></td>' +
+          '<td><button class="act frm"></button></td>' +
           '<td><button class="act tgl"></button></td>' +
           '<td><button class="act exp"></button></td>' +
           '<td><button class="del">delete</button></td>';
@@ -356,6 +390,19 @@
           }
           loadList();
         });
+        const frm = tr.querySelector('.frm');
+        const fstate = a.frame === true ? 'on' : a.frame === false ? 'off' : 'auto';
+        frm.textContent = 'frame:' + fstate;
+        frm.title = 'Toggle top frame (auto → on → off)';
+        frm.addEventListener('click', async () => {
+          // cycle: auto (undefined) → on (true) → off (false) → auto (null)
+          const next = a.frame === undefined ? true : a.frame === true ? false : null;
+          await fetch('/api/artifacts/' + a.slug, {
+            method: 'PATCH', headers: headers(), body: JSON.stringify({ frame: next }),
+          });
+          loadList();
+        });
+
         if (a.disabled) tr.classList.add('off');
         const tgl = tr.querySelector('.tgl');
         tgl.textContent = a.disabled ? 'enable' : 'disable';
@@ -393,6 +440,36 @@
       }
     } catch {}
   }
+
+  // ---- settings (global config) ----
+
+  async function loadConfig() {
+    try {
+      const res = await fetch('/api/config', { headers: headers() });
+      if (!res.ok) return;
+      const cfg = await res.json();
+      $('frameEnabled').checked = !!(cfg.frame && cfg.frame.enabled);
+      $('frameDefault').checked = !!(cfg.frame && cfg.frame.default);
+    } catch {}
+  }
+
+  $('saveSettings').addEventListener('click', async () => {
+    const body = { frame: { enabled: $('frameEnabled').checked, default: $('frameDefault').checked } };
+    const el = $('settingsSaved');
+    el.textContent = '';
+    try {
+      const res = await fetch('/api/config', { method: 'PUT', headers: headers(), body: JSON.stringify(body) });
+      if (res.ok) {
+        el.textContent = 'Saved';
+        setTimeout(() => { el.textContent = ''; }, 1500);
+      } else {
+        const d = await res.json().catch(() => ({}));
+        el.textContent = d.error || 'Save failed';
+      }
+    } catch {
+      el.textContent = 'Save failed';
+    }
+  });
 
   // ---- boot ----
 

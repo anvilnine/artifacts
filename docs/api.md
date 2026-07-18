@@ -5,13 +5,16 @@ Full HTTP reference, including zip-site deploys. ([← back to README](../README
 All `/api/*` and `/mcp` calls need `Authorization: Bearer $ARTIFACTS_API_KEY`. Reads under `/a/` are public.
 
 ```
-POST   /api/artifacts        {content, type: html|jsx|tsx|md, slug?, title?, expiresAt?} → 201 {slug, url}
+POST   /api/artifacts        {content, type: html|jsx|tsx|md, slug?, title?, expiresAt?, frame?} → 201 {slug, url}
 POST   /api/artifacts/zip    raw zip body (?slug=&title=&expiresAt=)         → 201 {slug, url, files}
-PUT    /api/artifacts/:slug  {content, type, title?, expiresAt?}             → {slug, url}
-PATCH  /api/artifacts/:slug  {slug?, disabled?, expiresAt?}                  → {slug, url}   (rename / disable / expiry)
+PUT    /api/artifacts/:slug  {content, type, title?, expiresAt?, frame?}     → {slug, url}
+PATCH  /api/artifacts/:slug  {slug?, disabled?, expiresAt?, frame?}          → {slug, url}   (rename / disable / expiry / frame)
 DELETE /api/artifacts/:slug                                                  → {deleted}
-GET    /api/artifacts        list                                            → [{slug, type, title, createdAt, updatedAt}]
-GET    /a/:slug              rendered artifact (public)
+GET    /api/artifacts        list                                            → [{slug, type, title, frame?, createdAt, updatedAt}]
+GET    /api/config           {frame: {enabled, default}}                     → global frame config
+PUT    /api/config           {frame: {enabled?, default?}}                   → updated config
+GET    /a/:slug              rendered artifact, framed when active (public)
+GET    /a/:slug?raw=1        bare artifact without the frame (public)
 GET    /a/:slug/source       original uploaded source, text/plain (public)
 ```
 
@@ -20,6 +23,17 @@ Semantics:
 - Body limits: 10 MB JSON, 50 MB zip.
 - `POST` with an existing slug → `409` (use `PUT` to update).
 - Disabled artifacts return `404`; expired ones (`expiresAt` in the past) return `410`. Both keep their content — re-enable or clear/extend the expiry to serve again.
+
+## Viewer frame
+
+`GET /a/:slug` can wrap the artifact in a slim top frame (title + copy-link + hide toggle) that loads the artifact in an iframe. `?raw=1` always returns the bare artifact — it's the URL the frame's iframe points at, and the escape hatch for embedding.
+
+Whether an artifact is framed resolves as `config.frame.enabled && (meta.frame ?? config.frame.default)`:
+
+- **`GET/PUT /api/config`** manage the global `{frame: {enabled, default}}` (both booleans). `enabled` is the master switch; `default` applies to items with no per-item value. `PUT` accepts a partial `frame` object and merges it. First boot seeds the config from the optional `FRAME_ENABLED` / `FRAME_DEFAULT` env vars (both default `true`), persisting it to `DATA_DIR/config.json`.
+- **Per item**, the `frame` field on `POST` / `PUT` / `PATCH` is `true` (always framed), `false` (never framed), or — via `PATCH {"frame": null}` — cleared so the item inherits the global default.
+
+When the frame is globally disabled or off for an item, `/a/:slug` serves the artifact exactly as `?raw=1` does.
 
 Publish a file:
 

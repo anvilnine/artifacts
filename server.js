@@ -28,8 +28,72 @@ await fs.mkdir(ARTIFACTS_DIR, { recursive: true });
 
 const nanoid = customAlphabet('abcdefghijklmnopqrstuvwxyz0123456789', 10);
 
+// ---------------------------------------------------------------------------
+// Server config (DATA_DIR/config.json) — global frame settings
+// ---------------------------------------------------------------------------
+
+const CONFIG_PATH = path.join(DATA_DIR, 'config.json');
+
+function boolEnv(name) {
+  const v = process.env[name];
+  if (v === undefined) return undefined;
+  return v === '1' || v.toLowerCase() === 'true';
+}
+
+const DEFAULT_CONFIG = {
+  frame: {
+    enabled: boolEnv('FRAME_ENABLED') ?? true,
+    default: boolEnv('FRAME_DEFAULT') ?? true,
+  },
+};
+
+function normalizeConfig(raw) {
+  const frame = raw?.frame || {};
+  return {
+    frame: {
+      enabled: typeof frame.enabled === 'boolean' ? frame.enabled : DEFAULT_CONFIG.frame.enabled,
+      default: typeof frame.default === 'boolean' ? frame.default : DEFAULT_CONFIG.frame.default,
+    },
+  };
+}
+
+async function loadConfig() {
+  try {
+    return normalizeConfig(JSON.parse(await fs.readFile(CONFIG_PATH, 'utf8')));
+  } catch {
+    await fs.writeFile(CONFIG_PATH, JSON.stringify(DEFAULT_CONFIG, null, 2));
+    return DEFAULT_CONFIG;
+  }
+}
+
+let config = await loadConfig();
+
+async function updateConfig(patch) {
+  const frame = patch?.frame || {};
+  for (const key of ['enabled', 'default']) {
+    if (frame[key] !== undefined && typeof frame[key] !== 'boolean') {
+      throw new ApiError(400, `frame.${key} must be a boolean`);
+    }
+  }
+  config = {
+    frame: {
+      enabled: frame.enabled ?? config.frame.enabled,
+      default: frame.default ?? config.frame.default,
+    },
+  };
+  await fs.writeFile(CONFIG_PATH, JSON.stringify(config, null, 2));
+  return config;
+}
+
+// Whether the viewer frame is shown for this artifact: global master switch
+// AND (per-item override, or the global default when the item has no override).
+function frameActive(meta) {
+  return config.frame.enabled && (typeof meta.frame === 'boolean' ? meta.frame : config.frame.default);
+}
+
 const JSX_SHELL = await fs.readFile(path.join(__dirname, 'shells', 'jsx.html'), 'utf8');
 const MD_SHELL = await fs.readFile(path.join(__dirname, 'shells', 'md.html'), 'utf8');
+const FRAME_SHELL = await fs.readFile(path.join(__dirname, 'shells', 'frame.html'), 'utf8');
 
 const TYPES = ['html', 'jsx', 'tsx', 'md'];
 const SLUG_RE = /^[a-z0-9][a-z0-9-]{2,63}$/;
@@ -72,6 +136,13 @@ function buildMdHtml(source, title) {
   return MD_SHELL
     .replace('{{TITLE}}', escapeHtml(title))
     .replace('{{CONTENT}}', marked.parse(source));
+}
+
+// Parent "frame" page: a slim toolbar with the artifact loaded in an iframe.
+function buildFrameHtml(meta, rawUrl) {
+  return FRAME_SHELL
+    .replaceAll('{{TITLE}}', escapeHtml(meta.title || meta.slug))
+    .replaceAll('{{RAW_URL}}', escapeHtml(rawUrl));
 }
 
 function escapeHtml(s) {
@@ -216,9 +287,12 @@ function isExpired(meta) {
   return Boolean(meta.expiresAt && Date.parse(meta.expiresAt) <= Date.now());
 }
 
-async function saveArtifact({ content, type = 'html', slug, title, expiresAt }, { replace = false } = {}) {
+async function saveArtifact({ content, type = 'html', slug, title, expiresAt, frame }, { replace = false } = {}) {
   if (typeof content !== 'string' || !content.trim()) {
     throw new ApiError(400, 'content (non-empty string) is required');
+  }
+  if (frame !== undefined && typeof frame !== 'boolean') {
+    throw new ApiError(400, 'frame must be a boolean');
   }
   const expiry = expiresAt !== undefined ? parseExpiresAt(expiresAt) : undefined;
   if (!TYPES.includes(type)) {
@@ -258,6 +332,7 @@ async function saveArtifact({ content, type = 'html', slug, title, expiresAt }, 
     updatedAt: new Date().toISOString(),
   };
   if (expiresAt !== undefined) meta.expiresAt = expiry;
+  if (frame !== undefined) meta.frame = frame;
   await fs.writeFile(path.join(dir, 'meta.json'), JSON.stringify(meta, null, 2));
   return { slug: finalSlug, url: `${BASE_URL}/a/${finalSlug}` };
 }
@@ -294,6 +369,16 @@ async function patchArtifact(slug, patch) {
       throw new ApiError(400, 'disabled must be a boolean');
     }
     meta.disabled = patch.disabled || undefined;
+  }
+
+  if (patch.frame !== undefined) {
+    if (patch.frame === null) {
+      delete meta.frame; // reset to inherit the global default
+    } else if (typeof patch.frame === 'boolean') {
+      meta.frame = patch.frame;
+    } else {
+      throw new ApiError(400, 'frame must be a boolean or null');
+    }
   }
 
   if (patch.expiresAt !== undefined) {
@@ -345,6 +430,15 @@ const ARTIFACT_CSP = [
   "img-src * data: blob:",
 ].join(' ');
 
+// The frame wrapper is our own page: inline styles/script + a same-origin iframe.
+const FRAME_CSP = [
+  "default-src 'self';",
+  "style-src 'self' 'unsafe-inline';",
+  "script-src 'self' 'unsafe-inline';",
+  "img-src 'self' data:;",
+  "frame-src 'self';",
+].join(' ');
+
 app.get('/a/:slug', async (req, res) => {
   const { slug } = req.params;
   const meta = SLUG_RE.test(slug) ? await readMeta(slug) : null;
@@ -354,6 +448,24 @@ app.get('/a/:slug', async (req, res) => {
   if (isExpired(meta)) {
     return res.status(410).type('text/plain').send('artifact expired');
   }
+
+  // Framed view: serve the wrapper page (toolbar + iframe → ?raw=1). `?raw=1`
+  // is the escape hatch the iframe uses to load the bare artifact.
+  const wantsRaw = req.query.raw !== undefined;
+  if (frameActive(meta) && !wantsRaw) {
+    if (meta.type === 'zip' && !req.path.endsWith('/')) {
+      return res.redirect(301, `/a/${slug}/`);
+    }
+    const rawUrl = meta.type === 'zip' ? `/a/${slug}/?raw=1` : `/a/${slug}?raw=1`;
+    res.set({
+      'Content-Security-Policy': FRAME_CSP,
+      'X-Content-Type-Options': 'nosniff',
+      'Referrer-Policy': 'no-referrer',
+      'Cache-Control': 'no-cache',
+    });
+    return res.type('html').send(buildFrameHtml(meta, rawUrl));
+  }
+
   res.set({
     'Content-Security-Policy': ARTIFACT_CSP,
     'X-Content-Type-Options': 'nosniff',
@@ -464,6 +576,18 @@ app.get('/api/artifacts', requireAuth, async (req, res, next) => {
   }
 });
 
+app.get('/api/config', requireAuth, (req, res) => {
+  res.json(config);
+});
+
+app.put('/api/config', requireAuth, async (req, res, next) => {
+  try {
+    res.json(await updateConfig(req.body));
+  } catch (err) {
+    next(err);
+  }
+});
+
 // ---------------------------------------------------------------------------
 // MCP (streamable HTTP, stateless)
 // ---------------------------------------------------------------------------
@@ -486,6 +610,10 @@ function createMcpServer() {
           .string()
           .optional()
           .describe('ISO 8601 datetime after which the URL stops serving (410)'),
+        frame: z
+          .boolean()
+          .optional()
+          .describe('Show the top viewer frame for this artifact, overriding the server default'),
       },
     },
     async (args) => {
@@ -504,6 +632,10 @@ function createMcpServer() {
         content: z.string(),
         type: z.enum(['html', 'jsx', 'tsx', 'md']).default('html'),
         title: z.string().optional(),
+        frame: z
+          .boolean()
+          .optional()
+          .describe('Show the top viewer frame for this artifact, overriding the server default'),
       },
     },
     async (args) => {
@@ -573,6 +705,28 @@ function createMcpServer() {
     async ({ slug }) => {
       await patchArtifact(slug, { disabled: false });
       return { content: [{ type: 'text', text: `enabled ${slug}` }] };
+    },
+  );
+
+  server.registerTool(
+    'set_artifact_frame',
+    {
+      title: 'Set artifact frame',
+      description:
+        'Control the top viewer frame for an artifact: true = always framed, false = never framed, null = inherit the server default.',
+      inputSchema: {
+        slug: z.string(),
+        frame: z
+          .boolean()
+          .nullable()
+          .describe('true = framed, false = unframed, null = inherit the global default'),
+      },
+    },
+    async ({ slug, frame }) => {
+      await patchArtifact(slug, { frame });
+      const text =
+        frame === null ? `frame reset to default for ${slug}` : `frame ${frame ? 'on' : 'off'} for ${slug}`;
+      return { content: [{ type: 'text', text }] };
     },
   );
 

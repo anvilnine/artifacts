@@ -8,16 +8,18 @@ import AdmZip from 'adm-zip';
 const USAGE = `artifacts — publish to a self-hosted artifacts instance
 
 Usage:
-  artifacts publish <file> [--slug s] [--title t] [--expires ISO] [--type html|jsx|tsx|md]
+  artifacts publish <file> [--slug s] [--title t] [--expires ISO] [--type html|jsx|tsx|md] [--frame on|off]
   artifacts deploy <dir|zip> [--slug s] [--title t] [--expires ISO]
   artifacts update <slug> <file> [--title t] [--type html|jsx|tsx|md]
   artifacts list
   artifacts rename <slug> <new-slug>
   artifacts disable <slug>
   artifacts enable <slug>
+  artifacts frame <slug> <on|off|default>
   artifacts expire <slug> <ISO-date|never>
   artifacts delete <slug>
   artifacts source <slug> [-o file]
+  artifacts config [--frame-enabled true|false] [--frame-default true|false]
 
 Connection (flags override env):
   --url   server origin        [env: ARTIFACTS_URL]
@@ -33,6 +35,9 @@ const { values: opts, positionals } = parseArgs({
     title: { type: 'string' },
     expires: { type: 'string' },
     type: { type: 'string' },
+    frame: { type: 'string' },
+    'frame-enabled': { type: 'string' },
+    'frame-default': { type: 'string' },
     output: { type: 'string', short: 'o' },
     help: { type: 'boolean', short: 'h' },
   },
@@ -86,6 +91,12 @@ function need(count, hint) {
   if (args.length < count) fail(`usage: artifacts ${command} ${hint}`);
 }
 
+function parseBool(value, name) {
+  if (value === 'true' || value === '1') return true;
+  if (value === 'false' || value === '0') return false;
+  fail(`${name} must be true or false`);
+}
+
 switch (command) {
   case 'publish': {
     need(1, '<file> [--slug s] [--title t] [--expires ISO] [--type t]');
@@ -96,6 +107,7 @@ switch (command) {
       ...(opts.slug && { slug: opts.slug }),
       ...(opts.title && { title: opts.title }),
       ...(opts.expires && { expiresAt: opts.expires }),
+      ...(opts.frame && opts.frame !== 'default' && { frame: opts.frame === 'on' }),
     });
     console.log(out.url);
     break;
@@ -140,7 +152,8 @@ switch (command) {
   case 'list': {
     const artifacts = await apiJson('GET', '/api/artifacts');
     for (const a of artifacts) {
-      const flags = [a.disabled && 'disabled', a.expiresAt && `expires ${a.expiresAt}`].filter(Boolean);
+      const frameFlag = a.frame === true ? 'frame:on' : a.frame === false ? 'frame:off' : null;
+      const flags = [a.disabled && 'disabled', frameFlag, a.expiresAt && `expires ${a.expiresAt}`].filter(Boolean);
       console.log(`${a.slug}\t${a.type}\t${a.title || ''}${flags.length ? `\t[${flags.join(', ')}]` : ''}`);
     }
     break;
@@ -158,6 +171,26 @@ switch (command) {
     need(1, '<slug>');
     await apiJson('PATCH', `/api/artifacts/${args[0]}`, { disabled: command === 'disable' });
     console.log(`${args[0]} ${command}d`);
+    break;
+  }
+
+  case 'frame': {
+    need(2, '<slug> <on|off|default>');
+    const map = { on: true, off: false, default: null };
+    if (!(args[1] in map)) fail('frame value must be on, off, or default');
+    await apiJson('PATCH', `/api/artifacts/${args[0]}`, { frame: map[args[1]] });
+    console.log(`${args[0]} frame ${args[1]}`);
+    break;
+  }
+
+  case 'config': {
+    const frame = {};
+    if (opts['frame-enabled'] !== undefined) frame.enabled = parseBool(opts['frame-enabled'], '--frame-enabled');
+    if (opts['frame-default'] !== undefined) frame.default = parseBool(opts['frame-default'], '--frame-default');
+    const out = Object.keys(frame).length
+      ? await apiJson('PUT', '/api/config', { frame })
+      : await apiJson('GET', '/api/config');
+    console.log(JSON.stringify(out, null, 2));
     break;
   }
 
