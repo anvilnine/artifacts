@@ -34,6 +34,38 @@ Note: rendering uses esm.sh + Tailwind CDN, so artifacts need internet to render
 
 A zipped static project (HTML + CSS + JS + images) served under `/a/{slug}/`. Upload via the web UI (drop a `.zip`), the [CLI](cli.md) (`artifacts deploy ./dir`), or the [zip endpoint](api.md#zip-sites-multi-file-static-projects) — validation rules and limits are documented there.
 
+### Static framework builds (Astro, Vite, etc.)
+
+Output from static site generators drops straight into the zip endpoint — an Astro `astro build` (or Vite/Eleventy/etc.) `dist/` folder is just HTML + CSS + JS. The one thing to watch: because sites are served under the `/a/{slug}/` **subpath**, a build that emits **root-absolute** asset URLs (`/_astro/app.css`, `/assets/index.js`) will 404 — those resolve to the domain root, not the artifact. Build with the framework's base/subpath option set to `/a/{slug}/`:
+
+- **Astro** — `base: '/a/{slug}/'` in `astro.config.mjs`
+- **Vite** — `base: '/a/{slug}/'` in `vite.config.js`
+- **Next.js** (`next export`) — `basePath` + `assetPrefix` of `/a/{slug}/`
+
+The slug you build for must match the slug you deploy to. See [`examples/astro-demo`](../examples/astro-demo) for a working Astro project.
+
+### Flutter web (SPA)
+
+A `flutter build web` output hosts as a zip site, but Flutter needs a bit more than a base path
+because its engine pulls resources from Google CDNs by default. Build it **self-contained**:
+
+- **Base href** — `flutter build web --base-href /a/{slug}/` (same subpath rule as above).
+- **Local engine** — add `--no-web-resources-cdn` so CanvasKit/skwasm is served from the artifact
+  rather than `gstatic.com` (which the artifact [CSP](../SECURITY.md) blocks).
+- **Bundled font** — bundle a text font and set it as the app's default `fontFamily`, so the engine
+  doesn't fetch its Roboto fallback from Google Fonts.
+
+Use Flutter's default **hash** routing (`/#/…`); deep links then need no server-side SPA fallback.
+
+The zip validator accepts Flutter's build artifacts (`AssetManifest.bin`, `NOTICES`, `*.frag`
+shaders, `*.js.symbols`, the local `canvaskit/` wasm). See [`examples/flutter-demo`](../examples/flutter-demo)
+for a working, fully self-contained Flutter web app.
+
+> **Full-screen apps and the viewer frame:** by default artifacts render inside the viewer frame
+> (below). A full-page app like Flutter runs fine inside the frame's iframe, but if you want it
+> edge-to-edge, append `?raw=1` to the URL or turn the frame off for that artifact
+> (`artifacts frame <slug> off`).
+
 ## Viewer frame
 
 Any of the above can render inside a slim top **frame** — a toolbar with the title, a copy-link button, and a hide toggle — with the artifact itself isolated in an iframe. Toggle it globally from the web UI's **Settings** panel (or `artifacts config`), and override it per artifact (`artifacts frame <slug> on|off|default`). Append `?raw=1` to any URL to view the artifact with no frame. Full behavior in [docs/api.md](api.md#viewer-frame).
