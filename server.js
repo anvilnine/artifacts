@@ -11,10 +11,11 @@ import { z } from 'zod';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 
+import { createStorage, UnsafeKeyError } from './storage/index.js';
+
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 const PORT = Number(process.env.PORT || 3000);
-const DATA_DIR = path.resolve(process.env.DATA_DIR || '/data');
 const BASE_URL = (process.env.BASE_URL || `http://localhost:${PORT}`).replace(/\/$/, '');
 const API_KEY = process.env.ARTIFACTS_API_KEY;
 
@@ -23,8 +24,9 @@ if (!API_KEY) {
   process.exit(1);
 }
 
-const ARTIFACTS_DIR = path.join(DATA_DIR, 'artifacts');
-await fs.mkdir(ARTIFACTS_DIR, { recursive: true });
+// The pluggable storage backend (default `local`). Instantiated once at boot; every
+// artifact read/write flows through it. Fail-fast here, like the API-key check above.
+const storage = await createStorage();
 
 const nanoid = customAlphabet('abcdefghijklmnopqrstuvwxyz0123456789', 10);
 
@@ -87,13 +89,11 @@ class ApiError extends Error {
   }
 }
 
-function artifactDir(slug) {
-  return path.join(ARTIFACTS_DIR, slug);
-}
-
 async function readMeta(slug) {
+  const buf = await storage.getBuffer(`${slug}/meta.json`);
+  if (!buf) return null;
   try {
-    return JSON.parse(await fs.readFile(path.join(artifactDir(slug), 'meta.json'), 'utf8'));
+    return JSON.parse(buf.toString('utf8'));
   } catch {
     return null;
   }
@@ -188,11 +188,8 @@ async function saveZipArtifact(buffer, { slug, title, expiresAt, tags }) {
     throw new ApiError(409, `slug "${finalSlug}" already exists`);
   }
 
-  const siteDir = path.join(artifactDir(finalSlug), 'site');
   for (const { relPath, entry } of files) {
-    const target = path.join(siteDir, relPath);
-    await fs.mkdir(path.dirname(target), { recursive: true });
-    await fs.writeFile(target, entry.getData());
+    await storage.put(`${finalSlug}/site/${relPath}`, entry.getData());
   }
   const meta = {
     slug: finalSlug,
@@ -204,7 +201,10 @@ async function saveZipArtifact(buffer, { slug, title, expiresAt, tags }) {
   };
   if (expiry !== undefined) meta.expiresAt = expiry;
   if (tagList?.length) meta.tags = tagList;
-  await fs.writeFile(path.join(artifactDir(finalSlug), 'meta.json'), JSON.stringify(meta, null, 2));
+  // meta.json LAST: a crash mid-upload leaves the namespace invisible (404), not half-served.
+  await storage.put(`${finalSlug}/meta.json`, JSON.stringify(meta, null, 2), {
+    contentType: 'application/json',
+  });
   return { slug: finalSlug, url: `${BASE_URL}/a/${finalSlug}/`, files: files.length };
 }
 
@@ -254,7 +254,6 @@ async function saveArtifact({ content, type = 'html', slug, title, expiresAt, ta
     throw new ApiError(400, 'slug must match [a-z0-9][a-z0-9-]{2,63}');
   }
   const finalSlug = slug || nanoid();
-  const dir = artifactDir(finalSlug);
   const existing = await readMeta(finalSlug);
   if (existing && !replace) {
     throw new ApiError(409, `slug "${finalSlug}" already exists`);
@@ -272,9 +271,10 @@ async function saveArtifact({ content, type = 'html', slug, title, expiresAt, ta
   else if (type === 'md') html = buildMdHtml(content, finalTitle);
   else html = buildJsxHtml(content, finalTitle);
 
-  await fs.mkdir(dir, { recursive: true });
-  await fs.writeFile(path.join(dir, 'index.html'), html);
-  await fs.writeFile(path.join(dir, `source.${SOURCE_EXT[type]}`), content);
+  await storage.put(`${finalSlug}/index.html`, html, { contentType: 'text/html; charset=utf-8' });
+  await storage.put(`${finalSlug}/source.${SOURCE_EXT[type]}`, content, {
+    contentType: 'text/plain; charset=utf-8',
+  });
   const meta = {
     ...existing,
     slug: finalSlug,
@@ -285,16 +285,23 @@ async function saveArtifact({ content, type = 'html', slug, title, expiresAt, ta
   };
   if (expiresAt !== undefined) meta.expiresAt = expiry;
   if (tagList !== undefined) meta.tags = tagList.length ? tagList : undefined;
-  await fs.writeFile(path.join(dir, 'meta.json'), JSON.stringify(meta, null, 2));
+  // meta.json LAST as the commit marker (see storage/index.js write-ordering contract).
+  await storage.put(`${finalSlug}/meta.json`, JSON.stringify(meta, null, 2), {
+    contentType: 'application/json',
+  });
   return { slug: finalSlug, url: `${BASE_URL}/a/${finalSlug}` };
 }
 
 async function listArtifacts({ tag } = {}) {
-  const entries = await fs.readdir(ARTIFACTS_DIR, { withFileTypes: true });
-  const metas = await Promise.all(
-    entries.filter((e) => e.isDirectory()).map((e) => readMeta(e.name)),
-  );
+  const metas = await storage.listMetas();
   let items = metas
+    .map(({ buffer }) => {
+      try {
+        return JSON.parse(buffer.toString('utf8'));
+      } catch {
+        return null; // skip a corrupt meta rather than failing the whole list
+      }
+    })
     .filter(Boolean)
     .map((m) => ({ ...m, tags: m.tags || [] }))
     .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
@@ -311,7 +318,7 @@ async function patchArtifact(slug, patch) {
     throw new ApiError(404, `slug "${slug}" not found`);
   }
 
-  let dir = artifactDir(slug);
+  let activeSlug = slug;
   if (patch.slug !== undefined && patch.slug !== slug) {
     if (!SLUG_RE.test(patch.slug)) {
       throw new ApiError(400, 'slug must match [a-z0-9][a-z0-9-]{2,63}');
@@ -319,9 +326,9 @@ async function patchArtifact(slug, patch) {
     if (await readMeta(patch.slug)) {
       throw new ApiError(409, `slug "${patch.slug}" already exists`);
     }
-    await fs.rename(dir, artifactDir(patch.slug));
+    await storage.move(slug, patch.slug);
     meta.slug = patch.slug;
-    dir = artifactDir(patch.slug);
+    activeSlug = patch.slug;
   }
 
   if (patch.disabled !== undefined) {
@@ -341,7 +348,9 @@ async function patchArtifact(slug, patch) {
   }
 
   meta.updatedAt = new Date().toISOString();
-  await fs.writeFile(path.join(dir, 'meta.json'), JSON.stringify(meta, null, 2));
+  await storage.put(`${activeSlug}/meta.json`, JSON.stringify(meta, null, 2), {
+    contentType: 'application/json',
+  });
   return { slug: meta.slug, url: `${BASE_URL}/a/${meta.slug}` };
 }
 
@@ -349,7 +358,7 @@ async function deleteArtifact(slug) {
   if (!SLUG_RE.test(slug) || !(await readMeta(slug))) {
     throw new ApiError(404, `slug "${slug}" not found`);
   }
-  await fs.rm(artifactDir(slug), { recursive: true, force: true });
+  await storage.deleteSlug(slug);
 }
 
 // ---------------------------------------------------------------------------
@@ -385,6 +394,119 @@ const ARTIFACT_CSP = [
   "img-src * data: blob:",
 ].join(' ');
 
+// Artifact hardening headers, set before any object body is streamed.
+const ARTIFACT_HEADERS = {
+  'Content-Security-Policy': ARTIFACT_CSP,
+  'X-Content-Type-Options': 'nosniff',
+  'Referrer-Policy': 'no-referrer',
+  'Cache-Control': 'no-cache',
+};
+
+// Strict extension -> MIME map covering every extension the zip validator allows
+// (ZIP_ALLOWED_EXT) plus inline outputs. The app owns Content-Type — it is never sniffed
+// nor taken from a backend's stored metadata. An unknown extension serves as
+// application/octet-stream, never text/html, so an unexpected file can't be made to execute.
+const EXT_MIME = {
+  html: 'text/html; charset=utf-8', htm: 'text/html; charset=utf-8',
+  css: 'text/css; charset=utf-8',
+  js: 'text/javascript; charset=utf-8', mjs: 'text/javascript; charset=utf-8',
+  json: 'application/json; charset=utf-8', map: 'application/json; charset=utf-8',
+  txt: 'text/plain; charset=utf-8', md: 'text/plain; charset=utf-8',
+  xml: 'application/xml; charset=utf-8', csv: 'text/csv; charset=utf-8',
+  png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif',
+  svg: 'image/svg+xml', webp: 'image/webp', ico: 'image/x-icon', avif: 'image/avif',
+  woff: 'font/woff', woff2: 'font/woff2', ttf: 'font/ttf', otf: 'font/otf',
+  eot: 'application/vnd.ms-fontobject',
+  mp3: 'audio/mpeg', wav: 'audio/wav', ogg: 'audio/ogg',
+  mp4: 'video/mp4', webm: 'video/webm',
+  pdf: 'application/pdf', wasm: 'application/wasm',
+  webmanifest: 'application/manifest+json',
+};
+
+function mimeForKey(key) {
+  const ext = path.posix.extname(key).slice(1).toLowerCase();
+  return EXT_MIME[ext] || 'application/octet-stream';
+}
+
+// Parse a single HTTP byte-range against a known size. Returns { start, end }, or null when
+// there is no Range header, or 'invalid' (=> 416). Range: is attacker-controlled on the
+// unauthenticated read path, so bounds are validated and multi-range is refused.
+function parseRange(header, size) {
+  if (!header) return null;
+  const m = /^bytes=(\d*)-(\d*)$/.exec(header.trim());
+  if (!m) return 'invalid';
+  const [, rawStart, rawEnd] = m;
+  let start;
+  let end;
+  if (rawStart === '') {
+    if (rawEnd === '') return 'invalid';
+    const suffix = Number(rawEnd);
+    if (suffix === 0) return 'invalid';
+    start = Math.max(0, size - suffix);
+    end = size - 1;
+  } else {
+    start = Number(rawStart);
+    end = rawEnd === '' ? size - 1 : Number(rawEnd);
+  }
+  if (!Number.isInteger(start) || !Number.isInteger(end)) return 'invalid';
+  if (start < 0 || start > end || start >= size) return 'invalid';
+  if (end >= size) end = size - 1;
+  return { start, end };
+}
+
+// Pipe a storage stream with a hardened error contract: once the first byte is sent the
+// status/headers are flushed and immutable, so an upstream error must ABORT the socket
+// (res.destroy) — never res.end(), which would pass a truncated artifact off as complete.
+function pipeStream(res, stream) {
+  stream.on('error', () => {
+    if (!res.headersSent) res.status(500).type('text/plain').send('internal error');
+    else res.destroy();
+  });
+  stream.pipe(res);
+}
+
+// Serve one storage object as an artifact response. The route has already validated meta
+// and set ARTIFACT_HEADERS. serveObject owns Content-Type (the app's strict map, or an
+// absolute forceType override used by /source) and Range. It never throws — an unsafe key
+// (only reachable via user-controlled zip sub-paths) or a missing object becomes a 404.
+async function serveObject(req, res, key, { forceType } = {}) {
+  const contentType = forceType || mimeForKey(key);
+  try {
+    const rangeHeader = req.headers.range;
+    if (rangeHeader) {
+      const info = await storage.head(key);
+      if (!info) return res.status(404).type('text/plain').send('not found');
+      const range = parseRange(rangeHeader, info.size);
+      if (range === 'invalid') {
+        return res.status(416).set('Content-Range', `bytes */${info.size}`).end();
+      }
+      if (range) {
+        const got = await storage.get(key, { range });
+        if (!got) return res.status(404).type('text/plain').send('not found');
+        res.status(206).set({
+          'Content-Type': contentType,
+          'Accept-Ranges': 'bytes',
+          'Content-Range': `bytes ${range.start}-${range.end}/${info.size}`,
+          'Content-Length': String(range.end - range.start + 1),
+        });
+        return pipeStream(res, got.stream);
+      }
+    }
+    const got = await storage.get(key);
+    if (!got) return res.status(404).type('text/plain').send('not found');
+    res.status(200).set({ 'Content-Type': contentType, 'Accept-Ranges': 'bytes' });
+    if (got.size != null) res.set('Content-Length', String(got.size));
+    pipeStream(res, got.stream);
+  } catch (err) {
+    if (err instanceof UnsafeKeyError) {
+      if (!res.headersSent) res.status(404).type('text/plain').send('not found');
+      return;
+    }
+    if (!res.headersSent) res.status(500).type('text/plain').send('internal error');
+    else res.destroy();
+  }
+}
+
 app.get('/a/:slug', async (req, res) => {
   const { slug } = req.params;
   const meta = SLUG_RE.test(slug) ? await readMeta(slug) : null;
@@ -394,18 +516,13 @@ app.get('/a/:slug', async (req, res) => {
   if (isExpired(meta)) {
     return res.status(410).type('text/plain').send('artifact expired');
   }
-  res.set({
-    'Content-Security-Policy': ARTIFACT_CSP,
-    'X-Content-Type-Options': 'nosniff',
-    'Referrer-Policy': 'no-referrer',
-    'Cache-Control': 'no-cache',
-  });
+  res.set(ARTIFACT_HEADERS);
   if (meta.type === 'zip') {
     // Trailing slash so relative asset URLs resolve inside the site.
     if (!req.path.endsWith('/')) return res.redirect(301, `/a/${slug}/`);
-    return res.sendFile(path.join(artifactDir(slug), 'site', 'index.html'));
+    return serveObject(req, res, `${slug}/site/index.html`);
   }
-  res.sendFile(path.join(artifactDir(slug), 'index.html'));
+  serveObject(req, res, `${slug}/index.html`);
 });
 
 app.get('/a/:slug/source', async (req, res, next) => {
@@ -415,8 +532,10 @@ app.get('/a/:slug/source', async (req, res, next) => {
   if (isExpired(meta)) return res.status(410).type('text/plain').send('artifact expired');
   if (meta.type === 'zip') return next(); // zip sites serve /source as a site path
   res.set({ 'X-Content-Type-Options': 'nosniff', 'Referrer-Policy': 'no-referrer' });
-  res.type('text/plain');
-  res.sendFile(path.join(artifactDir(slug), `source.${SOURCE_EXT[meta.type]}`));
+  // forceType keeps source inert: an HTML/JSX source is served as text/plain, never executed.
+  serveObject(req, res, `${slug}/source.${SOURCE_EXT[meta.type]}`, {
+    forceType: 'text/plain; charset=utf-8',
+  });
 });
 
 app.get('/a/:slug/*', async (req, res) => {
@@ -425,25 +544,19 @@ app.get('/a/:slug/*', async (req, res) => {
   if (!meta || meta.disabled) return res.status(404).type('text/plain').send('artifact not found');
   if (isExpired(meta)) return res.status(410).type('text/plain').send('artifact expired');
   if (meta.type !== 'zip') return res.status(404).type('text/plain').send('not found');
+  res.set(ARTIFACT_HEADERS);
 
-  const siteDir = path.join(artifactDir(slug), 'site');
-  const target = path.normalize(path.join(siteDir, req.params[0]));
-  if (target !== siteDir && !target.startsWith(siteDir + path.sep)) {
-    return res.status(404).type('text/plain').send('not found');
+  const rel = req.params[0];
+  // Directory -> index.html: object stores have no directories, so try the path, then fall
+  // back to <path>/index.html. The storage key guard (assertSafeKey) rejects any traversal.
+  let key = `${slug}/site/${rel}`;
+  if (rel === '' || rel.endsWith('/')) {
+    key = `${slug}/site/${rel}index.html`;
+  } else if (!(await storage.head(key).catch(() => null))) {
+    const alt = `${slug}/site/${rel}/index.html`;
+    if (await storage.head(alt).catch(() => null)) key = alt;
   }
-  res.set({
-    'Content-Security-Policy': ARTIFACT_CSP,
-    'X-Content-Type-Options': 'nosniff',
-    'Referrer-Policy': 'no-referrer',
-    'Cache-Control': 'no-cache',
-  });
-  let file = target;
-  try {
-    if ((await fs.stat(file)).isDirectory()) file = path.join(file, 'index.html');
-  } catch {}
-  res.sendFile(file, (err) => {
-    if (err && !res.headersSent) res.status(404).type('text/plain').send('not found');
-  });
+  serveObject(req, res, key);
 });
 
 app.post('/api/artifacts', requireAuth, async (req, res, next) => {
