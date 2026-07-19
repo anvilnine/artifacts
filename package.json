@@ -38,6 +38,7 @@
     "zod": "^3.24.1"
   },
   "optionalDependencies": {
-    "aws4fetch": "1.0.20"
+    "aws4fetch": "1.0.20",
+    "isomorphic-git": "1.38.7"
   }
 }

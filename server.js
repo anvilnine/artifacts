@@ -205,6 +205,7 @@ async function saveZipArtifact(buffer, { slug, title, expiresAt, tags }) {
   await storage.put(`${finalSlug}/meta.json`, JSON.stringify(meta, null, 2), {
     contentType: 'application/json',
   });
+  await storage.flush?.();
   return { slug: finalSlug, url: `${BASE_URL}/a/${finalSlug}/`, files: files.length };
 }
 
@@ -289,6 +290,7 @@ async function saveArtifact({ content, type = 'html', slug, title, expiresAt, ta
   await storage.put(`${finalSlug}/meta.json`, JSON.stringify(meta, null, 2), {
     contentType: 'application/json',
   });
+  await storage.flush?.(); // durably commit the completed write (git); no-op elsewhere
   return { slug: finalSlug, url: `${BASE_URL}/a/${finalSlug}` };
 }
 
@@ -351,6 +353,7 @@ async function patchArtifact(slug, patch) {
   await storage.put(`${activeSlug}/meta.json`, JSON.stringify(meta, null, 2), {
     contentType: 'application/json',
   });
+  await storage.flush?.();
   return { slug: meta.slug, url: `${BASE_URL}/a/${meta.slug}` };
 }
 
@@ -359,6 +362,7 @@ async function deleteArtifact(slug) {
     throw new ApiError(404, `slug "${slug}" not found`);
   }
   await storage.deleteSlug(slug);
+  await storage.flush?.();
 }
 
 // ---------------------------------------------------------------------------

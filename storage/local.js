@@ -14,7 +14,14 @@ function isMissing(err) {
 
 export async function create() {
   const dataDir = path.resolve(process.env.DATA_DIR || '/data');
-  const root = path.join(dataDir, 'artifacts');
+  return createAt(path.join(dataDir, 'artifacts'));
+}
+
+// Build a filesystem-backed store rooted at an arbitrary directory. Exported so other
+// backends (e.g. git, whose working copy is a local tree) can reuse the hardened read/
+// write/serve logic — streaming range reads, symlink refusal, realpath containment — and
+// layer their own durability on top.
+export async function createAt(root) {
   await fs.mkdir(root, { recursive: true });
   // Resolve the root through any symlinks once (e.g. /tmp -> /private/tmp) so containment
   // checks compare real paths against a real base.

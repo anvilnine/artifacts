@@ -16,7 +16,13 @@
 //     listMetas()               -> [{ slug, buffer }]            // every artifact's meta.json
 //     move(oldSlug, newSlug)                                     // rename a whole namespace
 //     deleteSlug(slug)                                           // remove a whole namespace
+//     flush?()                  // optional: durably commit a completed write (git)
 //   }
+//
+// flush() is optional. server.js calls `await storage.flush?.()` at the end of each logical
+// write (publish / replace / patch / delete), so a backend that batches — the git backend
+// coalesces a multi-file write into ONE commit+push — has a single "operation complete"
+// signal. Backends that persist per-put (local, s3) don't implement it.
 //
 // Write-ordering contract (crash-consistency without transactions): callers write all
 // content objects first and `<slug>/meta.json` LAST as a commit marker, because readMeta
@@ -51,8 +57,9 @@ export function assertSafeKey(key) {
 const BACKENDS = {
   local: () => import('./local.js'),
   s3: () => import('./s3.js'),
-  // git, postgres, sqlite are added in later phases; each is loaded on demand so a
-  // backend's dependency is only required when that backend is selected.
+  git: () => import('./git.js'),
+  // postgres, sqlite are added in a later phase; each is loaded on demand so a backend's
+  // dependency is only required when that backend is selected.
 };
 
 // Instantiate the configured backend and run its boot check (fail-fast, like the

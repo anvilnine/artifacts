@@ -88,6 +88,45 @@ up empty.
 > browser-facing CDN/presigned URL) would bypass all of that and expose every artifact — see
 > [SECURITY.md](../SECURITY.md). Never make the bucket or its objects public.
 
+### git (commit every change to a git remote)
+
+Stores each artifact as files in a git repository and pushes every change to a remote
+(GitHub, GitLab, Gitea, self-hosted). On boot the server clones/pulls the remote into a local
+working copy, so a fresh container rehydrates from the remote. A nice side effect: full version
+history of every artifact.
+
+```bash
+STORAGE_BACKEND=git \
+GIT_REMOTE_URL=https://github.com/you/artifacts-store.git \
+GIT_TOKEN=ghp_xxx \
+GIT_BRANCH=main \
+ARTIFACTS_API_KEY=$(openssl rand -hex 32) \
+node server.js
+```
+
+| Env var | Required | Default | Purpose |
+|---|---|---|---|
+| `GIT_REMOTE_URL` | yes | — | `https://…` repo URL. **Must not contain credentials** (rejected at boot) |
+| `GIT_TOKEN` | for private repos | — | Access token, sent only via the auth callback — never in the URL or logs |
+| `GIT_USERNAME` / `GIT_PASSWORD` | alt. to token | — | Basic-auth alternative to `GIT_TOKEN` |
+| `GIT_BRANCH` | no | `main` | Branch to read and write |
+| `GIT_WORK_DIR` | no | `DATA_DIR` or `/data/git` | Local working-copy directory |
+| `GIT_AUTHOR_NAME` / `GIT_AUTHOR_EMAIL` | no | `artifacts-host` / `artifacts@localhost` | Commit identity |
+
+`isomorphic-git` is an optional dependency loaded only when `STORAGE_BACKEND=git` — it is pure
+JavaScript (no `git` binary, no shell), so a slug or filename can never be run as a command.
+
+> **Security & operational notes.**
+> - **The remote MUST be private.** A public repo makes every artifact browsable and indexable
+>   on the host, defeating unguessable slugs, `noindex`, and expiry/disable — see
+>   [SECURITY.md](../SECURITY.md).
+> - **Single writer.** Run exactly one instance against a given branch. The git backend pushes
+>   on every change; two concurrent writers would produce non-fast-forward rejections. A failed
+>   push surfaces as a 5xx (the publish is not reported as durable).
+> - Credentials come only from `GIT_TOKEN` / `GIT_USERNAME` / `GIT_PASSWORD` and are scrubbed
+>   from error logs; a `GIT_REMOTE_URL` containing `user:pass@` is rejected at startup.
+> - Binary assets in zip sites accumulate in git history; use a dedicated repo you can prune.
+
 ### Migrating local → S3
 
 Because S3 object keys mirror the on-disk layout, no special tooling is needed — copy the
