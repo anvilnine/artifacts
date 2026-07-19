@@ -60,3 +60,12 @@ Use Flutter's default **hash** routing (`/#/…`); deep links then need no serve
 The zip validator accepts Flutter's build artifacts (`AssetManifest.bin`, `NOTICES`, `*.frag`
 shaders, `*.js.symbols`, the local `canvaskit/` wasm). See [`examples/flutter-demo`](../examples/flutter-demo)
 for a working, fully self-contained Flutter web app.
+
+> **Full-screen apps and the viewer frame:** by default artifacts render inside the viewer frame
+> (below). A full-page app like Flutter runs fine inside the frame's iframe, but if you want it
+> edge-to-edge, append `?raw=1` to the URL or turn the frame off for that artifact
+> (`artifacts frame <slug> off`).
+
+## Viewer frame
+
+Any of the above can render inside a slim top **frame** — a toolbar with the title, a copy-link button, and a hide toggle — with the artifact itself isolated in an iframe. Toggle it globally from the web UI's **Settings** panel (or `artifacts config`), and override it per artifact (`artifacts frame <slug> on|off|default`). Append `?raw=1` to any URL to view the artifact with no frame. Full behavior in [docs/api.md](api.md#viewer-frame).
