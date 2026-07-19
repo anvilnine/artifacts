@@ -33,9 +33,174 @@ jobs:
       - name: Smoke test API
         run: bash .github/workflows/smoke.sh http://localhost:3000 ci-test-key
 
+  smoke-s3:
+    runs-on: ubuntu-latest
+    env:
+      ARTIFACTS_API_KEY: ci-test-key
+      PORT: 3000
+      STORAGE_BACKEND: s3
+      S3_ENDPOINT: http://127.0.0.1:9000
+      S3_REGION: us-east-1
+      S3_BUCKET: artifacts
+      S3_ACCESS_KEY_ID: minioadmin
+      S3_SECRET_ACCESS_KEY: minioadmin
+      AWS_ACCESS_KEY_ID: minioadmin
+      AWS_SECRET_ACCESS_KEY: minioadmin
+      AWS_EC2_METADATA_DISABLED: "true"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Start MinIO + create bucket
+        run: |
+          docker run -d --name minio -p 9000:9000 \
+            -e MINIO_ROOT_USER=minioadmin -e MINIO_ROOT_PASSWORD=minioadmin \
+            minio/minio server /data
+          for i in $(seq 1 30); do
+            curl -sf http://127.0.0.1:9000/minio/health/ready && break
+            sleep 1
+          done
+          aws --endpoint-url http://127.0.0.1:9000 s3 mb s3://artifacts
+      - name: Boot server (s3 backend)
+        run: |
+          node server.js &
+          echo $! > server.pid
+          for i in $(seq 1 20); do curl -sf http://localhost:3000/healthz && break; sleep 0.5; done
+      - name: Smoke test API against S3
+        run: bash .github/workflows/smoke.sh http://localhost:3000 ci-test-key
+      - name: Artifacts survive a fresh restart (no local disk)
+        run: |
+          curl -sf -X POST http://localhost:3000/api/artifacts \
+            -H 'Authorization: Bearer ci-test-key' -H 'Content-Type: application/json' \
+            -d '{"content":"<h1>durable</h1>","slug":"restart-proof"}'
+          # kill the server and start a brand-new process against the same bucket, with
+          # nothing on local disk — proves durability across a container reprovision.
+          kill "$(cat server.pid)"; sleep 1
+          node server.js &
+          for i in $(seq 1 20); do curl -sf http://localhost:3000/healthz && break; sleep 0.5; done
+          code=$(curl -s -o /dev/null -w '%{http_code}' http://localhost:3000/a/restart-proof)
+          [ "$code" = "200" ] || { echo "FAIL: artifact did not survive restart (got $code)"; exit 1; }
+          echo "ok: artifact survived a fresh restart via S3"
+
+  smoke-git:
+    runs-on: ubuntu-latest
+    env:
+      ARTIFACTS_API_KEY: ci-test-key
+      PORT: 3000
+      STORAGE_BACKEND: git
+      GIT_REMOTE_URL: http://127.0.0.1:4600/artifacts.git
+      GIT_BRANCH: main
+      GIT_WORK_DIR: /tmp/git-work
+      GIT_AUTHOR_NAME: ci
+      GIT_AUTHOR_EMAIL: ci@example.com
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Start a git HTTP remote
+        run: |
+          mkdir -p /tmp/git-remote
+          git init --bare --initial-branch=main /tmp/git-remote/artifacts.git
+          git -C /tmp/git-remote/artifacts.git config http.receivepack true
+          node .github/workflows/git-http-server.mjs 4600 /tmp/git-remote &
+          for i in $(seq 1 20); do
+            curl -sf 'http://127.0.0.1:4600/artifacts.git/info/refs?service=git-upload-pack' >/dev/null && break
+            sleep 0.5
+          done
+      - name: Boot server (git backend)
+        run: |
+          node server.js &
+          echo $! > server.pid
+          for i in $(seq 1 20); do curl -sf http://localhost:3000/healthz && break; sleep 0.5; done
+      - name: Smoke test API against git
+        run: bash .github/workflows/smoke.sh http://localhost:3000 ci-test-key
+      - name: Artifacts survive a fresh restart (new work dir, rehydrate from remote)
+        run: |
+          curl -sf -X POST http://localhost:3000/api/artifacts \
+            -H 'Authorization: Bearer ci-test-key' -H 'Content-Type: application/json' \
+            -d '{"content":"<h1>durable</h1>","slug":"restart-proof"}'
+          kill "$(cat server.pid)"; sleep 1
+          # brand-new working copy -> the server must clone it back from the git remote
+          GIT_WORK_DIR=/tmp/git-work-fresh node server.js &
+          for i in $(seq 1 20); do curl -sf http://localhost:3000/healthz && break; sleep 0.5; done
+          code=$(curl -s -o /dev/null -w '%{http_code}' http://localhost:3000/a/restart-proof)
+          [ "$code" = "200" ] || { echo "FAIL: artifact did not survive restart (got $code)"; exit 1; }
+          echo "ok: artifact rehydrated from the git remote after a fresh restart"
+
+  smoke-postgres:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: pw
+          POSTGRES_DB: artifacts
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      ARTIFACTS_API_KEY: ci-test-key
+      PORT: 3000
+      STORAGE_BACKEND: postgres
+      DATABASE_URL: postgres://postgres:pw@127.0.0.1:5432/artifacts
+      PGSSLMODE: disable
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Boot server (postgres backend)
+        run: |
+          node server.js &
+          echo $! > server.pid
+          for i in $(seq 1 20); do curl -sf http://localhost:3000/healthz && break; sleep 0.5; done
+      - name: Smoke test API against postgres
+        run: bash .github/workflows/smoke.sh http://localhost:3000 ci-test-key
+      - name: Artifacts survive a fresh restart (external DB)
+        run: |
+          curl -sf -X POST http://localhost:3000/api/artifacts \
+            -H 'Authorization: Bearer ci-test-key' -H 'Content-Type: application/json' \
+            -d '{"content":"<h1>durable</h1>","slug":"restart-proof"}'
+          kill "$(cat server.pid)"; sleep 1
+          node server.js &
+          for i in $(seq 1 20); do curl -sf http://localhost:3000/healthz && break; sleep 0.5; done
+          code=$(curl -s -o /dev/null -w '%{http_code}' http://localhost:3000/a/restart-proof)
+          [ "$code" = "200" ] || { echo "FAIL: artifact did not survive restart (got $code)"; exit 1; }
+          echo "ok: artifact survived a fresh restart via postgres"
+
+  smoke-sqlite:
+    runs-on: ubuntu-latest
+    env:
+      ARTIFACTS_API_KEY: ci-test-key
+      PORT: 3000
+      STORAGE_BACKEND: sqlite
+      SQLITE_PATH: /tmp/artifacts.db
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Boot server (sqlite backend)
+        run: |
+          node server.js &
+          for i in $(seq 1 20); do curl -sf http://localhost:3000/healthz && break; sleep 0.5; done
+      - name: Smoke test API against sqlite
+        run: bash .github/workflows/smoke.sh http://localhost:3000 ci-test-key
+
   docker:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    needs: smoke
+    needs: [smoke, smoke-s3, smoke-git, smoke-postgres, smoke-sqlite]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
