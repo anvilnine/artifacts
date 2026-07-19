@@ -33,6 +33,16 @@ artifacts deploy ./build/web --slug flutter-demo
 # https://artifacts.example.com/a/flutter-demo/ (N files)
 ```
 
+## Viewer frame
+
+By default the host wraps every artifact in a slim [viewer frame](../../docs/formats.md#viewer-frame)
+(a toolbar over an iframe). Flutter runs fine inside it, but for an edge-to-edge full-screen app
+you can bypass the frame — append `?raw=1` to the URL, or turn it off for this artifact:
+
+```bash
+artifacts frame flutter-demo off   # serve it bare; `on` or `default` re-enables
+```
+
 ## Routing (SPA deep links)
 
 This demo uses Flutter's default **hash** URL strategy (`/#/…`), which needs no server-side
