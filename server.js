@@ -97,6 +97,8 @@ const FRAME_SHELL = await fs.readFile(path.join(__dirname, 'shells', 'frame.html
 
 const TYPES = ['html', 'jsx', 'tsx', 'md'];
 const SLUG_RE = /^[a-z0-9][a-z0-9-]{2,63}$/;
+const TAG_RE = /^[a-z0-9][a-z0-9-]{0,31}$/;
+const MAX_TAGS = 10;
 const SOURCE_EXT = { html: 'html', jsx: 'jsx', tsx: 'tsx', md: 'md' };
 
 // Pinned versions shared with the jsx shell. `external=react` keeps packages on
@@ -245,11 +247,12 @@ function extractSiteFiles(zip) {
   return files;
 }
 
-async function saveZipArtifact(buffer, { slug, title, expiresAt }) {
+async function saveZipArtifact(buffer, { slug, title, expiresAt, tags }) {
   if (slug !== undefined && !SLUG_RE.test(slug)) {
     throw new ApiError(400, 'slug must match [a-z0-9][a-z0-9-]{2,63}');
   }
   const expiry = expiresAt !== undefined ? parseExpiresAt(expiresAt) : undefined;
+  const tagList = tags !== undefined ? parseTags(tags) : undefined;
 
   let zip;
   try {
@@ -279,8 +282,30 @@ async function saveZipArtifact(buffer, { slug, title, expiresAt }) {
     updatedAt: new Date().toISOString(),
   };
   if (expiry !== undefined) meta.expiresAt = expiry;
+  if (tagList?.length) meta.tags = tagList;
   await fs.writeFile(path.join(artifactDir(finalSlug), 'meta.json'), JSON.stringify(meta, null, 2));
   return { slug: finalSlug, url: `${BASE_URL}/a/${finalSlug}/`, files: files.length };
+}
+
+// Accepts an array of strings or a comma-separated string (JSON bodies, zip
+// query params, and CLI flags all funnel through here). Returns a deduped,
+// lowercased array; empty means "clear".
+function parseTags(value) {
+  if (value === null) return [];
+  const raw = Array.isArray(value) ? value : typeof value === 'string' ? value.split(',') : null;
+  if (!raw || raw.some((t) => typeof t !== 'string')) {
+    throw new ApiError(400, 'tags must be an array of strings or a comma-separated string');
+  }
+  const tags = [...new Set(raw.map((t) => t.trim().toLowerCase()).filter(Boolean))];
+  for (const tag of tags) {
+    if (!TAG_RE.test(tag)) {
+      throw new ApiError(400, `invalid tag "${tag}" — tags must match [a-z0-9][a-z0-9-]{0,31}`);
+    }
+  }
+  if (tags.length > MAX_TAGS) {
+    throw new ApiError(400, `too many tags (${tags.length} > ${MAX_TAGS})`);
+  }
+  return tags;
 }
 
 function parseExpiresAt(value) {
@@ -295,7 +320,7 @@ function isExpired(meta) {
   return Boolean(meta.expiresAt && Date.parse(meta.expiresAt) <= Date.now());
 }
 
-async function saveArtifact({ content, type = 'html', slug, title, expiresAt, frame }, { replace = false } = {}) {
+async function saveArtifact({ content, type = 'html', slug, title, expiresAt, frame, tags }, { replace = false } = {}) {
   if (typeof content !== 'string' || !content.trim()) {
     throw new ApiError(400, 'content (non-empty string) is required');
   }
@@ -303,6 +328,7 @@ async function saveArtifact({ content, type = 'html', slug, title, expiresAt, fr
     throw new ApiError(400, 'frame must be a boolean');
   }
   const expiry = expiresAt !== undefined ? parseExpiresAt(expiresAt) : undefined;
+  const tagList = tags !== undefined ? parseTags(tags) : undefined;
   if (!TYPES.includes(type)) {
     throw new ApiError(400, `type must be one of: ${TYPES.join(', ')}`);
   }
@@ -341,16 +367,25 @@ async function saveArtifact({ content, type = 'html', slug, title, expiresAt, fr
   };
   if (expiresAt !== undefined) meta.expiresAt = expiry;
   if (frame !== undefined) meta.frame = frame;
+  if (tagList !== undefined) meta.tags = tagList.length ? tagList : undefined;
   await fs.writeFile(path.join(dir, 'meta.json'), JSON.stringify(meta, null, 2));
   return { slug: finalSlug, url: `${BASE_URL}/a/${finalSlug}` };
 }
 
-async function listArtifacts() {
+async function listArtifacts({ tag } = {}) {
   const entries = await fs.readdir(ARTIFACTS_DIR, { withFileTypes: true });
   const metas = await Promise.all(
     entries.filter((e) => e.isDirectory()).map((e) => readMeta(e.name)),
   );
-  return metas.filter(Boolean).sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+  let items = metas
+    .filter(Boolean)
+    .map((m) => ({ ...m, tags: m.tags || [] }))
+    .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+  if (tag !== undefined) {
+    const wanted = String(tag).trim().toLowerCase();
+    items = items.filter((a) => a.tags.includes(wanted));
+  }
+  return items;
 }
 
 async function patchArtifact(slug, patch) {
@@ -391,6 +426,11 @@ async function patchArtifact(slug, patch) {
 
   if (patch.expiresAt !== undefined) {
     meta.expiresAt = parseExpiresAt(patch.expiresAt);
+  }
+
+  if (patch.tags !== undefined) {
+    const tags = parseTags(patch.tags);
+    meta.tags = tags.length ? tags : undefined;
   }
 
   meta.updatedAt = new Date().toISOString();
@@ -547,8 +587,8 @@ app.post('/api/artifacts/zip', requireAuth, zipBody, async (req, res, next) => {
     if (!Buffer.isBuffer(req.body) || !req.body.length) {
       throw new ApiError(400, 'raw zip body required (Content-Type: application/zip)');
     }
-    const { slug, title, expiresAt } = req.query;
-    res.status(201).json(await saveZipArtifact(req.body, { slug, title, expiresAt }));
+    const { slug, title, expiresAt, tags } = req.query;
+    res.status(201).json(await saveZipArtifact(req.body, { slug, title, expiresAt, tags }));
   } catch (err) {
     next(err);
   }
@@ -581,7 +621,8 @@ app.delete('/api/artifacts/:slug', requireAuth, async (req, res, next) => {
 
 app.get('/api/artifacts', requireAuth, async (req, res, next) => {
   try {
-    res.json(await listArtifacts());
+    const { tag } = req.query;
+    res.json(await listArtifacts(typeof tag === 'string' ? { tag } : {}));
   } catch (err) {
     next(err);
   }
@@ -625,6 +666,10 @@ function createMcpServer() {
           .boolean()
           .optional()
           .describe('Show the top viewer frame for this artifact, overriding the server default'),
+        tags: z
+          .array(z.string())
+          .optional()
+          .describe('Tags for organizing artifacts: [a-z0-9-], 1-32 chars each, max 10'),
       },
     },
     async (args) => {
@@ -647,6 +692,10 @@ function createMcpServer() {
           .boolean()
           .optional()
           .describe('Show the top viewer frame for this artifact, overriding the server default'),
+        tags: z
+          .array(z.string())
+          .optional()
+          .describe('Replaces all tags when provided; omit to keep existing tags'),
       },
     },
     async (args) => {
@@ -688,6 +737,24 @@ function createMcpServer() {
     async ({ slug, expiresAt }) => {
       await patchArtifact(slug, { expiresAt });
       const text = expiresAt ? `${slug} expires ${expiresAt}` : `expiry cleared for ${slug}`;
+      return { content: [{ type: 'text', text }] };
+    },
+  );
+
+  server.registerTool(
+    'set_artifact_tags',
+    {
+      title: 'Set artifact tags',
+      description:
+        'Replace the tags of an artifact. Tags are [a-z0-9-], 1-32 chars each, max 10. An empty array clears all tags.',
+      inputSchema: {
+        slug: z.string(),
+        tags: z.array(z.string()).describe('Full tag list; empty array clears'),
+      },
+    },
+    async ({ slug, tags }) => {
+      await patchArtifact(slug, { tags });
+      const text = tags.length ? `${slug} tagged: ${tags.join(', ')}` : `tags cleared for ${slug}`;
       return { content: [{ type: 'text', text }] };
     },
   );
@@ -745,11 +812,14 @@ function createMcpServer() {
     'list_artifacts',
     {
       title: 'List artifacts',
-      description: 'List all published artifacts (slug, type, title, timestamps).',
-      inputSchema: {},
+      description:
+        'List all published artifacts (slug, type, title, tags, timestamps). Pass tag to only list artifacts carrying that tag.',
+      inputSchema: {
+        tag: z.string().optional().describe('Only return artifacts with this tag'),
+      },
     },
-    async () => {
-      const items = await listArtifacts();
+    async ({ tag }) => {
+      const items = await listArtifacts(tag !== undefined ? { tag } : {});
       return { content: [{ type: 'text', text: JSON.stringify(items, null, 2) }] };
     },
   );

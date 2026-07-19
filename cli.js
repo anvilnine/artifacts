@@ -8,15 +8,16 @@ import AdmZip from 'adm-zip';
 const USAGE = `artifacts — publish to a self-hosted artifacts instance
 
 Usage:
-  artifacts publish <file> [--slug s] [--title t] [--expires ISO] [--type html|jsx|tsx|md] [--frame on|off]
-  artifacts deploy <dir|zip> [--slug s] [--title t] [--expires ISO]
-  artifacts update <slug> <file> [--title t] [--type html|jsx|tsx|md]
-  artifacts list
+  artifacts publish <file> [--slug s] [--title t] [--tags a,b] [--expires ISO] [--type html|jsx|tsx|md] [--frame on|off]
+  artifacts deploy <dir|zip> [--slug s] [--title t] [--tags a,b] [--expires ISO]
+  artifacts update <slug> <file> [--title t] [--tags a,b] [--type html|jsx|tsx|md]
+  artifacts list [--tag t]
   artifacts rename <slug> <new-slug>
   artifacts disable <slug>
   artifacts enable <slug>
   artifacts frame <slug> <on|off|default>
   artifacts expire <slug> <ISO-date|never>
+  artifacts tag <slug> <a,b,c|none>
   artifacts delete <slug>
   artifacts source <slug> [-o file]
   artifacts config [--frame-enabled true|false] [--frame-default true|false]
@@ -33,6 +34,8 @@ const { values: opts, positionals } = parseArgs({
     key: { type: 'string' },
     slug: { type: 'string' },
     title: { type: 'string' },
+    tags: { type: 'string' },
+    tag: { type: 'string' },
     expires: { type: 'string' },
     type: { type: 'string' },
     frame: { type: 'string' },
@@ -109,6 +112,7 @@ switch (command) {
       type: inferType(args[0]),
       ...(opts.slug && { slug: opts.slug }),
       ...(opts.title && { title: opts.title }),
+      ...(opts.tags && { tags: opts.tags }),
       ...(opts.expires && { expiresAt: opts.expires }),
       ...(opts.frame && opts.frame !== 'default' && { frame: opts.frame === 'on' }),
     });
@@ -130,6 +134,7 @@ switch (command) {
     const params = new URLSearchParams();
     if (opts.slug) params.set('slug', opts.slug);
     if (opts.title) params.set('title', opts.title);
+    if (opts.tags) params.set('tags', opts.tags);
     if (opts.expires) params.set('expiresAt', opts.expires);
     const qs = params.size ? `?${params}` : '';
     const out = JSON.parse(await api('POST', `/api/artifacts/zip${qs}`, {
@@ -147,17 +152,22 @@ switch (command) {
       content,
       type: inferType(args[1]),
       ...(opts.title && { title: opts.title }),
+      ...(opts.tags && { tags: opts.tags }),
     });
     console.log(out.url);
     break;
   }
 
   case 'list': {
-    const artifacts = await apiJson('GET', '/api/artifacts');
+    const qs = opts.tag ? `?tag=${encodeURIComponent(opts.tag)}` : '';
+    const artifacts = await apiJson('GET', `/api/artifacts${qs}`);
     for (const a of artifacts) {
       const frameFlag = a.frame === true ? 'frame:on' : a.frame === false ? 'frame:off' : null;
       const flags = [a.disabled && 'disabled', frameFlag, a.expiresAt && `expires ${a.expiresAt}`].filter(Boolean);
-      console.log(`${a.slug}\t${a.type}\t${a.title || ''}${flags.length ? `\t[${flags.join(', ')}]` : ''}`);
+      const tags = a.tags?.length ? `#${a.tags.join(' #')}` : '';
+      console.log(
+        `${a.slug}\t${a.type}\t${a.title || ''}${tags ? `\t${tags}` : ''}${flags.length ? `\t[${flags.join(', ')}]` : ''}`,
+      );
     }
     break;
   }
@@ -202,6 +212,14 @@ switch (command) {
     const expiresAt = args[1] === 'never' ? null : args[1];
     await apiJson('PATCH', `/api/artifacts/${args[0]}`, { expiresAt });
     console.log(expiresAt ? `${args[0]} expires ${expiresAt}` : `${args[0]} expiry cleared`);
+    break;
+  }
+
+  case 'tag': {
+    need(2, '<slug> <a,b,c|none>');
+    const tags = args[1] === 'none' ? [] : args[1];
+    await apiJson('PATCH', `/api/artifacts/${args[0]}`, { tags });
+    console.log(args[1] === 'none' ? `${args[0]} tags cleared` : `${args[0]} tagged: ${args[1]}`);
     break;
   }
 
