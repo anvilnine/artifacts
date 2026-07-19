@@ -206,6 +206,20 @@
   .act.del { color: var(--brick); }
   .act.del:hover { background: var(--danger-bg); border-color: var(--danger-rim); color: var(--brick); }
 
+  /* overflow menu */
+  .more { position: relative; display: inline-flex; }
+  .act.more-btn { font-weight: 700; letter-spacing: 1px; padding: 5px 10px; }
+  .menu {
+    position: absolute; top: calc(100% + 6px); right: 0; z-index: 30;
+    min-width: 158px; padding: 5px; display: none; flex-direction: column; gap: 2px;
+    background: var(--cocoa-hi); border: 1px solid var(--rim); border-radius: 10px;
+    box-shadow: 0 18px 44px -20px #000;
+  }
+  .more.open .menu { display: flex; }
+  .item-actions.menu-open { opacity: 1; }
+  .menu .act { width: 100%; justify-content: flex-start; text-align: left; }
+  .menu .act:hover { background: var(--field); }
+
   .empty { padding: 26px; text-align: center; color: var(--taupe-dim); font-size: 13px; border: 1px dashed var(--rim-soft); border-radius: 12px; }
 
   .settings-form { margin-top: 14px; display: flex; flex-direction: column; gap: 14px; }
@@ -218,6 +232,8 @@
   @media (max-width: 560px) {
     .item { flex-direction: column; align-items: stretch; gap: 10px; }
     .item-actions { justify-content: flex-start; opacity: 1; }
+    /* actions stack to the left here, so open the menu rightward */
+    .menu { left: 0; right: auto; }
   }
   @media (prefers-reduced-motion: reduce) { * { transition: none !important; animation: none !important; } }
 </style>
@@ -512,6 +528,14 @@
 
   let allItems = [];
   const collapsed = new Set();
+  let inlineN = 8; // how many row actions stay inline before overflowing into ⋯
+
+  // Fit as many actions inline as the list width allows; the rest go to a menu.
+  function computeInlineCount() {
+    const w = $('rows').clientWidth || 860;
+    const avail = Math.max(0, w - 250); // reserve for slug / title / meta
+    return Math.max(1, Math.min(8, Math.floor(avail / 74)));
+  }
 
   async function loadList() {
     try {
@@ -558,6 +582,7 @@
   }
 
   function renderList() {
+    inlineN = computeInlineCount();
     const q = ($('search').value || '').trim().toLowerCase();
     const filtered = q ? allItems.filter((a) => matchItem(a, q)) : allItems;
 
@@ -762,13 +787,51 @@
         loadList();
       });
 
-      actions.append(copy, ren, projBtn, frm, tagbtn, tgl, exp, del);
+      const more = document.createElement('div');
+      more.className = 'more';
+      const moreBtn = actBtn('⋯', 'more-btn');
+      moreBtn.setAttribute('aria-haspopup', 'true');
+      moreBtn.title = 'More actions';
+      const menu = document.createElement('div');
+      menu.className = 'menu';
+      more.append(moreBtn, menu);
+      moreBtn.addEventListener('click', () => {
+        const open = more.classList.toggle('open');
+        moreBtn.setAttribute('aria-expanded', open ? 'true' : 'false');
+        actions.classList.toggle('menu-open', open);
+      });
+
+      // priority order: earlier actions stay inline; the tail overflows into ⋯
+      const priority = [copy, frm, tagbtn, projBtn, ren, tgl, exp, del];
+      const n = Math.min(inlineN, priority.length);
+      priority.forEach((btn, i) => { (i < n ? actions : menu).appendChild(btn); });
+      if (n < priority.length) actions.appendChild(more);
 
       item.append(body, actions);
       return item;
   }
 
   $('search').addEventListener('input', renderList);
+
+  // close any open ⋯ menu on outside click
+  document.addEventListener('click', (e) => {
+    document.querySelectorAll('.more.open').forEach((m) => {
+      if (!m.contains(e.target)) {
+        m.classList.remove('open');
+        const acts = m.closest('.item-actions');
+        if (acts) acts.classList.remove('menu-open');
+      }
+    });
+  });
+
+  // re-flow inline vs overflow actions when the width crosses a threshold
+  let resizeT;
+  window.addEventListener('resize', () => {
+    clearTimeout(resizeT);
+    resizeT = setTimeout(() => {
+      if (computeInlineCount() !== inlineN) renderList();
+    }, 150);
+  });
 
   // ---- settings (global config) ----
 
