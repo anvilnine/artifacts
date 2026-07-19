@@ -1,0 +1,30 @@
+name: flutter_demo
+description: "Minimal Flutter web app for hosting on a self-hosted artifacts instance."
+publish_to: 'none'
+version: 1.0.0+1
+
+environment:
+  sdk: ^3.12.2
+
+dependencies:
+  flutter:
+    sdk: flutter
+  cupertino_icons: ^1.0.8
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^6.0.0
+
+flutter:
+  uses-material-design: true
+
+  # Bundle a text font and use it as the app default (see lib/main.dart) so the
+  # build is fully self-contained — the CanvasKit engine does not need to fetch
+  # its Roboto fallback from fonts.gstatic.com.
+  fonts:
+    - family: AppFont
+      fonts:
+        - asset: assets/fonts/AppFont-Regular.ttf
+        - asset: assets/fonts/AppFont-Bold.ttf
+          weight: 700
