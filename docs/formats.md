@@ -43,3 +43,20 @@ Output from static site generators drops straight into the zip endpoint — an A
 - **Next.js** (`next export`) — `basePath` + `assetPrefix` of `/a/{slug}/`
 
 The slug you build for must match the slug you deploy to. See [`examples/astro-demo`](../examples/astro-demo) for a working Astro project.
+
+### Flutter web (SPA)
+
+A `flutter build web` output hosts as a zip site, but Flutter needs a bit more than a base path
+because its engine pulls resources from Google CDNs by default. Build it **self-contained**:
+
+- **Base href** — `flutter build web --base-href /a/{slug}/` (same subpath rule as above).
+- **Local engine** — add `--no-web-resources-cdn` so CanvasKit/skwasm is served from the artifact
+  rather than `gstatic.com` (which the artifact [CSP](../SECURITY.md) blocks).
+- **Bundled font** — bundle a text font and set it as the app's default `fontFamily`, so the engine
+  doesn't fetch its Roboto fallback from Google Fonts.
+
+Use Flutter's default **hash** routing (`/#/…`); deep links then need no server-side SPA fallback.
+
+The zip validator accepts Flutter's build artifacts (`AssetManifest.bin`, `NOTICES`, `*.frag`
+shaders, `*.js.symbols`, the local `canvaskit/` wasm). See [`examples/flutter-demo`](../examples/flutter-demo)
+for a working, fully self-contained Flutter web app.

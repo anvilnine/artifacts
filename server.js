@@ -108,7 +108,14 @@ const ZIP_ALLOWED_EXT = new Set([
   'png', 'jpg', 'jpeg', 'gif', 'svg', 'webp', 'ico', 'avif',
   'woff', 'woff2', 'ttf', 'otf', 'eot',
   'mp3', 'wav', 'ogg', 'mp4', 'webm', 'pdf', 'wasm', 'map', 'webmanifest',
+  // Flutter web build outputs: binary asset manifest, compiled shaders,
+  // CanvasKit symbol maps.
+  'bin', 'frag', 'symbols',
 ]);
+
+// Files permitted by exact basename — covers extensionless/dotfile build
+// artifacts (Flutter's `NOTICES` license bundle and `.last_build_id` marker).
+const ZIP_ALLOWED_NAMES = new Set(['NOTICES', '.last_build_id']);
 const ZIP_MAX_FILES = 2000;
 const ZIP_MAX_UNCOMPRESSED = 100 * 1024 * 1024;
 
@@ -153,7 +160,10 @@ function extractSiteFiles(zip) {
 
   const unsupported = files
     .map((f) => f.relPath)
-    .filter((p) => !ZIP_ALLOWED_EXT.has(path.posix.extname(p).slice(1).toLowerCase()));
+    .filter((p) => {
+      const ext = path.posix.extname(p).slice(1).toLowerCase();
+      return !ZIP_ALLOWED_EXT.has(ext) && !ZIP_ALLOWED_NAMES.has(path.posix.basename(p));
+    });
   if (unsupported.length) {
     throw new ApiError(
       400,
