@@ -331,6 +331,12 @@ function ipBucket(ip) {
   return full.slice(0, 4).map((x) => x || '0').join(':') + '::/64';
 }
 
+// Auth failures were logged nowhere. One JSON line per failed/limited attempt —
+// greppable, no dependency, no PII beyond the client IP the operator already sees.
+function logAuth(event, fields) {
+  console.warn(JSON.stringify({ ts: new Date().toISOString(), event, ...fields }));
+}
+
 // Machine callers (REST / CLI / MCP): Bearer token meeting a minimum scope.
 function requireApiKey(scope) {
   return (req, res, next) => {
