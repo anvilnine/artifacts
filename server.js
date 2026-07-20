@@ -142,36 +142,10 @@ async function loadAuth() {
 
 let auth = await loadAuth();
 
-// Seed the single admin account from env on first boot (skips the setup screen).
-// Like config.json, auth.json is otherwise created lazily — never written on a
-// plain boot with nothing to persist.
-if (!auth.admin && ADMIN_USERNAME && ADMIN_PASSWORD) {
-  auth.admin = { username: ADMIN_USERNAME, ...(await hashPassword(ADMIN_PASSWORD)) };
-  await saveAuth();
-  console.log(`admin account "${ADMIN_USERNAME}" created from env`);
-}
-
-async function saveAuth() {
-  await storage.put(AUTH_KEY, JSON.stringify(auth, null, 2), { contentType: 'application/json' });
-  await storage.flush?.();
-}
-
-// The HMAC secret that signs session cookies — generated + persisted the first
-// time a session is issued, never baked into a boot-time write.
-async function ensureSessionSecret() {
-  if (!auth.sessionSecret) {
-    auth.sessionSecret = crypto.randomBytes(32).toString('hex');
-    await saveAuth();
-  }
-  return auth.sessionSecret;
-}
-
-// Passwords: scrypt (built-in, memory-hard). Keys: sha256 — API keys are already
-// 24 bytes of entropy, so a fast hash is safe and keeps lookup constant-time.
-//
 // scrypt is memory-hard and was synchronous, blocking the event loop on the two
 // unauthenticated credential routes (login, unlock). Run it on the libuv threadpool
 // and cap concurrency so a flood degrades those routes instead of stalling the process.
+// Declared before the boot-time admin seed below, which calls hashPassword during init.
 const scryptAsync = promisify(crypto.scrypt);
 const SCRYPT_MAX_CONCURRENT = 2;
 const SCRYPT_MAX_QUEUE = 20;
@@ -198,6 +172,32 @@ function withScrypt(fn) {
   });
 }
 
+// Seed the single admin account from env on first boot (skips the setup screen).
+// Like config.json, auth.json is otherwise created lazily — never written on a
+// plain boot with nothing to persist.
+if (!auth.admin && ADMIN_USERNAME && ADMIN_PASSWORD) {
+  auth.admin = { username: ADMIN_USERNAME, ...(await hashPassword(ADMIN_PASSWORD)) };
+  await saveAuth();
+  console.log(`admin account "${ADMIN_USERNAME}" created from env`);
+}
+
+async function saveAuth() {
+  await storage.put(AUTH_KEY, JSON.stringify(auth, null, 2), { contentType: 'application/json' });
+  await storage.flush?.();
+}
+
+// The HMAC secret that signs session cookies — generated + persisted the first
+// time a session is issued, never baked into a boot-time write.
+async function ensureSessionSecret() {
+  if (!auth.sessionSecret) {
+    auth.sessionSecret = crypto.randomBytes(32).toString('hex');
+    await saveAuth();
+  }
+  return auth.sessionSecret;
+}
+
+// Passwords: scrypt (built-in, memory-hard). Keys: sha256 — API keys are already
+// 24 bytes of entropy, so a fast hash is safe and keeps lookup constant-time.
 async function hashPassword(password, salt = crypto.randomBytes(16).toString('hex')) {
   const buf = await withScrypt(() => scryptAsync(password, salt, 64));
   return { salt, passwordHash: buf.toString('hex') };
