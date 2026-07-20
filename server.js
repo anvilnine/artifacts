@@ -2,6 +2,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { promisify } from 'node:util';
 
 import AdmZip from 'adm-zip';
 import express from 'express';
@@ -143,7 +144,7 @@ let auth = await loadAuth();
 // Like config.json, auth.json is otherwise created lazily — never written on a
 // plain boot with nothing to persist.
 if (!auth.admin && ADMIN_USERNAME && ADMIN_PASSWORD) {
-  auth.admin = { username: ADMIN_USERNAME, ...hashPassword(ADMIN_PASSWORD) };
+  auth.admin = { username: ADMIN_USERNAME, ...(await hashPassword(ADMIN_PASSWORD)) };
   await saveAuth();
   console.log(`admin account "${ADMIN_USERNAME}" created from env`);
 }
@@ -165,13 +166,44 @@ async function ensureSessionSecret() {
 
 // Passwords: scrypt (built-in, memory-hard). Keys: sha256 — API keys are already
 // 24 bytes of entropy, so a fast hash is safe and keeps lookup constant-time.
-function hashPassword(password, salt = crypto.randomBytes(16).toString('hex')) {
-  return { salt, passwordHash: crypto.scryptSync(password, salt, 64).toString('hex') };
+//
+// scrypt is memory-hard and was synchronous, blocking the event loop on the two
+// unauthenticated credential routes (login, unlock). Run it on the libuv threadpool
+// and cap concurrency so a flood degrades those routes instead of stalling the process.
+const scryptAsync = promisify(crypto.scrypt);
+const SCRYPT_MAX_CONCURRENT = 2;
+const SCRYPT_MAX_QUEUE = 20;
+let scryptActive = 0;
+const scryptQueue = [];
+function withScrypt(fn) {
+  return new Promise((resolve, reject) => {
+    const run = () => {
+      scryptActive++;
+      Promise.resolve()
+        .then(fn)
+        .then(resolve, reject)
+        .finally(() => {
+          scryptActive--;
+          const next = scryptQueue.shift();
+          if (next) next();
+        });
+    };
+    if (scryptActive < SCRYPT_MAX_CONCURRENT) return run();
+    if (scryptQueue.length >= SCRYPT_MAX_QUEUE) {
+      return reject(new ApiError(429, 'server busy — retry shortly'));
+    }
+    scryptQueue.push(run);
+  });
 }
 
-function verifyPassword(password, admin) {
+async function hashPassword(password, salt = crypto.randomBytes(16).toString('hex')) {
+  const buf = await withScrypt(() => scryptAsync(password, salt, 64));
+  return { salt, passwordHash: buf.toString('hex') };
+}
+
+async function verifyPassword(password, admin) {
   if (typeof password !== 'string' || !admin?.passwordHash || !admin?.salt) return false;
-  const hash = crypto.scryptSync(password, admin.salt, 64);
+  const hash = await withScrypt(() => scryptAsync(password, admin.salt, 64));
   const stored = Buffer.from(admin.passwordHash, 'hex');
   return hash.length === stored.length && crypto.timingSafeEqual(hash, stored);
 }
@@ -761,7 +793,7 @@ async function saveArtifact({ content, type = 'html', slug, title, expiresAt, fr
   if (visibility !== undefined) {
     if (visibility === 'password') {
       meta.visibility = 'password';
-      meta.password = hashPassword(password);
+      meta.password = await hashPassword(password);
     } else if (visibility === 'private') {
       meta.visibility = 'private';
       delete meta.password;
@@ -773,7 +805,7 @@ async function saveArtifact({ content, type = 'html', slug, title, expiresAt, fr
     if (typeof password !== 'string' || !password) {
       throw new ApiError(400, 'password must be a non-empty string');
     }
-    meta.password = hashPassword(password); // rotate on an existing password artifact
+    meta.password = await hashPassword(password); // rotate on an existing password artifact
   }
   // meta.json LAST as the commit marker (see storage/index.js write-ordering contract).
   await storage.put(`${finalSlug}/meta.json`, JSON.stringify(meta, null, 2), {
@@ -872,7 +904,7 @@ async function patchArtifact(slug, patch) {
     const target = patch.visibility !== undefined ? patch.visibility : meta.visibility || 'public';
     if (target === 'password') {
       if (typeof patch.password === 'string' && patch.password) {
-        meta.password = hashPassword(patch.password); // set or rotate
+        meta.password = await hashPassword(patch.password); // set or rotate
       } else if (!meta.password) {
         throw new ApiError(400, 'password is required for visibility "password"');
       }
@@ -1143,8 +1175,8 @@ app.post('/a/:slug/unlock', async (req, res, next) => {
     if (isExpired(meta)) return res.status(410).json({ error: 'expired' });
     const password = req.body?.password;
     let ok = false;
-    if (meta.visibility === 'password') ok = verifyPassword(password, meta.password);
-    else if (meta.visibility === 'private') ok = verifyPassword(password, auth.admin);
+    if (meta.visibility === 'password') ok = await verifyPassword(password, meta.password);
+    else if (meta.visibility === 'private') ok = await verifyPassword(password, auth.admin);
     else return res.status(400).json({ error: 'artifact is not password protected' });
     if (!ok) return res.status(401).json({ error: 'incorrect password' });
     await issueUnlock(res, slug);
@@ -1243,7 +1275,7 @@ app.post('/api/auth/setup', async (req, res, next) => {
     if (auth.admin) throw new ApiError(409, 'admin account already exists');
     const { username, password } = req.body || {};
     validateCredentials(username, password);
-    auth.admin = { username, ...hashPassword(password) };
+    auth.admin = { username, ...(await hashPassword(password)) };
     await ensureSessionSecret();
     await saveAuth();
     await issueSession(res, username);
@@ -1256,7 +1288,7 @@ app.post('/api/auth/setup', async (req, res, next) => {
 app.post('/api/auth/login', async (req, res, next) => {
   try {
     const { username, password } = req.body || {};
-    if (!auth.admin || auth.admin.username !== username || !verifyPassword(password, auth.admin)) {
+    if (!auth.admin || auth.admin.username !== username || !(await verifyPassword(password, auth.admin))) {
       throw new ApiError(401, 'invalid credentials');
     }
     await issueSession(res, username);
@@ -1274,11 +1306,11 @@ app.post('/api/auth/logout', (req, res) => {
 app.post('/api/auth/password', requireSession, async (req, res, next) => {
   try {
     const { currentPassword, newPassword } = req.body || {};
-    if (!verifyPassword(currentPassword, auth.admin)) {
+    if (!(await verifyPassword(currentPassword, auth.admin))) {
       throw new ApiError(401, 'current password incorrect');
     }
     validatePassword(newPassword);
-    auth.admin = { username: auth.admin.username, ...hashPassword(newPassword) };
+    auth.admin = { username: auth.admin.username, ...(await hashPassword(newPassword)) };
     await saveAuth();
     res.json({ ok: true });
   } catch (err) {
