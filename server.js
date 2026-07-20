@@ -19,6 +19,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.PORT || 3000);
 const BASE_URL = (process.env.BASE_URL || `http://localhost:${PORT}`).replace(/\/$/, '');
 const API_KEY = process.env.ARTIFACTS_API_KEY;
+const TRUST_PROXY = (process.env.TRUST_PROXY || 'none').toLowerCase(); // none | cloudflare | xff
 
 if (!API_KEY) {
   console.error('ARTIFACTS_API_KEY env var is required');
@@ -301,6 +302,33 @@ function touchKey(key) {
   if (now - last < LASTUSED_THROTTLE_MS) return;
   key.lastUsedAt = new Date(now).toISOString();
   saveAuth().catch((err) => console.error('lastUsedAt persist failed:', err));
+}
+
+// Rate-limit bucket for this request. Under cloudflared every request arrives from
+// loopback, so the real client is only in CF-Connecting-IP; trusting that header is
+// safe ONLY while the tunnel is the sole ingress (origin has no open ports). Default
+// 'none' uses the socket address — correct when nothing proxies, wrong behind a proxy.
+function clientIp(req) {
+  let ip;
+  if (TRUST_PROXY === 'cloudflare') ip = req.headers['cf-connecting-ip'];
+  else if (TRUST_PROXY === 'xff') {
+    const xff = req.headers['x-forwarded-for'];
+    if (typeof xff === 'string' && xff) ip = xff.split(',').pop().trim();
+  }
+  ip = (ip || req.socket.remoteAddress || '').replace(/^::ffff:/, '');
+  return ipBucket(ip);
+}
+
+function ipBucket(ip) {
+  if (!ip.includes(':')) return ip; // IPv4 — one address, one bucket
+  // IPv6: bucket by the /64 network prefix (an attacker owning a /64 has ~1.8e19
+  // addresses; per-address limiting would be free to defeat). Expand :: first.
+  const clean = ip.split('%')[0].replace(/^\[|\]$/g, '');
+  const [head, tail = ''] = clean.split('::');
+  const h = head ? head.split(':') : [];
+  const t = tail ? tail.split(':') : [];
+  const full = [...h, ...Array(Math.max(0, 8 - h.length - t.length)).fill('0'), ...t];
+  return full.slice(0, 4).map((x) => x || '0').join(':') + '::/64';
 }
 
 // Machine callers (REST / CLI / MCP): Bearer token meeting a minimum scope.
@@ -1723,4 +1751,10 @@ app.use((err, req, res, next) => {
 
 app.listen(PORT, () => {
   console.log(`artifacts-host listening on :${PORT} (base url ${BASE_URL})`);
+  if (TRUST_PROXY === 'none') {
+    console.warn(
+      'TRUST_PROXY=none: rate limits key on the socket address. Behind a proxy or ' +
+        'tunnel (cloudflared), all clients share one bucket — set TRUST_PROXY=cloudflare.',
+    );
+  }
 });
