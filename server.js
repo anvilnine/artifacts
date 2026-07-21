@@ -772,6 +772,7 @@ async function saveZipArtifact(buffer, { slug, title, expiresAt, tags, project, 
     contentType: 'application/json',
   });
   await storage.flush?.();
+  if (meta.tokenEpoch !== undefined) await ensureSessionSecret();
   return { slug: finalSlug, url: tokenedUrl(meta), files: files.length, visibility: meta.visibility || 'public' };
 }
 
@@ -907,6 +908,9 @@ async function saveArtifact({ content, type = 'html', slug, title, expiresAt, fr
     contentType: 'application/json',
   });
   await storage.flush?.(); // durably commit the completed write (git); no-op elsewhere
+  // A non-public artifact needs the session secret resident to mint its capability token;
+  // it is created lazily (first login otherwise), so force it here (tokenEpoch ⇒ non-public).
+  if (meta.tokenEpoch !== undefined) await ensureSessionSecret();
   return { slug: finalSlug, url: tokenedUrl(meta), visibility: meta.visibility || 'public' };
 }
 
@@ -1048,6 +1052,7 @@ async function patchArtifact(slug, patch) {
     contentType: 'application/json',
   });
   await storage.flush?.();
+  if (meta.tokenEpoch !== undefined) await ensureSessionSecret();
   return { slug: meta.slug, url: tokenedUrl(meta), visibility: meta.visibility || 'public' };
 }
 
@@ -1419,6 +1424,7 @@ app.get('/api/artifacts/:slug/link', requireAuth('read'), async (req, res, next)
   try {
     const meta = SLUG_RE.test(req.params.slug) ? await readMeta(req.params.slug) : null;
     if (!meta) throw new ApiError(404, `slug "${req.params.slug}" not found`);
+    if (meta.tokenEpoch !== undefined) await ensureSessionSecret();
     res.json({ url: tokenedUrl(meta), visibility: meta.visibility || 'public' });
   } catch (err) {
     next(err);
