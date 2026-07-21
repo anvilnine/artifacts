@@ -114,6 +114,9 @@ const SCOPES = ['read', 'publish', 'full'];
 const SCOPE_RANK = { read: 0, publish: 1, full: 2 };
 const SESSION_COOKIE = 'artifacts_session';
 const SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
+// Lifetime of a capability share link (?k=<token>). The token is what the operator
+// copies for a private/password artifact; it exchanges for a slug-scoped unlock cookie.
+const CAP_TOKEN_TTL_MS = Number(process.env.CAP_TOKEN_TTL_DAYS || 30) * 24 * 60 * 60 * 1000;
 // lastUsedAt is best-effort telemetry, not audit — throttle the write so a busy
 // key does not commit+push on the git backend (or hammer SQL) on every request.
 // On multi-replica deploys each replica throttles independently; the value is
@@ -465,37 +468,71 @@ const PASSWORD_SHELL = await fs.readFile(path.join(__dirname, 'shells', 'passwor
 const VISIBILITIES = ['public', 'private', 'password'];
 const UNLOCK_TTL_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
 
-// Unlock cookie: HMAC({slug, exp}) signed with the session secret, HttpOnly and
-// scoped to Path=/a/<slug> so it never rides to another artifact. Set on a correct
-// password (per-artifact for 'password', the admin password for 'private').
+// Unlock cookie: HMAC({typ:'unlock', slug, epoch, exp}) signed with the session
+// secret, HttpOnly and scoped to Path=/a/<slug> so it never rides to another artifact.
+// Set by the ?k= capability-link exchange, or by a correct password ('password' mode).
 function unlockCookieName(slug) {
   return `au_${slug}`;
 }
 
-async function issueUnlock(res, slug) {
+// Non-secret per-artifact revocation counter. Bumping it (rotate) invalidates every
+// live token AND unlock cookie for the slug, since both bind the epoch they were minted at.
+function metaEpoch(meta) {
+  return typeof meta.tokenEpoch === 'number' ? meta.tokenEpoch : 0;
+}
+
+// Capability token carried in the share URL (?k=…). Keyed on the session secret like the
+// session/unlock cookies, but typ:'cap' keeps the three token kinds non-interchangeable.
+// No per-artifact secret is stored — nothing sensitive can leak through the list API.
+function signCapToken(slug, epoch, ttlMs = CAP_TOKEN_TTL_MS) {
+  return signSession({ typ: 'cap', slug, epoch, exp: Date.now() + ttlMs }, auth.sessionSecret);
+}
+
+function verifyCapToken(token, slug, epoch) {
+  const p = verifySession(token, auth.sessionSecret);
+  if (!p || p.typ !== 'cap' || p.slug !== slug || p.epoch !== epoch) return false;
+  return !(typeof p.exp === 'number' && p.exp <= Date.now());
+}
+
+// The URL to hand out: public is the bare link; private/password carry a token so the
+// private default costs the operator nothing — what they copy is immediately viewable.
+function tokenedUrl(meta) {
+  const base = `${BASE_URL}/a/${meta.slug}`;
+  const suffix = meta.type === 'zip' ? '/' : '';
+  if (meta.visibility !== 'private' && meta.visibility !== 'password') return base + suffix;
+  return `${base}${suffix}?k=${signCapToken(meta.slug, metaEpoch(meta))}`;
+}
+
+// A cookie lives at most UNLOCK_TTL_MS, and never past the token that minted it.
+async function issueUnlock(res, meta, capExp) {
   const secret = await ensureSessionSecret();
-  const token = signSession({ slug, exp: Date.now() + UNLOCK_TTL_MS }, secret);
-  res.cookie(unlockCookieName(slug), token, {
+  const ttl = capExp ? Math.max(0, Math.min(UNLOCK_TTL_MS, capExp - Date.now())) : UNLOCK_TTL_MS;
+  const token = signSession(
+    { typ: 'unlock', slug: meta.slug, epoch: metaEpoch(meta), exp: Date.now() + ttl },
+    secret,
+  );
+  res.cookie(unlockCookieName(meta.slug), token, {
     httpOnly: true,
     secure: BASE_URL.startsWith('https'),
     sameSite: 'lax',
-    maxAge: UNLOCK_TTL_MS,
-    path: `/a/${slug}`,
+    maxAge: ttl,
+    path: `/a/${meta.slug}`,
   });
 }
 
-function unlockValid(req, slug) {
-  const payload = verifySession(readCookie(req, unlockCookieName(slug)), auth.sessionSecret);
-  if (!payload || payload.slug !== slug) return false;
-  return !(typeof payload.exp === 'number' && payload.exp <= Date.now());
+function unlockValid(req, meta) {
+  const p = verifySession(readCookie(req, unlockCookieName(meta.slug)), auth.sessionSecret);
+  if (!p || p.typ !== 'unlock' || p.slug !== meta.slug || p.epoch !== metaEpoch(meta)) return false;
+  return !(typeof p.exp === 'number' && p.exp <= Date.now());
 }
 
-// May this request view the artifact body? Public: always. Private/password: an
-// admin session (same-origin convenience) or a valid unlock cookie.
+// May this request view the artifact body? Public: always. private/password: a valid
+// unlock cookie only. No admin-session bypass: on the mandated split-origin deploy the
+// dashboard session cookie never reaches the artifact origin, so it never applied — the
+// operator uses a capability link like anyone else.
 function artifactUnlocked(req, meta) {
   if (meta.visibility !== 'private' && meta.visibility !== 'password') return true;
-  if (sessionPrincipal(req)) return true;
-  return unlockValid(req, meta.slug);
+  return unlockValid(req, meta);
 }
 
 const TYPES = ['html', 'jsx', 'tsx', 'md'];
