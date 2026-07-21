@@ -18,8 +18,9 @@ expect_code() { # expect_code <expected> <actual> <label>
 code=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/api/artifacts" -H "$JSON" -d '{"content":"<h1>x</h1>","type":"html"}')
 expect_code 401 "$code" "unauth publish"
 
-# publish html -> 201
-code=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/api/artifacts" -H "$AUTH" -H "$JSON" -d '{"content":"<h1>smoke</h1>","type":"html","slug":"ci-smoke"}')
+# publish html -> 201. Explicit visibility:public because the server default is now
+# private; the serve-path assertions below need a publicly viewable artifact.
+code=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/api/artifacts" -H "$AUTH" -H "$JSON" -d '{"content":"<h1>smoke</h1>","type":"html","slug":"ci-smoke","visibility":"public"}')
 expect_code 201 "$code" "publish html"
 
 # public raw read -> 200 and body contains content
@@ -138,7 +139,7 @@ mkdir -p "$ZIPDIR/site/css"
 echo '<!doctype html><link rel="stylesheet" href="css/s.css"><h1>zip smoke</h1>' > "$ZIPDIR/site/index.html"
 echo 'h1{color:green}' > "$ZIPDIR/site/css/s.css"
 (cd "$ZIPDIR/site" && zip -qr ../site.zip .)
-code=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/api/artifacts/zip?slug=ci-zip&tags=zipped,site" -H "$AUTH" -H "Content-Type: application/zip" --data-binary @"$ZIPDIR/site.zip")
+code=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/api/artifacts/zip?slug=ci-zip&tags=zipped,site&visibility=public" -H "$AUTH" -H "Content-Type: application/zip" --data-binary @"$ZIPDIR/site.zip")
 expect_code 201 "$code" "zip deploy"
 code=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/a/ci-zip/css/s.css")
 expect_code 200 "$code" "zip asset"
@@ -176,6 +177,61 @@ hdr=$(curl -s -D - -o /dev/null -X POST "$BASE/api/auth/login" -H "$JSON" \
 echo "$hdr" | grep -qi '^Retry-After:' || fail "429 missing Retry-After header"
 echo "ok: login limiter sets Retry-After"
 
+# --- capability links: default is private, tokened URL, no existence leak ---
+resp=$(curl -s -X POST "$BASE/api/artifacts" -H "$AUTH" -H "$JSON" \
+  -d '{"content":"<h1>cap secret</h1>","type":"html","slug":"cap-one"}')
+capurl=$(printf '%s' "$resp" | sed -n 's/.*"url":"\([^"]*\)".*/\1/p')
+case "$capurl" in
+  *'?k='*) echo "ok: default publish is private (tokened url returned)" ;;
+  *) fail "default publish not private/tokened: $capurl" ;;
+esac
+
+# bare link -> 404 (indistinguishable from a missing artifact)
+code=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/a/cap-one")
+expect_code 404 "$code" "private bare link 404"
+
+# tokened link -> 302 (sets the unlock cookie), does not 200 directly
+code=$(curl -s -o /dev/null -w '%{http_code}' "$capurl")
+expect_code 302 "$code" "capability link redirects"
+
+# the 302 sets a cookie; a raw read with that cookie serves the body
+curl -s -c /tmp/capjar -o /dev/null "$capurl"
+body=$(curl -s -b /tmp/capjar "$BASE/a/cap-one?raw=1")
+echo "$body" | grep -q 'cap secret' || fail "unlock cookie did not serve raw body"
+echo "ok: capability cookie serves the body"
+
+# rotate -> the live cookie is invalidated immediately
+curl -sf -X PATCH "$BASE/api/artifacts/cap-one" -H "$AUTH" -H "$JSON" -d '{"rotateToken":true}' > /dev/null
+code=$(curl -s -o /dev/null -w '%{http_code}' -b /tmp/capjar "$BASE/a/cap-one?raw=1")
+expect_code 404 "$code" "rotate invalidates live cookie"
+
+# oracle uniformity: a missing slug and a locked-private slug return identical 404 bodies
+b_missing=$(curl -s "$BASE/a/does-not-exist-zzz")
+b_locked=$(curl -s "$BASE/a/cap-one")
+[ "$b_missing" = "$b_locked" ] || fail "404 bodies differ (existence oracle)"
+echo "ok: missing and locked-private return identical 404"
+
+# no secret leak: the list API exposes no token epoch or password material
+list=$(curl -s "$BASE/api/artifacts" -H "$AUTH")
+if echo "$list" | grep -q 'tokenEpoch'; then fail "tokenEpoch leaked in list"; fi
+if echo "$list" | grep -qiE 'passwordhash|passwordsalt'; then fail "password hash leaked in list"; fi
+echo "ok: no secret fields in list output"
+
+# --- password mode: prompt, wrong/right unlock, cookie serves ---
+curl -sf -X POST "$BASE/api/artifacts" -H "$AUTH" -H "$JSON" \
+  -d '{"content":"<h1>pw body</h1>","type":"html","slug":"cap-pw","visibility":"password","password":"letmein"}' > /dev/null
+code=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/a/cap-pw")
+expect_code 401 "$code" "password mode shows prompt"
+code=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/a/cap-pw/unlock" -H "$JSON" -d '{"password":"nope"}')
+expect_code 401 "$code" "password unlock wrong -> 401"
+curl -s -c /tmp/pwjar -o /dev/null -X POST "$BASE/a/cap-pw/unlock" -H "$JSON" -d '{"password":"letmein"}'
+body=$(curl -s -b /tmp/pwjar "$BASE/a/cap-pw?raw=1")
+echo "$body" | grep -q 'pw body' || fail "password unlock cookie did not serve body"
+echo "ok: password mode unlock round-trip"
+
+curl -sf -X DELETE "$BASE/api/artifacts/cap-one" -H "$AUTH" > /dev/null
+curl -sf -X DELETE "$BASE/api/artifacts/cap-pw" -H "$AUTH" > /dev/null
+
 # CLI round-trip (cli.js lives next to this checkout; skipped when deps absent,
 # e.g. the container-smoke job which doesn't run npm ci)
 CLI_DIR=$(cd "$(dirname "$0")/../.." && pwd)
@@ -186,7 +242,7 @@ if [ ! -d "$CLI_DIR/node_modules" ]; then
 fi
 export ARTIFACTS_URL=$BASE ARTIFACTS_API_KEY=$KEY
 echo '<h1>cli smoke</h1>' > "$ZIPDIR/cli.html"
-url=$(node "$CLI_DIR/cli.js" publish "$ZIPDIR/cli.html" --slug ci-cli --tags cli,smoke)
+url=$(node "$CLI_DIR/cli.js" publish "$ZIPDIR/cli.html" --slug ci-cli --tags cli,smoke --visibility public)
 [ "$url" = "$BASE/a/ci-cli" ] || fail "cli publish: unexpected url $url"
 node "$CLI_DIR/cli.js" list --tag cli | grep -q 'ci-cli' || fail "cli --tags not stored"
 node "$CLI_DIR/cli.js" tag ci-cli none > /dev/null
@@ -205,7 +261,7 @@ node "$CLI_DIR/cli.js" list --project web-revamp | grep -q 'ci-cli-2' || fail "c
 node "$CLI_DIR/cli.js" project ci-cli-2 none > /dev/null
 if node "$CLI_DIR/cli.js" list --project web-revamp | grep -q 'ci-cli-2'; then fail "cli project clear failed"; fi
 echo "ok: cli project"
-node "$CLI_DIR/cli.js" deploy "$ZIPDIR/site" --slug ci-cli-zip > /dev/null
+node "$CLI_DIR/cli.js" deploy "$ZIPDIR/site" --slug ci-cli-zip --visibility public > /dev/null
 code=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/a/ci-cli-zip/css/s.css")
 expect_code 200 "$code" "cli zip deploy"
 node "$CLI_DIR/cli.js" delete ci-cli-2 > /dev/null
