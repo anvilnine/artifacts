@@ -244,6 +244,33 @@
   .group-items { display: flex; flex-direction: column; gap: 8px; }
   .group.collapsed .group-items { display: none; }
 
+  /* view switch (grouped / list / grid) */
+  .viewtoggle {
+    display: flex; gap: 2px; margin-left: auto; padding: 2px;
+    border: 1px solid var(--rim-soft); border-radius: 9px; background: var(--field);
+  }
+  .viewtoggle button {
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 30px; height: 28px; padding: 0; background: transparent; border: none;
+    border-radius: 6px; color: var(--taupe); cursor: pointer; transition: .12s;
+  }
+  .viewtoggle button:hover { color: var(--sand); background: var(--cocoa-hi); }
+  .viewtoggle button.on { color: var(--cream); background: var(--cocoa-hi); }
+  .viewtoggle svg { width: 16px; height: 16px; stroke: currentColor; stroke-width: 1.75; fill: none; stroke-linecap: round; stroke-linejoin: round; }
+
+  /* project label shown on rows in flat (list / grid) views */
+  .proj-tag {
+    display: inline-flex; align-items: center; gap: 5px; font-size: 11px; font-weight: 600;
+    color: var(--cream); background: var(--cocoa-hi); border: 1px solid var(--rim-soft);
+    border-radius: 2em; padding: 2px 10px; cursor: pointer; transition: .12s;
+  }
+  .proj-tag:hover { border-color: var(--rose); color: var(--cream-hi); }
+  .proj-tag svg { width: 11px; height: 11px; stroke: var(--taupe); stroke-width: 2; fill: none; }
+
+  #rows.grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(clamp(240px, 28vw, 300px), 1fr)); gap: 12px; }
+  #rows.grid .item { flex-direction: column; align-items: stretch; gap: 12px; }
+  #rows.grid .item-actions { justify-content: flex-start; }
+
   .items { display: flex; flex-direction: column; gap: 8px; }
   .item {
     display: flex; align-items: center; gap: 16px; justify-content: space-between;
@@ -277,6 +304,27 @@
   }
   .chip:hover { color: var(--sand); border-color: var(--taupe); background: var(--field); }
   .chip.active { border-color: var(--rose); color: var(--cream); background: var(--rose-tint); }
+
+  /* tag editor — type to add a chip, × to remove */
+  .tagbox {
+    display: flex; flex-wrap: wrap; align-items: center; gap: 6px; width: 100%;
+    padding: 6px 8px; min-height: 40px; border: 1px solid var(--rim); border-radius: 9px;
+    background: var(--field); cursor: text; transition: border-color .12s;
+  }
+  .tagbox.focus { border-color: var(--rose); outline: 2px solid var(--rose); outline-offset: 1px; }
+  .tagbox .tagchip {
+    display: inline-flex; align-items: center; gap: 5px; padding: 3px 5px 3px 10px;
+    border-radius: 2em; background: var(--cocoa-hi); border: 1px solid var(--rim);
+    color: var(--sand); font-size: 12px; line-height: 1;
+  }
+  .tagbox .tagchip button {
+    display: inline-flex; align-items: center; justify-content: center; width: 16px; height: 16px;
+    padding: 0; margin: 0; background: transparent; border: none; border-radius: 50%;
+    color: var(--taupe); cursor: pointer; font-size: 15px; line-height: 1; transition: .12s;
+  }
+  .tagbox .tagchip button:hover { background: var(--danger-bg); color: var(--brick); }
+  .tagbox input { flex: 1; min-width: 90px; width: auto; padding: 4px 2px; border: none; background: transparent; outline: none; }
+  .tagbox input:focus { outline: none; border: none; }
 
   .item-actions {
     display: flex; align-items: center; gap: 4px; flex: none; flex-wrap: wrap; justify-content: flex-end;
@@ -470,10 +518,11 @@
             </div>
             <div class="row">
               <label class="f">Tags
-                <input id="tags" placeholder="comma-separated">
+                <div id="tags" class="tagbox"></div>
               </label>
               <label class="f">Project
-                <input id="project" placeholder="optional">
+                <input id="project" placeholder="pick or type" list="projectOptions" autocomplete="off">
+                <datalist id="projectOptions"></datalist>
               </label>
             </div>
             <label class="f">Content
@@ -548,7 +597,20 @@
   <div id="results"></div>
 
   <div id="list">
-    <div class="section-head"><h2>Published</h2><span class="count" id="count"></span></div>
+    <div class="section-head">
+      <h2>Published</h2><span class="count" id="count"></span>
+      <div class="viewtoggle" role="group" aria-label="View mode">
+        <button type="button" data-view="grouped" title="Group by project" aria-label="Group by project">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5h5M4 9h11M4 15h5M4 19h11"/></svg>
+        </button>
+        <button type="button" data-view="list" title="Flat list, newest first" aria-label="Flat list">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16M4 12h16M4 18h16"/></svg>
+        </button>
+        <button type="button" data-view="grid" title="Grid, newest first" aria-label="Grid">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="4" width="7" height="7" rx="1.5"/><rect x="13" y="4" width="7" height="7" rx="1.5"/><rect x="4" y="13" width="7" height="7" rx="1.5"/><rect x="13" y="13" width="7" height="7" rx="1.5"/></svg>
+        </button>
+      </div>
+    </div>
     <div class="items" id="rows"></div>
   </div>
 </div>
@@ -751,7 +813,8 @@
     if ($('slug').value) body.slug = $('slug').value;
     if ($('title').value) body.title = $('title').value;
     if ($('frame').value !== 'default') body.frame = $('frame').value === 'on';
-    if ($('tags').value.trim()) body.tags = $('tags').value;
+    const tagList = composeTags.getTags();
+    if (tagList.length) body.tags = tagList;
     if ($('project').value.trim()) body.project = $('project').value.trim();
     body.visibility = $('visibility').value; // authoritative: what the select shows is what you get
     if ($('visibility').value === 'password') {
@@ -763,7 +826,7 @@
       addResult('pasted ' + body.type, r.data.url, true);
       navigator.clipboard.writeText(r.data.url).catch(() => {});
       $('content').value = '';
-      $('tags').value = '';
+      composeTags.setTags([]);
       $('project').value = '';
       $('password').value = '';
       $('visibility').value = 'private';
@@ -779,15 +842,82 @@
 
   let allItems = [];
   const collapsed = new Set();
+  let viewMode = 'grouped';
+  try { viewMode = localStorage.getItem('artifacts:view') || 'grouped'; } catch {}
 
   async function loadList() {
     try {
       const res = await fetch('/api/artifacts', { headers: headers() });
       if (!res.ok) return;
       allItems = await res.json();
+      refreshProjectOptions();
       renderList();
     } catch {}
   }
+
+  // Distinct project names in use, newest-activity first, for the compose/edit combobox.
+  function refreshProjectOptions() {
+    const dl = $('projectOptions');
+    if (!dl) return;
+    const seen = new Map(); // name -> most recent timestamp
+    for (const a of allItems) {
+      if (!a.project) continue;
+      const t = Date.parse(a.updatedAt || a.createdAt || '') || 0;
+      seen.set(a.project, Math.max(seen.get(a.project) || 0, t));
+    }
+    const names = [...seen.keys()].sort((x, y) => seen.get(y) - seen.get(x));
+    dl.innerHTML = '';
+    for (const n of names) {
+      const o = document.createElement('option');
+      o.value = n;
+      dl.appendChild(o);
+    }
+  }
+
+  // A small tag editor: type + Enter/comma to add a chip, × to remove one, Backspace
+  // on an empty field drops the last. Tags are normalized to the server rule
+  // ([a-z0-9-], max 32) so the chips always show exactly what gets stored.
+  function makeTagInput(box, initial) {
+    let tags = [];
+    const input = document.createElement('input');
+    input.type = 'text';
+    input.autocomplete = 'off';
+    input.setAttribute('autocapitalize', 'none');
+    input.spellcheck = false;
+    const clean = (s) => s.trim().toLowerCase().replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '').replace(/^-+/, '').slice(0, 32);
+    function render() {
+      box.querySelectorAll('.tagchip').forEach((c) => c.remove());
+      for (const t of tags) {
+        const chip = document.createElement('span');
+        chip.className = 'tagchip';
+        chip.appendChild(document.createTextNode(t));
+        const x = document.createElement('button');
+        x.type = 'button';
+        x.textContent = '×';
+        x.setAttribute('aria-label', 'Remove tag ' + t);
+        x.addEventListener('click', (e) => { e.preventDefault(); tags = tags.filter((v) => v !== t); render(); input.focus(); });
+        chip.appendChild(x);
+        box.insertBefore(chip, input);
+      }
+      input.placeholder = tags.length ? 'add…' : 'type a tag, press Enter';
+    }
+    function add(raw) { const t = clean(raw); if (t && !tags.includes(t)) tags.push(t); }
+    input.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' || e.key === ',') { e.preventDefault(); add(input.value); input.value = ''; render(); }
+      else if (e.key === 'Backspace' && !input.value && tags.length) { tags.pop(); render(); }
+    });
+    input.addEventListener('focus', () => box.classList.add('focus'));
+    input.addEventListener('blur', () => { box.classList.remove('focus'); if (input.value.trim()) { add(input.value); input.value = ''; render(); } });
+    box.addEventListener('mousedown', (e) => { if (e.target === box) { e.preventDefault(); input.focus(); } });
+    box.appendChild(input);
+    tags = (initial || []).map(clean).filter((v, i, a) => v && a.indexOf(v) === i);
+    render();
+    return {
+      getTags: () => tags.slice(),
+      setTags: (arr) => { tags = (arr || []).map(clean).filter((v, i, a) => v && a.indexOf(v) === i); render(); },
+    };
+  }
+  const composeTags = makeTagInput($('tags'), []);
 
   function matchItem(a, q) {
     return (a.slug && a.slug.toLowerCase().includes(q))
@@ -881,6 +1011,7 @@
       }
 
       let input = null;
+      let readValue = () => true; // what Save resolves to
       if (opts.choices) {
         const wrap = document.createElement('div');
         wrap.className = 'choices';
@@ -890,13 +1021,22 @@
           wrap.appendChild(b);
         }
         box.appendChild(wrap);
+      } else if (opts.tags) {
+        const tagbox = document.createElement('div');
+        tagbox.className = 'tagbox';
+        box.appendChild(tagbox);
+        const ti = makeTagInput(tagbox, opts.value || []);
+        input = tagbox.querySelector('input');
+        readValue = () => ti.getTags();
       } else if (opts.input) {
         input = document.createElement('input');
         input.type = opts.password ? 'password' : 'text';
         input.value = opts.value || '';
         if (opts.placeholder) input.placeholder = opts.placeholder;
+        if (opts.list) { input.setAttribute('list', opts.list); input.autocomplete = 'off'; }
         input.addEventListener('keydown', (e) => { if (e.key === 'Enter') finish(input.value); });
         box.appendChild(input);
+        readValue = () => input.value;
       }
 
       const foot = document.createElement('div');
@@ -910,7 +1050,7 @@
         const ok = document.createElement('button');
         if (opts.danger) ok.className = 'danger';
         ok.textContent = opts.confirmText || 'Save';
-        ok.addEventListener('click', () => finish(input ? input.value : true));
+        ok.addEventListener('click', () => finish(readValue()));
         foot.appendChild(ok);
       }
       box.appendChild(foot);
@@ -932,6 +1072,7 @@
     if (idx < 0) return;
     const prev = allItems[idx];
     allItems[idx] = { ...prev, ...local, updatedAt: new Date().toISOString() };
+    refreshProjectOptions();
     renderList();
     try {
       const res = await fetch('/api/artifacts/' + a.slug, {
@@ -946,6 +1087,7 @@
       return d;
     } catch (err) {
       allItems[idx] = prev;
+      refreshProjectOptions();
       renderList();
       toast(err.message || 'update failed', true);
     }
@@ -956,7 +1098,7 @@
     const live = new Set(allItems.map((a) => a.project || ''));
     for (const k of collapsed) if (!live.has(k)) collapsed.delete(k);
     const q = ($('search').value || '').trim().toLowerCase();
-    const filtered = q ? allItems.filter((a) => matchItem(a, q)) : allItems;
+    const filtered = q ? allItems.filter((a) => matchItem(a, q)) : allItems.slice();
 
     $('count').textContent = allItems.length
       ? (q ? filtered.length + ' of ' + allItems.length
@@ -965,30 +1107,36 @@
 
     const rows = $('rows');
     rows.innerHTML = '';
+    rows.classList.toggle('grid', viewMode === 'grid');
 
     if (!allItems.length) return showEmpty('Nothing published yet. Drop a file above to start.');
     if (!filtered.length) return showEmpty('No matches for “' + q + '”.');
 
-    // No projects in use yet → a plain flat list.
-    if (!allItems.some((a) => a.project)) {
-      for (const a of filtered) rows.appendChild(buildItem(a));
+    const hasProjects = allItems.some((a) => a.project);
+
+    // Grouped view — one section per project. Only meaningful once a project is in use.
+    if (viewMode === 'grouped' && hasProjects) {
+      const groups = new Map();
+      for (const a of filtered) {
+        const key = a.project || '';
+        if (!groups.has(key)) groups.set(key, []);
+        groups.get(key).push(a);
+      }
+      // Newest item inside each group, used to order the groups by recent activity.
+      const recency = (items) => items.reduce((m, a) => Math.max(m, ts(a)), 0);
+      for (const items of groups.values()) items.sort(byNewest);
+      // Most recently touched project first; "No project" is no longer pinned to the bottom.
+      const keys = [...groups.keys()].sort((x, y) => recency(groups.get(y)) - recency(groups.get(x)));
+      for (const key of keys) rows.appendChild(buildGroup(key, groups.get(key), !!q));
       return;
     }
 
-    // Group by project; the "No project" bucket sorts last.
-    const groups = new Map();
-    for (const a of filtered) {
-      const key = a.project || '';
-      if (!groups.has(key)) groups.set(key, []);
-      groups.get(key).push(a);
-    }
-    const keys = [...groups.keys()].sort((x, y) => {
-      if (x === '') return 1;
-      if (y === '') return -1;
-      return x.toLowerCase().localeCompare(y.toLowerCase());
-    });
-    for (const key of keys) rows.appendChild(buildGroup(key, groups.get(key), !!q));
+    // Flat views (list + grid) — everything newest first, project shown per row.
+    for (const a of filtered.sort(byNewest)) rows.appendChild(buildItem(a, { showProject: hasProjects }));
   }
+
+  const ts = (a) => Date.parse(a.updatedAt || a.createdAt || '') || 0;
+  const byNewest = (a, b) => ts(b) - ts(a);
 
   function buildGroup(key, items, searching) {
     const sec = document.createElement('section');
@@ -1022,7 +1170,8 @@
     return sec;
   }
 
-  function buildItem(a) {
+  function buildItem(a, opts) {
+      opts = opts || {};
       const expired = a.expiresAt && Date.parse(a.expiresAt) <= Date.now();
       const item = document.createElement('div');
       item.className = 'item' + ((a.disabled || expired) ? ' off' : '');
@@ -1053,9 +1202,19 @@
         body.appendChild(t);
       }
 
-      // line 3 — tag chips + timestamp
+      // line 3 — project label (flat views only), tag chips, timestamp
       const meta = document.createElement('div');
       meta.className = 'item-meta';
+      if (opts.showProject && a.project) {
+        const pt = document.createElement('button');
+        pt.type = 'button';
+        pt.className = 'proj-tag';
+        pt.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h6a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>';
+        pt.appendChild(document.createTextNode(a.project));
+        pt.title = 'Filter to project “' + a.project + '”';
+        pt.addEventListener('click', () => { $('search').value = a.project; renderList(); });
+        meta.appendChild(pt);
+      }
       for (const t of a.tags || []) {
         const chip = document.createElement('button');
         chip.className = 'chip';
@@ -1173,19 +1332,18 @@
         menuItem(menu, 'Tags…', '', async () => {
           const v = await dialog({
             title: 'Tags for “' + a.slug + '”',
-            body: 'Comma-separated. Leave empty to clear.',
-            input: true, value: (a.tags || []).join(', '),
+            body: 'Type a tag and press Enter. Click × to remove one. Empty clears all.',
+            tags: true, value: (a.tags || []),
           });
           if (v === null) return;
-          const parsed = v.split(',').map((t) => t.trim()).filter(Boolean);
-          patchItem(a, { tags: v.trim() }, { tags: parsed });
+          patchItem(a, { tags: v }, { tags: v.length ? v : undefined });
         });
 
         menuItem(menu, 'Project…', '', async () => {
           const v = await dialog({
             title: 'Project for “' + a.slug + '”',
-            body: 'Groups this artifact in the list. Leave empty to clear.',
-            input: true, value: a.project || '',
+            body: 'Groups this artifact in the list. Pick an existing project or type a new one. Empty clears it.',
+            input: true, value: a.project || '', list: 'projectOptions', placeholder: 'pick or type',
           });
           if (v === null) return;
           patchItem(a, { project: v.trim() }, { project: v.trim() || undefined });
@@ -1261,6 +1419,18 @@
   $('search').addEventListener('input', () => {
     clearTimeout(searchT);
     searchT = setTimeout(renderList, 120);
+  });
+
+  // view switch (grouped / list / grid), remembered across sessions
+  function setView(mode) {
+    viewMode = mode;
+    try { localStorage.setItem('artifacts:view', mode); } catch {}
+    document.querySelectorAll('.viewtoggle button').forEach((b) => b.classList.toggle('on', b.dataset.view === mode));
+    renderList();
+  }
+  document.querySelectorAll('.viewtoggle button').forEach((b) => {
+    b.classList.toggle('on', b.dataset.view === viewMode);
+    b.addEventListener('click', () => setView(b.dataset.view));
   });
 
   function closeMenu(m) {
