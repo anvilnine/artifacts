@@ -5,7 +5,7 @@
 </p>
 
 <p align="center">
-  POST HTML, a React component, Markdown, or a zipped static site — get back an unguessable URL on your own domain.
+  POST HTML, a React component, Markdown, or a zipped static site. Get back an unguessable URL on your own domain.
 </p>
 
 <p align="center">
@@ -25,32 +25,31 @@
 
 <table>
   <tr>
-    <td width="50%"><img src="docs/screenshot.png" alt="Dashboard — publish, group by project, and manage artifacts"></td>
+    <td width="50%"><img src="docs/screenshot.png" alt="Dashboard: publish, group by project, and manage artifacts"></td>
     <td width="50%"><img src="docs/screenshot-view.png" alt="A published artifact served with the viewer topbar"></td>
   </tr>
   <tr>
-    <td align="center"><em>Dashboard — publish, group, and manage</em></td>
+    <td align="center"><em>Dashboard: publish, group, and manage</em></td>
     <td align="center"><em>A published artifact with the viewer topbar</em></td>
   </tr>
 </table>
 
 ## About
 
-AI assistants generate a lot of shareable output — dashboards, prototypes, reports, small apps. Claude's hosted artifacts work well, but the URLs live on someone else's infrastructure. This is the ~1,100-line self-hosted version: you POST content, it serves the rendered result at an unguessable URL on a domain you control.
+AI assistants produce a lot of shareable output: dashboards, prototypes, reports, small apps. Claude's hosted artifacts work well, but the URLs live on someone else's infrastructure. This is the self-hosted version, about 1,100 lines. You POST content, it serves the rendered result at an unguessable URL on a domain you control.
 
-It runs as one container with a single admin account and, by default, no database — each artifact is just a directory of plain files under `/data`, so backing up that directory backs up everything. On hosts that wipe local disk on restart, point it instead at durable external storage — an S3-compatible bucket, a git remote, or Postgres — by setting `STORAGE_BACKEND` (see [deploying](docs/deploy.md#storage-backends)).
+It runs as one container with a single admin account and, by default, no database. Each artifact is a directory of plain files under `/data`, so backing up that directory backs up everything. On hosts that wipe local disk on restart, point it at durable external storage instead (an S3-compatible bucket, a git remote, or Postgres) by setting `STORAGE_BACKEND`. See [deploying](docs/deploy.md#storage-backends).
 
 ## Features
 
 - **Four content types.** HTML, JSX/TSX (a single React component, no build step), Markdown, and zipped static sites.
 - **Agent-native, human-friendly.** A built-in MCP server lets Claude Code, Codex, or any MCP client publish with one tool call. Humans get a drag-and-drop web UI at `/` (behind an admin login) and a [CLI](docs/cli.md).
-- **Two-tier auth.** An admin logs into the dashboard with a password; CLI and MCP carry scoped, revocable [API keys](docs/auth.md) (`read` / `publish` / `full`) with optional expiry — no more sharing one master secret.
-- **Private by default.** A new artifact is `private` unless you opt into `public` — nothing is discoverable by default. Unguessable slugs, `noindex` everywhere, bearer-key writes, optional expiry.
-- **Per-artifact visibility.** Each artifact is private (the default — shared through a signed capability link, `?k=…`, that you can rotate to revoke), public (anyone with the bare link), or password-protected (a shared password you hand out) — see [visibility](docs/api.md#visibility).
-- **Optional viewer frame.** A slim top toolbar (title, copy link, hide) like Claude/Gemini/ChatGPT artifacts — toggle it globally in Settings or per artifact; `?raw=1` always serves the bare content.
-- **Organize by project.** Group artifacts built for the same project into collapsible sections, with a search box across project / title / slug / tags. Tags stay for cross-cutting labels.
+- **Two-tier auth.** An admin logs into the dashboard with a password; CLI and MCP carry scoped, revocable [API keys](docs/auth.md) (`read` / `publish` / `full`) with optional expiry, so you never share one master secret.
+- **Private by default, with per-artifact visibility.** A new artifact is `private`, shared through a signed capability link (`?k=…`) you can rotate to revoke. Switch any artifact to `public` (anyone with the bare link) or password-protected. Nothing is discoverable by default: unguessable slugs, `noindex` everywhere. See [visibility](docs/api.md#visibility).
+- **Optional viewer frame.** A slim top toolbar (title, copy link, hide) like Claude, Gemini, and ChatGPT artifacts. Toggle it globally in Settings or per artifact; `?raw=1` always serves the bare content.
+- **Organize by project.** Group artifacts built for the same project into collapsible sections, with a search box across project, title, slug, and tags. Tags stay for cross-cutting labels.
 - **Lifecycle controls.** Custom slugs, rename, tags, disable without deleting, auto-expire, delete.
-- **Abuse-resistant.** Login and unlock endpoints are rate-limited per client IP (failures only); password hashing runs off the event loop, so a burst of guesses degrades those two routes instead of stalling the server. Proxy-aware client IP via `TRUST_PROXY` for deployments behind Cloudflare or a reverse proxy — see [deploying](docs/deploy.md#rate-limiting-and-the-edge).
+- **Abuse-resistant.** Login and unlock endpoints are rate-limited per client IP (failures only), and password hashing runs off the event loop, so a burst of guesses slows those two routes instead of stalling the server. Set `TRUST_PROXY` for the real client IP behind Cloudflare or a reverse proxy. See [deploying](docs/deploy.md#rate-limiting-and-the-edge).
 
 ## Quick start
 
@@ -107,33 +106,40 @@ The whole test suite is one shell script:
 bash .github/workflows/smoke.sh http://localhost:3000 <your-key>
 ```
 
-PRs welcome — see [CONTRIBUTING.md](CONTRIBUTING.md).
+PRs welcome. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
-## Security in three lines
+## Security
 
-Uploaded HTML executes — that's the product — so serve artifacts from a dedicated origin that hosts nothing else, keeping them off the dashboard's session cookie. Writes need a scoped API key (bearer); the admin dashboard uses an HttpOnly, SameSite=Strict session. Reads are public but gated by unguessable, non-indexed slugs — don't publish secrets. The credential routes (login, unlock) are rate-limited and hash passwords off the event loop; run a CDN/edge limiter in front for volumetric protection. Full model in [SECURITY.md](SECURITY.md).
+Uploaded HTML runs in the browser. That is the whole point, so the model is built to contain it:
+
+- **Serve artifacts from their own origin.** Point artifact URLs at a domain that hosts nothing else, so a published page can never touch the dashboard's session cookie.
+- **Writes need a scoped API key.** Publishing carries a bearer key; the admin dashboard uses a separate HttpOnly, SameSite=Strict session cookie.
+- **Reads rely on unguessable slugs.** Public artifacts are reachable by anyone with the link and carry `noindex`, but there is no listing to browse. Don't publish secrets.
+- **Credential routes are throttled.** Login and unlock rate-limit per client IP and hash passwords off the event loop. Put a CDN or edge limiter in front for volumetric attacks.
+
+Full threat model in [SECURITY.md](SECURITY.md).
 
 ## Acknowledgements
 
 This project stands on other people's open source. All of the following are MIT licensed.
 
 **Runtime**
-- [express](https://github.com/expressjs/express) — HTTP server
-- [marked](https://github.com/markedjs/marked) — Markdown rendering
-- [nanoid](https://github.com/ai/nanoid) — unguessable slug generation
-- [adm-zip](https://github.com/cthackers/adm-zip) — zip site extraction
-- [zod](https://github.com/colinhacks/zod) — request validation
-- [@modelcontextprotocol/sdk](https://github.com/modelcontextprotocol/typescript-sdk) — the built-in MCP server
+- [express](https://github.com/expressjs/express) for the HTTP server
+- [marked](https://github.com/markedjs/marked) for Markdown rendering
+- [nanoid](https://github.com/ai/nanoid) for unguessable slug generation
+- [adm-zip](https://github.com/cthackers/adm-zip) for zip site extraction
+- [zod](https://github.com/colinhacks/zod) for request validation
+- [@modelcontextprotocol/sdk](https://github.com/modelcontextprotocol/typescript-sdk) for the built-in MCP server
 
 **Optional storage backends** (loaded only when selected)
-- [aws4fetch](https://github.com/mhart/aws4fetch) — S3-compatible signing
-- [isomorphic-git](https://github.com/isomorphic-git/isomorphic-git) — git backend
-- [pg](https://github.com/brianc/node-postgres) — Postgres backend
+- [aws4fetch](https://github.com/mhart/aws4fetch) for S3-compatible signing
+- [isomorphic-git](https://github.com/isomorphic-git/isomorphic-git) for the git backend
+- [pg](https://github.com/brianc/node-postgres) for the Postgres backend
 
 The SQLite backend uses Node's built-in `node:sqlite` (no dependency).
 
 **Web UI**
-- [Tabler Icons](https://tabler.io/icons) — the app-bar icons (search, new, settings, lock), inlined as SVG
+- [Tabler Icons](https://tabler.io/icons) for the app-bar icons (search, new, settings, lock), inlined as SVG
 
 ## License
 
