@@ -25,8 +25,8 @@
 
 <table>
   <tr>
-    <td width="50%"><img src="docs/screenshot.png" alt="Dashboard: publish, group by project, and manage artifacts"></td>
-    <td width="50%"><img src="docs/screenshot-view.png" alt="A published artifact served with the viewer topbar"></td>
+    <td width="50%"><img src="docs/screenshot.png?v=2" alt="Dashboard: publish, group by project, and manage artifacts"></td>
+    <td width="50%"><img src="docs/screenshot-view.png?v=2" alt="A published artifact served with the viewer topbar"></td>
   </tr>
   <tr>
     <td align="center"><em>Dashboard: publish, group, and manage</em></td>
