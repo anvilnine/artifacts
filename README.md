@@ -23,16 +23,15 @@
   <a href="SECURITY.md">Security</a>
 </p>
 
-<table>
-  <tr>
-    <td width="50%"><img src="docs/screenshot.png?v=2" alt="Dashboard: publish, group by project, and manage artifacts"></td>
-    <td width="50%"><img src="docs/screenshot-view.png?v=2" alt="A published artifact served with the viewer topbar"></td>
-  </tr>
-  <tr>
-    <td align="center"><em>Dashboard: publish, group, and manage</em></td>
-    <td align="center"><em>A published artifact with the viewer topbar</em></td>
-  </tr>
-</table>
+<p align="center">
+  <img src="docs/screenshot-framed.png" alt="Dashboard: publish, group by project, and manage artifacts" width="880"><br>
+  <em>Dashboard: publish, group by project, and manage</em>
+</p>
+
+<p align="center">
+  <img src="docs/screenshot-view-framed.png" alt="A published artifact served with the viewer topbar" width="880"><br>
+  <em>A published artifact served with the viewer topbar</em>
+</p>
 
 ## About
 
