@@ -79,7 +79,7 @@ jobs:
         run: |
           curl -sf -X POST http://localhost:3000/api/artifacts \
             -H 'Authorization: Bearer ci-test-key' -H 'Content-Type: application/json' \
-            -d '{"content":"<h1>durable</h1>","slug":"restart-proof"}'
+            -d '{"content":"<h1>durable</h1>","slug":"restart-proof","visibility":"public"}'
           # kill the server and start a brand-new process against the same bucket, with
           # nothing on local disk — proves durability across a container reprovision.
           kill "$(cat server.pid)"; sleep 1
@@ -128,7 +128,7 @@ jobs:
         run: |
           curl -sf -X POST http://localhost:3000/api/artifacts \
             -H 'Authorization: Bearer ci-test-key' -H 'Content-Type: application/json' \
-            -d '{"content":"<h1>durable</h1>","slug":"restart-proof"}'
+            -d '{"content":"<h1>durable</h1>","slug":"restart-proof","visibility":"public"}'
           kill "$(cat server.pid)"; sleep 1
           # brand-new working copy -> the server must clone it back from the git remote
           GIT_WORK_DIR=/tmp/git-work-fresh node server.js &
@@ -173,7 +173,7 @@ jobs:
         run: |
           curl -sf -X POST http://localhost:3000/api/artifacts \
             -H 'Authorization: Bearer ci-test-key' -H 'Content-Type: application/json' \
-            -d '{"content":"<h1>durable</h1>","slug":"restart-proof"}'
+            -d '{"content":"<h1>durable</h1>","slug":"restart-proof","visibility":"public"}'
           kill "$(cat server.pid)"; sleep 1
           node server.js &
           for i in $(seq 1 20); do curl -sf http://localhost:3000/healthz && break; sleep 0.5; done

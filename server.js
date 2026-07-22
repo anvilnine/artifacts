@@ -114,6 +114,9 @@ const SCOPES = ['read', 'publish', 'full'];
 const SCOPE_RANK = { read: 0, publish: 1, full: 2 };
 const SESSION_COOKIE = 'artifacts_session';
 const SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
+// Lifetime of a capability share link (?k=<token>). The token is what the operator
+// copies for a private/password artifact; it exchanges for a slug-scoped unlock cookie.
+const CAP_TOKEN_TTL_MS = Number(process.env.CAP_TOKEN_TTL_DAYS || 30) * 24 * 60 * 60 * 1000;
 // lastUsedAt is best-effort telemetry, not audit — throttle the write so a busy
 // key does not commit+push on the git backend (or hammer SQL) on every request.
 // On multi-replica deploys each replica throttles independently; the value is
@@ -464,38 +467,76 @@ const PASSWORD_SHELL = await fs.readFile(path.join(__dirname, 'shells', 'passwor
 // the serve routes by an unlock cookie (below).
 const VISIBILITIES = ['public', 'private', 'password'];
 const UNLOCK_TTL_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
+// Visibility of a newly published artifact when the caller specifies none. Ships 'private'
+// (opt in to public). 'password' is nonsensical as a default (no password to set), so only
+// 'public' overrides; anything else falls back to 'private'.
+const DEFAULT_VISIBILITY = process.env.DEFAULT_VISIBILITY === 'public' ? 'public' : 'private';
 
-// Unlock cookie: HMAC({slug, exp}) signed with the session secret, HttpOnly and
-// scoped to Path=/a/<slug> so it never rides to another artifact. Set on a correct
-// password (per-artifact for 'password', the admin password for 'private').
+// Unlock cookie: HMAC({typ:'unlock', slug, epoch, exp}) signed with the session
+// secret, HttpOnly and scoped to Path=/a/<slug> so it never rides to another artifact.
+// Set by the ?k= capability-link exchange, or by a correct password ('password' mode).
 function unlockCookieName(slug) {
   return `au_${slug}`;
 }
 
-async function issueUnlock(res, slug) {
+// Non-secret per-artifact revocation counter. Bumping it (rotate) invalidates every
+// live token AND unlock cookie for the slug, since both bind the epoch they were minted at.
+function metaEpoch(meta) {
+  return typeof meta.tokenEpoch === 'number' ? meta.tokenEpoch : 0;
+}
+
+// Capability token carried in the share URL (?k=…). Keyed on the session secret like the
+// session/unlock cookies, but typ:'cap' keeps the three token kinds non-interchangeable.
+// No per-artifact secret is stored — nothing sensitive can leak through the list API.
+function signCapToken(slug, epoch, ttlMs = CAP_TOKEN_TTL_MS) {
+  return signSession({ typ: 'cap', slug, epoch, exp: Date.now() + ttlMs }, auth.sessionSecret);
+}
+
+function verifyCapToken(token, slug, epoch) {
+  const p = verifySession(token, auth.sessionSecret);
+  if (!p || p.typ !== 'cap' || p.slug !== slug || p.epoch !== epoch) return false;
+  return !(typeof p.exp === 'number' && p.exp <= Date.now());
+}
+
+// The URL to hand out: public is the bare link; private/password carry a token so the
+// private default costs the operator nothing — what they copy is immediately viewable.
+function tokenedUrl(meta) {
+  const base = `${BASE_URL}/a/${meta.slug}`;
+  const suffix = meta.type === 'zip' ? '/' : '';
+  if (meta.visibility !== 'private' && meta.visibility !== 'password') return base + suffix;
+  return `${base}${suffix}?k=${signCapToken(meta.slug, metaEpoch(meta))}`;
+}
+
+// A cookie lives at most UNLOCK_TTL_MS, and never past the token that minted it.
+async function issueUnlock(res, meta, capExp) {
   const secret = await ensureSessionSecret();
-  const token = signSession({ slug, exp: Date.now() + UNLOCK_TTL_MS }, secret);
-  res.cookie(unlockCookieName(slug), token, {
+  const ttl = capExp ? Math.max(0, Math.min(UNLOCK_TTL_MS, capExp - Date.now())) : UNLOCK_TTL_MS;
+  const token = signSession(
+    { typ: 'unlock', slug: meta.slug, epoch: metaEpoch(meta), exp: Date.now() + ttl },
+    secret,
+  );
+  res.cookie(unlockCookieName(meta.slug), token, {
     httpOnly: true,
     secure: BASE_URL.startsWith('https'),
     sameSite: 'lax',
-    maxAge: UNLOCK_TTL_MS,
-    path: `/a/${slug}`,
+    maxAge: ttl,
+    path: `/a/${meta.slug}`,
   });
 }
 
-function unlockValid(req, slug) {
-  const payload = verifySession(readCookie(req, unlockCookieName(slug)), auth.sessionSecret);
-  if (!payload || payload.slug !== slug) return false;
-  return !(typeof payload.exp === 'number' && payload.exp <= Date.now());
+function unlockValid(req, meta) {
+  const p = verifySession(readCookie(req, unlockCookieName(meta.slug)), auth.sessionSecret);
+  if (!p || p.typ !== 'unlock' || p.slug !== meta.slug || p.epoch !== metaEpoch(meta)) return false;
+  return !(typeof p.exp === 'number' && p.exp <= Date.now());
 }
 
-// May this request view the artifact body? Public: always. Private/password: an
-// admin session (same-origin convenience) or a valid unlock cookie.
+// May this request view the artifact body? Public: always. private/password: a valid
+// unlock cookie only. No admin-session bypass: on the mandated split-origin deploy the
+// dashboard session cookie never reaches the artifact origin, so it never applied — the
+// operator uses a capability link like anyone else.
 function artifactUnlocked(req, meta) {
   if (meta.visibility !== 'private' && meta.visibility !== 'password') return true;
-  if (sessionPrincipal(req)) return true;
-  return unlockValid(req, meta.slug);
+  return unlockValid(req, meta);
 }
 
 const TYPES = ['html', 'jsx', 'tsx', 'md'];
@@ -559,16 +600,10 @@ function buildFrameHtml(meta, rawUrl) {
     .replaceAll('{{RAW_URL}}', () => url);
 }
 
-// Unlock prompt: our own page (inline styles/script), posts the password to
-// /a/<slug>/unlock. LABEL distinguishes the per-artifact password from the
-// operator (admin) password used to view a private artifact.
+// Unlock prompt for password-mode artifacts. Renders no title and no mode label so it
+// discloses nothing about the artifact to someone who only holds the URL.
 function buildPromptHtml(meta) {
-  const title = escapeHtml(meta.title || meta.slug);
-  const label = meta.visibility === 'private' ? 'Operator password' : 'Password';
-  return PASSWORD_SHELL
-    .replaceAll('{{TITLE}}', () => title)
-    .replaceAll('{{SLUG}}', () => escapeHtml(meta.slug))
-    .replaceAll('{{LABEL}}', () => escapeHtml(label));
+  return PASSWORD_SHELL.replaceAll('{{SLUG}}', () => escapeHtml(meta.slug));
 }
 
 function escapeHtml(s) {
@@ -595,6 +630,12 @@ async function readMeta(slug) {
   } catch {
     return null;
   }
+}
+
+// One 404 shape for every serve-path miss (missing, disabled, locked-private, wrong slug)
+// so an unauthenticated caller cannot distinguish them — no existence oracle.
+function notFound(res) {
+  return res.status(404).type('text/plain').send('artifact not found');
 }
 
 // ---------------------------------------------------------------------------
@@ -676,13 +717,21 @@ function extractSiteFiles(zip) {
   return files;
 }
 
-async function saveZipArtifact(buffer, { slug, title, expiresAt, tags, project }) {
+async function saveZipArtifact(buffer, { slug, title, expiresAt, tags, project, visibility, password }) {
   if (slug !== undefined && !SLUG_RE.test(slug)) {
     throw new ApiError(400, 'slug must match [a-z0-9][a-z0-9-]{2,63}');
   }
   const expiry = expiresAt !== undefined ? parseExpiresAt(expiresAt) : undefined;
   const tagList = tags !== undefined ? parseTags(tags) : undefined;
   const projectName = project !== undefined ? parseProject(project) : undefined;
+  // Zip artifacts are always new (no inline-replace path), so resolve the default here.
+  const vis = visibility !== undefined ? visibility : DEFAULT_VISIBILITY;
+  if (!VISIBILITIES.includes(vis)) {
+    throw new ApiError(400, 'visibility must be public, private, or password');
+  }
+  if (vis === 'password' && (typeof password !== 'string' || !password)) {
+    throw new ApiError(400, 'password is required when visibility is "password"');
+  }
 
   let zip;
   try {
@@ -711,12 +760,20 @@ async function saveZipArtifact(buffer, { slug, title, expiresAt, tags, project }
   if (expiry !== undefined) meta.expiresAt = expiry;
   if (tagList?.length) meta.tags = tagList;
   if (projectName) meta.project = projectName;
+  if (vis === 'password') {
+    meta.visibility = 'password';
+    meta.password = await hashPassword(password);
+  } else if (vis === 'private') {
+    meta.visibility = 'private';
+  }
+  seedTokenEpoch(meta);
   // meta.json LAST: a crash mid-upload leaves the namespace invisible (404), not half-served.
   await storage.put(`${finalSlug}/meta.json`, JSON.stringify(meta, null, 2), {
     contentType: 'application/json',
   });
   await storage.flush?.();
-  return { slug: finalSlug, url: `${BASE_URL}/a/${finalSlug}/`, files: files.length };
+  if (meta.tokenEpoch !== undefined) await ensureSessionSecret();
+  return { slug: finalSlug, url: tokenedUrl(meta), files: files.length, visibility: meta.visibility || 'public' };
 }
 
 // Accepts an array of strings or a comma-separated string (JSON bodies, zip
@@ -825,37 +882,61 @@ async function saveArtifact({ content, type = 'html', slug, title, expiresAt, fr
   if (frame !== undefined) meta.frame = frame;
   if (tagList !== undefined) meta.tags = tagList.length ? tagList : undefined;
   if (projectName !== undefined) meta.project = projectName || undefined;
-  if (visibility !== undefined) {
-    if (visibility === 'password') {
-      meta.visibility = 'password';
-      meta.password = await hashPassword(password);
-    } else if (visibility === 'private') {
-      meta.visibility = 'private';
-      delete meta.password;
-    } else {
-      delete meta.visibility; // public is the default → omit
-      delete meta.password;
-    }
+  // New artifacts with no explicit visibility take DEFAULT_VISIBILITY. Replacing an
+  // existing artifact with no visibility arg preserves whatever it had (carried by the
+  // `...existing` spread), so an overwrite never silently flips access.
+  const effVisibility =
+    visibility !== undefined ? visibility : existing ? undefined : DEFAULT_VISIBILITY;
+  if (effVisibility === 'password') {
+    meta.visibility = 'password';
+    meta.password = await hashPassword(password);
+  } else if (effVisibility === 'private') {
+    meta.visibility = 'private';
+    delete meta.password;
+  } else if (effVisibility === 'public') {
+    delete meta.visibility; // public is the omitted default
+    delete meta.password;
   } else if (password !== undefined && meta.visibility === 'password') {
     if (typeof password !== 'string' || !password) {
       throw new ApiError(400, 'password must be a non-empty string');
     }
     meta.password = await hashPassword(password); // rotate on an existing password artifact
   }
+  seedTokenEpoch(meta);
   // meta.json LAST as the commit marker (see storage/index.js write-ordering contract).
   await storage.put(`${finalSlug}/meta.json`, JSON.stringify(meta, null, 2), {
     contentType: 'application/json',
   });
   await storage.flush?.(); // durably commit the completed write (git); no-op elsewhere
-  return { slug: finalSlug, url: `${BASE_URL}/a/${finalSlug}` };
+  // A non-public artifact needs the session secret resident to mint its capability token;
+  // it is created lazily (first login otherwise), so force it here (tokenEpoch ⇒ non-public).
+  if (meta.tokenEpoch !== undefined) await ensureSessionSecret();
+  return { slug: finalSlug, url: tokenedUrl(meta), visibility: meta.visibility || 'public' };
 }
 
-// Strip the password hash before an artifact's meta leaves the server; expose only
-// whether a password is set so the dashboard can render state without the secret.
+// A non-public artifact carries a non-secret epoch so capability tokens can be minted and
+// revoked; a public one carries none. Seed once; never reset a live epoch to 0 (that would
+// silently un-revoke). Idempotent, so every write path can call it.
+function seedTokenEpoch(meta) {
+  if (meta.visibility === 'private' || meta.visibility === 'password') {
+    if (meta.tokenEpoch === undefined) meta.tokenEpoch = 0;
+  } else {
+    delete meta.tokenEpoch;
+  }
+}
+
+// Allowlist (not denylist) so a new meta field can never leak by omission. Returns only
+// what the dashboard/API legitimately need; secrets (password) and internal state
+// (tokenEpoch) are dropped, and hasPassword exposes state without the hash.
+const PUBLIC_META_FIELDS = [
+  'slug', 'type', 'title', 'files', 'createdAt', 'updatedAt',
+  'expiresAt', 'frame', 'tags', 'project', 'visibility', 'disabled',
+];
 function publicMeta(meta) {
-  const { password, ...rest } = meta;
-  if (password) rest.hasPassword = true;
-  return rest;
+  const out = {};
+  for (const f of PUBLIC_META_FIELDS) if (meta[f] !== undefined) out[f] = meta[f];
+  if (meta.password) out.hasPassword = true;
+  return out;
 }
 
 async function listArtifacts({ tag, project } = {}) {
@@ -953,12 +1034,26 @@ async function patchArtifact(slug, patch) {
     }
   }
 
+  // Rotating a link is a single epoch bump — it invalidates every issued token AND live
+  // unlock cookie for the slug on the next request.
+  if (patch.rotateToken === true) {
+    if (meta.visibility !== 'private' && meta.visibility !== 'password') {
+      throw new ApiError(400, 'only private or password artifacts have a link to rotate');
+    }
+    meta.tokenEpoch = metaEpoch(meta) + 1;
+  }
+
+  // Seed the epoch when an artifact enters private/password (covers a pre-existing public
+  // artifact flipped to private); drop it when it becomes public.
+  seedTokenEpoch(meta);
+
   meta.updatedAt = new Date().toISOString();
   await storage.put(`${activeSlug}/meta.json`, JSON.stringify(meta, null, 2), {
     contentType: 'application/json',
   });
   await storage.flush?.();
-  return { slug: meta.slug, url: `${BASE_URL}/a/${meta.slug}` };
+  if (meta.tokenEpoch !== undefined) await ensureSessionSecret();
+  return { slug: meta.slug, url: tokenedUrl(meta), visibility: meta.visibility || 'public' };
 }
 
 async function deleteArtifact(slug) {
@@ -1113,26 +1208,58 @@ const FRAME_CSP = [
   "frame-src 'self';",
 ].join(' ');
 
+// Capability-link exchange: a valid ?k=<token> sets the slug-scoped unlock cookie, then
+// 302s to the same path with only `k` stripped (raw and the deep zip path preserved), so
+// the token leaves the address bar after first load. Runs before the /a routes below,
+// hence ahead of the zip trailing-slash redirect and the frame branch. Invalid/absent
+// token: fall through and let the normal gate decide (a bad token never 200s or leaks).
+app.use('/a/:slug', async (req, res, next) => {
+  try {
+    const token = typeof req.query.k === 'string' ? req.query.k : '';
+    if (!token) return next();
+    const { slug } = req.params;
+    const meta = SLUG_RE.test(slug) ? await readMeta(slug) : null;
+    if (!meta || meta.disabled || isExpired(meta)) return next(); // don't leak; normal gate 404s
+    if (meta.visibility !== 'private' && meta.visibility !== 'password') return next(); // public: k is meaningless
+    if (!verifyCapToken(token, slug, metaEpoch(meta))) return next(); // bad token → gate handles it
+    const p = verifySession(token, auth.sessionSecret);
+    await issueUnlock(res, meta, typeof p.exp === 'number' ? p.exp : undefined);
+    // Rebuild the URL without `k`, preserving everything else and the (zip) path.
+    const url = new URL(req.originalUrl, BASE_URL);
+    url.searchParams.delete('k');
+    res.set('Referrer-Policy', 'no-referrer');
+    return res.redirect(302, url.pathname + url.search);
+  } catch (err) {
+    next(err);
+  }
+});
+
 app.get('/a/:slug', async (req, res) => {
   const { slug } = req.params;
   const meta = SLUG_RE.test(slug) ? await readMeta(slug) : null;
-  if (!meta || meta.disabled) {
-    return res.status(404).type('text/plain').send('artifact not found');
-  }
+  if (!meta || meta.disabled) return notFound(res);
+  // Expiry is 410 only once the caller has proved access; otherwise a 404 like any other
+  // miss, so expiry does not become an existence oracle for a locked artifact.
   if (isExpired(meta)) {
-    return res.status(410).type('text/plain').send('artifact expired');
+    return artifactUnlocked(req, meta)
+      ? res.status(410).type('text/plain').send('artifact expired')
+      : notFound(res);
   }
-  // Visibility gate: private/password serve the unlock prompt (401) until a valid
-  // unlock cookie is present. Must run before the frame/raw/zip branches so no
-  // view path (?raw=1, zip index) leaks the body.
+  // Visibility gate. password → the unlock prompt (401) until a valid unlock cookie is
+  // present. private with no valid cookie → a flat 404 identical to a missing artifact
+  // (no prompt, no existence leak). Runs before the frame/raw/zip branches so no view
+  // path (?raw=1, zip index) leaks the body.
   if (!artifactUnlocked(req, meta)) {
-    res.set({
-      'Content-Security-Policy': FRAME_CSP,
-      'X-Content-Type-Options': 'nosniff',
-      'Referrer-Policy': 'no-referrer',
-      'Cache-Control': 'no-cache',
-    });
-    return res.status(401).type('html').send(buildPromptHtml(meta));
+    if (meta.visibility === 'password') {
+      res.set({
+        'Content-Security-Policy': FRAME_CSP,
+        'X-Content-Type-Options': 'nosniff',
+        'Referrer-Policy': 'no-referrer',
+        'Cache-Control': 'no-cache',
+      });
+      return res.status(401).type('html').send(buildPromptHtml(meta));
+    }
+    return notFound(res);
   }
   // Framed view: serve the wrapper page (toolbar + iframe → ?raw=1). `?raw=1`
   // is the escape hatch the iframe uses to load the bare artifact.
@@ -1166,9 +1293,11 @@ app.get('/a/:slug', async (req, res) => {
 app.get('/a/:slug/source', async (req, res, next) => {
   const { slug } = req.params;
   const meta = SLUG_RE.test(slug) ? await readMeta(slug) : null;
-  if (!meta || meta.disabled) return res.status(404).type('text/plain').send('artifact not found');
+  if (!meta || meta.disabled) return notFound(res);
+  // Unlock before expiry so a locked artifact yields the canonical 404, never a 410 that
+  // would leak existence.
+  if (!artifactUnlocked(req, meta)) return notFound(res);
   if (isExpired(meta)) return res.status(410).type('text/plain').send('artifact expired');
-  if (!artifactUnlocked(req, meta)) return res.status(404).type('text/plain').send('not found');
   if (meta.type === 'zip') return next(); // zip sites serve /source as a site path
   res.set({ 'X-Content-Type-Options': 'nosniff', 'Referrer-Policy': 'no-referrer' });
   // forceType keeps source inert: an HTML/JSX source is served as text/plain, never executed.
@@ -1180,10 +1309,10 @@ app.get('/a/:slug/source', async (req, res, next) => {
 app.get('/a/:slug/*', async (req, res) => {
   const { slug } = req.params;
   const meta = SLUG_RE.test(slug) ? await readMeta(slug) : null;
-  if (!meta || meta.disabled) return res.status(404).type('text/plain').send('artifact not found');
+  if (!meta || meta.disabled) return notFound(res);
+  if (!artifactUnlocked(req, meta)) return notFound(res);
   if (isExpired(meta)) return res.status(410).type('text/plain').send('artifact expired');
-  if (!artifactUnlocked(req, meta)) return res.status(404).type('text/plain').send('not found');
-  if (meta.type !== 'zip') return res.status(404).type('text/plain').send('not found');
+  if (meta.type !== 'zip') return notFound(res);
   res.set(ARTIFACT_HEADERS);
 
   const rel = req.params[0];
@@ -1199,10 +1328,9 @@ app.get('/a/:slug/*', async (req, res) => {
   serveObject(req, res, key);
 });
 
-// Verify the unlock password and set the per-slug unlock cookie. 'password' mode
-// checks the per-artifact password; 'private' mode checks the admin password.
-// Rate-limited per IP+slug (10 failures/hour) so it is not an unthrottled brute-force
-// channel against the credential it validates.
+// Verify the unlock password and set the per-slug unlock cookie. 'password' mode only —
+// 'private' is viewed via a capability link (?k=), never a password. Rate-limited per
+// IP+slug (10 failures/hour) so it is not an unthrottled brute-force channel.
 app.post('/a/:slug/unlock', async (req, res, next) => {
   try {
     const { slug } = req.params;
@@ -1218,16 +1346,21 @@ app.post('/a/:slug/unlock', async (req, res, next) => {
     if (!meta || meta.disabled) return res.status(404).json({ error: 'not found' });
     if (isExpired(meta)) return res.status(410).json({ error: 'expired' });
     const password = req.body?.password;
-    let ok = false;
-    if (meta.visibility === 'password') ok = await verifyPassword(password, meta.password);
-    else if (meta.visibility === 'private') ok = await verifyPassword(password, auth.admin);
-    else return res.status(400).json({ error: 'artifact is not password protected' });
+    if (meta.visibility !== 'password') {
+      // private uses capability links, not passwords; public needs no unlock. Uniform 401
+      // (not 400) so this route never distinguishes an artifact's mode to an attacker, and
+      // the admin-credential brute-force channel is gone rather than merely throttled.
+      unlockLimiter.fail(rlKey);
+      logAuth('unlock', { ip, slug, outcome: 'reject' });
+      return res.status(401).json({ error: 'incorrect password' });
+    }
+    const ok = await verifyPassword(password, meta.password);
     if (!ok) {
       unlockLimiter.fail(rlKey);
       logAuth('unlock', { ip, slug, outcome: 'fail' });
       return res.status(401).json({ error: 'incorrect password' });
     }
-    await issueUnlock(res, slug);
+    await issueUnlock(res, meta);
     res.json({ ok: true });
   } catch (err) {
     next(err);
@@ -1252,8 +1385,8 @@ app.post('/api/artifacts/zip', requireAuth('publish'), zipBody, async (req, res,
     if (!Buffer.isBuffer(req.body) || !req.body.length) {
       throw new ApiError(400, 'raw zip body required (Content-Type: application/zip)');
     }
-    const { slug, title, expiresAt, tags, project } = req.query;
-    res.status(201).json(await saveZipArtifact(req.body, { slug, title, expiresAt, tags, project }));
+    const { slug, title, expiresAt, tags, project, visibility, password } = req.query;
+    res.status(201).json(await saveZipArtifact(req.body, { slug, title, expiresAt, tags, project, visibility, password }));
   } catch (err) {
     next(err);
   }
@@ -1279,6 +1412,20 @@ app.delete('/api/artifacts/:slug', requireAuth('full'), async (req, res, next) =
   try {
     await deleteArtifact(req.params.slug);
     res.json({ deleted: req.params.slug });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// Mint a fresh shareable link without mutating the artifact. The dashboard calls this to
+// copy a private/password link on demand, so tokens are never embedded in list rows (which
+// would write them into logs on every dashboard load).
+app.get('/api/artifacts/:slug/link', requireAuth('read'), async (req, res, next) => {
+  try {
+    const meta = SLUG_RE.test(req.params.slug) ? await readMeta(req.params.slug) : null;
+    if (!meta) throw new ApiError(404, `slug "${req.params.slug}" not found`);
+    if (meta.tokenEpoch !== undefined) await ensureSessionSecret();
+    res.json({ url: tokenedUrl(meta), visibility: meta.visibility || 'public' });
   } catch (err) {
     next(err);
   }
