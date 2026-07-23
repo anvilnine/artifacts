@@ -622,9 +622,9 @@ function buildJsxHtml(source, title) {
 }
 
 const MD_FONT_STACKS = {
-  system: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif',
+  system: 'Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif',
   serif:  'Georgia, Charter, "Times New Roman", serif',
-  mono:   'ui-monospace, SFMono-Regular, Menlo, monospace',
+  mono:   '"IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, monospace',
 };
 const MD_WIDTH_PX = { narrow: '640px', normal: '760px', wide: '900px' };
 const MD_SIZE_PX  = { small: '15px', normal: '16px', large: '18px' };

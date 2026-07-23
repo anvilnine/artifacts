@@ -5,30 +5,39 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="robots" content="noindex, nofollow">
 <title>{{TITLE}}</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Archivo:wght@700&family=Inter:wght@400;500&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
 <style>
   :root {
     color-scheme: light dark;
     --md-font: {{FONT}};
     --md-max: {{MAXWIDTH}};
     --md-size: {{FONTSIZE}};
+    /* Light theme: clean paper, kept readable as the escape from dark. */
     --fg: #1f2328;
     --bg: #ffffff;
-    --link: #0969da;
-    --codebg: #f6f8fa;
+    --link: #c73d1d;
+    --code: #7c2413;
+    --codebg: #f4ede9;
     --quote: #59636e;
-    --border: #d1d9e0;
+    --border: #d8d2cc;
+    --border-strong: #b9b2aa;
   }
-  /* Auto: follow the OS when no explicit data-theme=light override is set. */
+  /* Dark theme = Anvil Nine "Molten Steel" (mirrors .prose-docs in ../web).
+     Auto: follow the OS unless an explicit data-theme=light override is set. */
   @media (prefers-color-scheme: dark) {
     :root:not([data-theme="light"]) {
-      --fg: #e6edf3; --bg: #0d1117; --link: #58a6ff;
-      --codebg: #161b22; --quote: #8b949e; --border: #30363d;
+      --fg: #cfccc5; --bg: #0b0d0f; --link: #ff7550;
+      --code: #ff9d80; --codebg: #15191e; --quote: #9da3a9;
+      --border: #242b33; --border-strong: #333d47;
     }
   }
   /* Forced dark, regardless of OS. */
   :root[data-theme="dark"] {
-    --fg: #e6edf3; --bg: #0d1117; --link: #58a6ff;
-    --codebg: #161b22; --quote: #8b949e; --border: #30363d;
+    --fg: #cfccc5; --bg: #0b0d0f; --link: #ff7550;
+    --code: #ff9d80; --codebg: #15191e; --quote: #9da3a9;
+    --border: #242b33; --border-strong: #333d47;
   }
   body {
     font-family: var(--md-font);
@@ -40,14 +49,16 @@
     color: var(--fg);
     background: var(--bg);
   }
-  a { color: var(--link); }
-  pre { background: var(--codebg); padding: 16px; border-radius: 6px; overflow-x: auto; }
-  code { background: var(--codebg); padding: 0.2em 0.4em; border-radius: 4px; font-size: 0.9em; line-height: 1.5; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
-  pre code { padding: 0; background: none; }
-  blockquote { margin: 0; padding-left: 16px; border-left: 4px solid var(--border); color: var(--quote); }
+  h1, h2, h3, h4 { font-family: 'Archivo', var(--md-font); letter-spacing: -0.01em; }
+  a { color: var(--link); text-underline-offset: 3px; }
+  pre { background: var(--codebg); border: 1px solid var(--border); padding: 16px; border-radius: 6px; overflow-x: auto; }
+  code { color: var(--code); background: var(--codebg); padding: 0.2em 0.4em; border-radius: 4px; font-size: 0.9em; line-height: 1.5; font-family: 'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, monospace; }
+  pre code { padding: 0; background: none; color: inherit; }
+  blockquote { margin: 0; padding-left: 16px; border-left: 2px solid #2ba3cc; color: var(--quote); }
   img { max-width: 100%; }
   table { border-collapse: collapse; display: block; overflow-x: auto; }
   table th, table td { border: 1px solid var(--border); padding: 6px 13px; }
+  table th { font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 0.85em; text-transform: uppercase; letter-spacing: 0.04em; border-bottom-color: var(--border-strong); }
   hr { border: none; border-top: 1px solid var(--border); margin: 24px 0; }
 </style>
 <script>
