@@ -49,19 +49,43 @@ function boolEnv(name) {
   return v === '1' || v.toLowerCase() === 'true';
 }
 
+const MD_FONTS  = ['system', 'serif', 'mono'];
+const MD_WIDTHS = ['narrow', 'normal', 'wide'];
+const MD_SIZES  = ['small', 'normal', 'large'];
+const MD_THEMES = ['auto', 'light', 'dark'];
+
+function enumEnv(name, allowed) {
+  const v = process.env[name];
+  return v !== undefined && allowed.includes(v) ? v : undefined;
+}
+
 const DEFAULT_CONFIG = {
   frame: {
     enabled: boolEnv('FRAME_ENABLED') ?? true,
     default: boolEnv('FRAME_DEFAULT') ?? true,
   },
+  md: {
+    font:  enumEnv('MD_FONT', MD_FONTS)   ?? 'system',
+    width: enumEnv('MD_WIDTH', MD_WIDTHS) ?? 'normal',
+    size:  enumEnv('MD_SIZE', MD_SIZES)   ?? 'normal',
+    theme: enumEnv('MD_THEME', MD_THEMES) ?? 'auto',
+  },
 };
 
 function normalizeConfig(raw) {
   const frame = raw?.frame || {};
+  const md = raw?.md || {};
+  const pick = (val, allowed, def) => (allowed.includes(val) ? val : def);
   return {
     frame: {
       enabled: typeof frame.enabled === 'boolean' ? frame.enabled : DEFAULT_CONFIG.frame.enabled,
       default: typeof frame.default === 'boolean' ? frame.default : DEFAULT_CONFIG.frame.default,
+    },
+    md: {
+      font:  pick(md.font,  MD_FONTS,  DEFAULT_CONFIG.md.font),
+      width: pick(md.width, MD_WIDTHS, DEFAULT_CONFIG.md.width),
+      size:  pick(md.size,  MD_SIZES,  DEFAULT_CONFIG.md.size),
+      theme: pick(md.theme, MD_THEMES, DEFAULT_CONFIG.md.theme),
     },
   };
 }
@@ -88,10 +112,23 @@ async function updateConfig(patch) {
       throw new ApiError(400, `frame.${key} must be a boolean`);
     }
   }
+  const md = patch?.md || {};
+  const mdChecks = { font: MD_FONTS, width: MD_WIDTHS, size: MD_SIZES, theme: MD_THEMES };
+  for (const [key, allowed] of Object.entries(mdChecks)) {
+    if (md[key] !== undefined && !allowed.includes(md[key])) {
+      throw new ApiError(400, `md.${key} must be one of ${allowed.join(', ')}`);
+    }
+  }
   config = {
     frame: {
       enabled: frame.enabled ?? config.frame.enabled,
       default: frame.default ?? config.frame.default,
+    },
+    md: {
+      font:  md.font  ?? config.md.font,
+      width: md.width ?? config.md.width,
+      size:  md.size  ?? config.md.size,
+      theme: md.theme ?? config.md.theme,
     },
   };
   await storage.put(CONFIG_KEY, JSON.stringify(config, null, 2), { contentType: 'application/json' });
