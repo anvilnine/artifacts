@@ -49,19 +49,43 @@ function boolEnv(name) {
   return v === '1' || v.toLowerCase() === 'true';
 }
 
+const MD_FONTS  = ['system', 'serif', 'mono'];
+const MD_WIDTHS = ['narrow', 'normal', 'wide'];
+const MD_SIZES  = ['small', 'normal', 'large'];
+const MD_THEMES = ['auto', 'light', 'dark'];
+
+function enumEnv(name, allowed) {
+  const v = process.env[name];
+  return v !== undefined && allowed.includes(v) ? v : undefined;
+}
+
 const DEFAULT_CONFIG = {
   frame: {
     enabled: boolEnv('FRAME_ENABLED') ?? true,
     default: boolEnv('FRAME_DEFAULT') ?? true,
   },
+  md: {
+    font:  enumEnv('MD_FONT', MD_FONTS)   ?? 'system',
+    width: enumEnv('MD_WIDTH', MD_WIDTHS) ?? 'normal',
+    size:  enumEnv('MD_SIZE', MD_SIZES)   ?? 'normal',
+    theme: enumEnv('MD_THEME', MD_THEMES) ?? 'auto',
+  },
 };
 
 function normalizeConfig(raw) {
   const frame = raw?.frame || {};
+  const md = raw?.md || {};
+  const pick = (val, allowed, def) => (allowed.includes(val) ? val : def);
   return {
     frame: {
       enabled: typeof frame.enabled === 'boolean' ? frame.enabled : DEFAULT_CONFIG.frame.enabled,
       default: typeof frame.default === 'boolean' ? frame.default : DEFAULT_CONFIG.frame.default,
+    },
+    md: {
+      font:  pick(md.font,  MD_FONTS,  DEFAULT_CONFIG.md.font),
+      width: pick(md.width, MD_WIDTHS, DEFAULT_CONFIG.md.width),
+      size:  pick(md.size,  MD_SIZES,  DEFAULT_CONFIG.md.size),
+      theme: pick(md.theme, MD_THEMES, DEFAULT_CONFIG.md.theme),
     },
   };
 }
@@ -88,10 +112,23 @@ async function updateConfig(patch) {
       throw new ApiError(400, `frame.${key} must be a boolean`);
     }
   }
+  const md = patch?.md || {};
+  const mdChecks = { font: MD_FONTS, width: MD_WIDTHS, size: MD_SIZES, theme: MD_THEMES };
+  for (const [key, allowed] of Object.entries(mdChecks)) {
+    if (md[key] !== undefined && !allowed.includes(md[key])) {
+      throw new ApiError(400, `md.${key} must be one of ${allowed.join(', ')}`);
+    }
+  }
   config = {
     frame: {
       enabled: frame.enabled ?? config.frame.enabled,
       default: frame.default ?? config.frame.default,
+    },
+    md: {
+      font:  md.font  ?? config.md.font,
+      width: md.width ?? config.md.width,
+      size:  md.size  ?? config.md.size,
+      theme: md.theme ?? config.md.theme,
     },
   };
   await storage.put(CONFIG_KEY, JSON.stringify(config, null, 2), { contentType: 'application/json' });
@@ -584,9 +621,21 @@ function buildJsxHtml(source, title) {
     .replace('{{SOURCE}}', () => rewritten);
 }
 
-function buildMdHtml(source, title) {
+const MD_FONT_STACKS = {
+  system: 'Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif',
+  serif:  'Georgia, Charter, "Times New Roman", serif',
+  mono:   '"IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, monospace',
+};
+const MD_WIDTH_PX = { narrow: '640px', normal: '760px', wide: '900px' };
+const MD_SIZE_PX  = { small: '15px', normal: '16px', large: '18px' };
+
+function buildMdHtml(source, title, mdCfg = config.md) {
   return MD_SHELL
-    .replace('{{TITLE}}', () => escapeHtml(title))
+    .replaceAll('{{TITLE}}', () => escapeHtml(title))
+    .replace('{{FONT}}', () => MD_FONT_STACKS[mdCfg.font])
+    .replace('{{MAXWIDTH}}', () => MD_WIDTH_PX[mdCfg.width])
+    .replace('{{FONTSIZE}}', () => MD_SIZE_PX[mdCfg.size])
+    .replaceAll('{{THEME}}', () => mdCfg.theme)
     .replace('{{CONTENT}}', () => marked.parse(source));
 }
 
@@ -595,9 +644,13 @@ function buildMdHtml(source, title) {
 function buildFrameHtml(meta, rawUrl) {
   const title = escapeHtml(meta.title || meta.slug);
   const url = escapeHtml(rawUrl);
+  const themeBtn = meta.type === 'md'
+    ? '<button id="theme" type="button" title="Cycle theme (auto, light, dark)">Auto</button>'
+    : '';
   return FRAME_SHELL
     .replaceAll('{{TITLE}}', () => title)
-    .replaceAll('{{RAW_URL}}', () => url);
+    .replaceAll('{{RAW_URL}}', () => url)
+    .replace('{{THEME_BTN}}', () => themeBtn);
 }
 
 // Unlock prompt for password-mode artifacts. Renders no title and no mode label so it
@@ -863,10 +916,12 @@ async function saveArtifact({ content, type = 'html', slug, title, expiresAt, fr
   const finalTitle = title || finalSlug;
   let html;
   if (type === 'html') html = content;
-  else if (type === 'md') html = buildMdHtml(content, finalTitle);
-  else html = buildJsxHtml(content, finalTitle);
+  else if (type === 'jsx' || type === 'tsx') html = buildJsxHtml(content, finalTitle);
+  // md renders at serve time from source.md; nothing baked here.
 
-  await storage.put(`${finalSlug}/index.html`, html, { contentType: 'text/html; charset=utf-8' });
+  if (html !== undefined) {
+    await storage.put(`${finalSlug}/index.html`, html, { contentType: 'text/html; charset=utf-8' });
+  }
   await storage.put(`${finalSlug}/source.${SOURCE_EXT[type]}`, content, {
     contentType: 'text/plain; charset=utf-8',
   });
@@ -912,6 +967,77 @@ async function saveArtifact({ content, type = 'html', slug, title, expiresAt, fr
   // it is created lazily (first login otherwise), so force it here (tokenEpoch ⇒ non-public).
   if (meta.tokenEpoch !== undefined) await ensureSessionSecret();
   return { slug: finalSlug, url: tokenedUrl(meta), visibility: meta.visibility || 'public' };
+}
+
+// Copy an existing artifact into a new slug. Content bytes (source.* / index.html / site/*)
+// are copied by the storage layer; a fresh meta.json is written last. Each meta field uses
+// the request body when provided, else inherits the source's value, so a copy keeps all of
+// the original's setup unless the caller overrides it. The view password cannot be inherited
+// (stored hashed), so a password-visibility copy requires a new password in the body.
+async function duplicateArtifact(sourceSlug, body = {}) {
+  if (!SLUG_RE.test(sourceSlug)) throw new ApiError(404, `slug "${sourceSlug}" not found`);
+  const source = await readMeta(sourceSlug);
+  if (!source) throw new ApiError(404, `slug "${sourceSlug}" not found`);
+
+  const targetSlug = body.slug || nanoid();
+  if (!SLUG_RE.test(targetSlug)) {
+    throw new ApiError(400, 'slug must match [a-z0-9][a-z0-9-]{2,63}');
+  }
+  if (await readMeta(targetSlug)) {
+    throw new ApiError(409, `slug "${targetSlug}" already exists`);
+  }
+
+  const title = body.title !== undefined ? (body.title || targetSlug) : (source.title || targetSlug);
+  const tagList = body.tags !== undefined ? parseTags(body.tags) : source.tags;
+  const projectName = body.project !== undefined ? parseProject(body.project) : source.project;
+  const expiry = body.expiresAt !== undefined ? parseExpiresAt(body.expiresAt) : source.expiresAt;
+
+  let frame;
+  if (body.frame !== undefined) {
+    if (body.frame !== null && typeof body.frame !== 'boolean') {
+      throw new ApiError(400, 'frame must be a boolean');
+    }
+    frame = body.frame === null ? undefined : body.frame; // null clears to inherit the global default
+  } else {
+    frame = source.frame;
+  }
+
+  const visibility = body.visibility !== undefined ? body.visibility : (source.visibility || 'public');
+  if (!VISIBILITIES.includes(visibility)) {
+    throw new ApiError(400, 'visibility must be public, private, or password');
+  }
+  if (visibility === 'password' && (typeof body.password !== 'string' || !body.password)) {
+    throw new ApiError(400, 'password is required when visibility is "password"');
+  }
+
+  // Copy content first; meta.json is written LAST as the commit marker (copySlug skips it).
+  await storage.copySlug(sourceSlug, targetSlug);
+
+  const meta = {
+    slug: targetSlug,
+    type: source.type,
+    title,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  };
+  if (source.type === 'zip' && typeof source.files === 'number') meta.files = source.files;
+  if (expiry !== undefined) meta.expiresAt = expiry;
+  if (tagList && tagList.length) meta.tags = tagList;
+  if (projectName) meta.project = projectName;
+  if (frame !== undefined) meta.frame = frame;
+  if (visibility === 'password') {
+    meta.visibility = 'password';
+    meta.password = await hashPassword(body.password);
+  } else if (visibility === 'private') {
+    meta.visibility = 'private';
+  }
+  seedTokenEpoch(meta);
+  await storage.put(`${targetSlug}/meta.json`, JSON.stringify(meta, null, 2), {
+    contentType: 'application/json',
+  });
+  await storage.flush?.();
+  if (meta.tokenEpoch !== undefined) await ensureSessionSecret();
+  return { slug: targetSlug, url: tokenedUrl(meta), visibility: meta.visibility || 'public' };
 }
 
 // A non-public artifact carries a non-secret epoch so capability tokens can be minted and
@@ -1263,7 +1389,10 @@ app.get('/a/:slug', async (req, res) => {
   }
   // Framed view: serve the wrapper page (toolbar + iframe → ?raw=1). `?raw=1`
   // is the escape hatch the iframe uses to load the bare artifact.
-  const wantsRaw = req.query.raw !== undefined;
+  // A sub-frame load (the toolbar iframe, and any navigation the user makes inside it) carries
+  // Sec-Fetch-Dest: iframe. Treat those as raw so an in-artifact link back to the root does not
+  // re-enter the frame branch and stack a second toolbar. Top-level visits still get the frame.
+  const wantsRaw = req.query.raw !== undefined || req.get('sec-fetch-dest') === 'iframe';
   if (frameActive(meta) && !wantsRaw) {
     if (meta.type === 'zip' && !req.path.endsWith('/')) {
       return res.redirect(301, `/a/${slug}/`);
@@ -1286,6 +1415,12 @@ app.get('/a/:slug', async (req, res) => {
       return res.redirect(301, `/a/${slug}/${wantsRaw ? '?raw=1' : ''}`);
     }
     return serveObject(req, res, `${slug}/site/index.html`);
+  }
+  if (meta.type === 'md') {
+    const buf = await storage.getBuffer(`${slug}/source.md`);
+    if (!buf) return notFound(res);
+    res.set('Cache-Control', 'no-cache'); // reflect global config changes on next view
+    return res.type('html').send(buildMdHtml(buf.toString('utf8'), meta.title || slug, config.md));
   }
   serveObject(req, res, `${slug}/index.html`);
 });
@@ -1426,6 +1561,14 @@ app.get('/api/artifacts/:slug/link', requireAuth('read'), async (req, res, next)
     if (!meta) throw new ApiError(404, `slug "${req.params.slug}" not found`);
     if (meta.tokenEpoch !== undefined) await ensureSessionSecret();
     res.json({ url: tokenedUrl(meta), visibility: meta.visibility || 'public' });
+  } catch (err) {
+    next(err);
+  }
+});
+
+app.post('/api/artifacts/:slug/duplicate', requireAuth('publish'), async (req, res, next) => {
+  try {
+    res.status(201).json(await duplicateArtifact(req.params.slug, req.body));
   } catch (err) {
     next(err);
   }

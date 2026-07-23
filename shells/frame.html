@@ -5,29 +5,40 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="robots" content="noindex, nofollow">
 <title>{{TITLE}}</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500&display=swap" rel="stylesheet">
 <style>
   :root {
     color-scheme: light dark;
-    --bar-bg: #f6f8fa;
+    --bar-bg: #ffffff;
     --bar-fg: #1f2328;
     --bar-muted: #59636e;
-    --bar-border: #d1d9e0;
-    --bar-hover: #eaeef2;
+    --bar-border: #d8d2cc;
+    --bar-hover: #f0ece7;
   }
+  /* Dark = Anvil Nine "Molten Steel", so the chrome reads like anvilnine.com.
+     Follows the OS unless the viewer's theme toggle forces light; a forced
+     dark applies regardless of OS. Kept in sync with the artifact's own theme. */
   @media (prefers-color-scheme: dark) {
-    :root {
-      --bar-bg: #161b22;
-      --bar-fg: #e6edf3;
-      --bar-muted: #8b949e;
-      --bar-border: #30363d;
-      --bar-hover: #21262d;
+    :root:not([data-theme="light"]) {
+      --bar-bg: #101317; --bar-fg: #edeae4; --bar-muted: #9da3a9;
+      --bar-border: #242b33; --bar-hover: #1b2026;
     }
+  }
+  :root[data-theme="dark"] {
+    --bar-bg: #101317; --bar-fg: #edeae4; --bar-muted: #9da3a9;
+    --bar-border: #242b33; --bar-hover: #1b2026;
+  }
+  :root[data-theme="light"] {
+    --bar-bg: #ffffff; --bar-fg: #1f2328; --bar-muted: #59636e;
+    --bar-border: #d8d2cc; --bar-hover: #f0ece7;
   }
   * { box-sizing: border-box; }
   html, body { margin: 0; height: 100%; }
   body {
     display: flex; flex-direction: column;
-    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    font-family: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
   }
 
   #bar {
@@ -71,6 +82,7 @@
 <body>
   <div id="bar">
     <span id="title">{{TITLE}}</span>
+    {{THEME_BTN}}
     <button id="copy" type="button" title="Copy link to this artifact">Copy link</button>
     <button id="hide" type="button" title="Hide this frame">&#9650; Hide</button>
   </div>
@@ -108,6 +120,46 @@
         done();
       }
     });
+
+    var THEME_KEY = 'artifactTheme';
+    // Keep the bar chrome in sync with the artifact's theme: dark/light force,
+    // auto (or unset) follows the OS via prefers-color-scheme.
+    function applyBarTheme(t) {
+      var root = document.documentElement;
+      if (t === 'dark' || t === 'light') root.setAttribute('data-theme', t);
+      else root.removeAttribute('data-theme');
+    }
+    try { applyBarTheme(localStorage.getItem(THEME_KEY)); } catch (e) {}
+    window.addEventListener('storage', function (e) {
+      if (e.key === THEME_KEY) applyBarTheme(e.newValue);
+    });
+
+    var themeBtn = document.getElementById('theme');
+    if (themeBtn) {
+      var order = ['auto', 'light', 'dark'];
+      var labels = { auto: 'Auto', light: 'Light', dark: 'Dark' };
+      var cur;
+      try { cur = localStorage.getItem(THEME_KEY) || 'auto'; } catch (e) { cur = 'auto'; }
+      if (order.indexOf(cur) < 0) cur = 'auto';
+
+      function renderTheme() { themeBtn.textContent = labels[cur]; }
+      function pushTheme() {
+        try { localStorage.setItem(THEME_KEY, cur); } catch (e) {}
+        applyBarTheme(cur);
+        var f = document.getElementById('frame');
+        if (f && f.contentWindow) {
+          f.contentWindow.postMessage({ artifactTheme: cur }, location.origin);
+        }
+      }
+      renderTheme();
+      themeBtn.addEventListener('click', function () {
+        cur = order[(order.indexOf(cur) + 1) % order.length];
+        renderTheme();
+        pushTheme();
+      });
+      // Re-send once the iframe finishes loading, in case it loaded before the first push.
+      document.getElementById('frame').addEventListener('load', pushTheme);
+    }
   </script>
 </body>
 </html>

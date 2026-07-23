@@ -12,7 +12,9 @@
 <script src="https://cdn.jsdelivr.net/npm/@babel/standalone@7/babel.min.js"></script>
 <style>
   body { margin: 0; }
-  #__artifact_error { display: none; font-family: ui-monospace, monospace; color: #b91c1c; padding: 16px; white-space: pre-wrap; }
+  /* Tailwind + Babel load from external CDNs (see script tags above); the React
+     artifact owns its own body styling, so we only theme the error readout here. */
+  #__artifact_error { display: none; font-family: "IBM Plex Mono", ui-monospace, monospace; color: #c4573e; padding: 16px; white-space: pre-wrap; }
 </style>
 </head>
 <body>

@@ -66,6 +66,29 @@ expect_code 200 "$code" "renamed artifact"
 code=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/a/ci-smoke")
 expect_code 404 "$code" "old slug gone"
 
+# markdown render config -> defaults present in config
+curl -s "$BASE/api/config" -H "$AUTH" | grep -q '"font":"system"' || fail "config missing md.font default"
+echo "ok: md config defaults"
+
+# invalid md enum -> 400 (no write happens)
+code=$(curl -s -o /dev/null -w '%{http_code}' -X PUT "$BASE/api/config" -H "$AUTH" -H "$JSON" -d '{"md":{"font":"comic"}}')
+expect_code 400 "$code" "invalid md.font rejected"
+
+# publish md -> serve-time render carries the theme bootstrap and rendered body
+curl -sf -X POST "$BASE/api/artifacts" -H "$AUTH" -H "$JSON" \
+  -d '{"content":"# md smoke\n\nhi","type":"md","slug":"ci-md","visibility":"public"}' > /dev/null
+mdbody=$(curl -s "$BASE/a/ci-md?raw=1")
+echo "$mdbody" | grep -q '<h1>md smoke</h1>' || fail "md body not rendered"
+echo "$mdbody" | grep -q 'artifactTheme' || fail "md shell missing theme bootstrap"
+echo "ok: md serve-time render"
+
+# framed md -> navbar theme toggle present; a non-md artifact has none
+curl -s "$BASE/a/ci-md" | grep -q 'id="theme"' || fail "framed md missing theme toggle"
+if curl -s "$BASE/a/ci-smoke-2" | grep -q 'id="theme"'; then fail "non-md artifact has theme toggle"; fi
+echo "ok: md navbar theme toggle"
+
+curl -sf -X DELETE "$BASE/api/artifacts/ci-md" -H "$AUTH" > /dev/null
+
 # tags: publish with tags -> stored lowercased + deduped
 curl -sf -X POST "$BASE/api/artifacts" -H "$AUTH" -H "$JSON" \
   -d '{"content":"<h1>tags</h1>","type":"html","slug":"ci-tags","tags":["Demo","ci","demo"]}' > /dev/null
@@ -145,6 +168,33 @@ code=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/a/ci-zip/css/s.css")
 expect_code 200 "$code" "zip asset"
 curl -s "$BASE/api/artifacts?tag=zipped" -H "$AUTH" | grep -q '"ci-zip"' || fail "zip tags not stored"
 echo "ok: zip tags"
+
+# duplicate: inline artifact copies content + inherits fields under a new slug
+dupresp=$(curl -s -X POST "$BASE/api/artifacts/ci-smoke-2/duplicate" -H "$AUTH" -H "$JSON" \
+  -d '{"slug":"ci-dup","title":"smoke copy","visibility":"public"}')
+echo "$dupresp" | grep -q '"ci-dup"' || fail "duplicate did not return new slug"
+body=$(curl -s "$BASE/a/ci-dup?raw=1")
+echo "$body" | grep -q "<h1>smoke</h1>" || fail "duplicate did not copy content"
+echo "ok: duplicate copies inline content"
+
+# duplicate: requesting a slug that already exists -> 409
+code=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/api/artifacts/ci-smoke-2/duplicate" \
+  -H "$AUTH" -H "$JSON" -d '{"slug":"ci-dup"}')
+expect_code 409 "$code" "duplicate to taken slug rejected"
+
+# duplicate: zip site copies its files under the new slug
+code=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/api/artifacts/ci-zip/duplicate" \
+  -H "$AUTH" -H "$JSON" -d '{"slug":"ci-zip-dup","visibility":"public"}')
+expect_code 201 "$code" "zip duplicate"
+code=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/a/ci-zip-dup/css/s.css")
+expect_code 200 "$code" "zip duplicate asset served"
+
+# duplicate: omitted fields inherit from the source (ci-zip has tags zipped,site)
+curl -s "$BASE/api/artifacts" -H "$AUTH" | grep -q '"ci-zip-dup"' || fail "zip duplicate not listed"
+echo "ok: duplicate copies zip site + inherits fields"
+
+curl -sf -X DELETE "$BASE/api/artifacts/ci-dup" -H "$AUTH" > /dev/null
+curl -sf -X DELETE "$BASE/api/artifacts/ci-zip-dup" -H "$AUTH" > /dev/null
 
 # delete both -> 404
 curl -sf -X DELETE "$BASE/api/artifacts/ci-smoke-2" -H "$AUTH" > /dev/null
