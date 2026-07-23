@@ -531,11 +531,11 @@
 
       <!-- compose popover, anchored under +New -->
       <div class="popover" id="composePop" role="dialog" aria-label="New artifact" aria-hidden="true">
-        <div class="pop-head"><h3>New artifact</h3><span class="hint">esc to close</span></div>
+        <div class="pop-head"><h3 id="composeTitle">New artifact</h3><span class="hint">esc to close</span></div>
         <div class="pop-body">
           <div class="form">
             <div class="row">
-              <label class="f">Type
+              <label class="f" id="typeField">Type
                 <select id="type">
                   <option value="html">html</option>
                   <option value="jsx">jsx</option>
@@ -580,10 +580,10 @@
                 <datalist id="projectOptions"></datalist>
               </label>
             </div>
-            <label class="f">Content
+            <label class="f" id="contentField">Content
               <textarea id="content" placeholder="Paste HTML, a React component with a default export, or Markdown…" spellcheck="false"></textarea>
             </label>
-            <div class="browse">or <a href="#" id="browseLink">browse files</a> to upload instead</div>
+            <div class="browse" id="browseRow">or <a href="#" id="browseLink">browse files</a> to upload instead</div>
             <div class="foot"><button id="publish">Publish</button></div>
           </div>
         </div>
@@ -875,7 +875,8 @@
     $('passwordWrap').style.display = $('visibility').value === 'password' ? '' : 'none';
   });
 
-  $('publish').addEventListener('click', () => busy($('publish'), 'Publishing…', async () => {
+  $('publish').addEventListener('click', () => busy($('publish'), duplicateSource ? 'Copying…' : 'Publishing…', async () => {
+    if (duplicateSource) return doDuplicate();
     const body = { content: $('content').value, type: $('type').value };
     if ($('slug').value) body.slug = $('slug').value;
     if ($('title').value) body.title = $('title').value;
@@ -905,9 +906,95 @@
     }
   }));
 
+  async function doDuplicate() {
+    const src = duplicateSource;
+    const body = {
+      title: $('title').value,
+      frame: $('frame').value === 'default' ? null : $('frame').value === 'on',
+      tags: composeTags.getTags(),
+      project: $('project').value.trim(),
+      visibility: $('visibility').value,
+    };
+    if ($('slug').value) body.slug = $('slug').value;
+    if ($('visibility').value === 'password') {
+      if (!$('password').value) { toast('A view password is required.', true); return; }
+      body.password = $('password').value;
+    }
+    const res = await fetch('/api/artifacts/' + src.slug + '/duplicate', {
+      method: 'POST', headers: headers(), body: JSON.stringify(body),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (res.ok) {
+      addResult('copy of ' + src.slug, data.url, true);
+      navigator.clipboard.writeText(data.url).catch(() => {});
+      exitDuplicateMode();
+      $('slug').value = '';
+      $('title').value = '';
+      composeTags.setTags([]);
+      $('project').value = '';
+      $('password').value = '';
+      $('visibility').value = 'private';
+      $('passwordWrap').style.display = 'none';
+      closePops();
+      loadList();
+    } else {
+      addResult('copy of ' + src.slug, data.error || ('HTTP ' + res.status), false);
+    }
+  }
+
   // ---- list ----
 
   let allItems = [];
+  let duplicateSource = null; // the artifact being copied while the compose form is in duplicate mode
+
+  // Pre-fill values for a copy of `a`: title `{base} (n)` and a derived slug `{slugbase}-n`,
+  // picking the lowest n>=1 where both are free. `base` has any trailing " (k)" stripped so
+  // copying a copy does not stack "((1)) (1)". An empty/too-long slug base falls back to ''
+  // (blank slug -> the server mints an unguessable id).
+  function duplicateName(a) {
+    const rawBase = (a.title && a.title !== a.slug) ? a.title : a.slug;
+    const base = rawBase.replace(/\s*\(\d+\)\s*$/, '').trim() || a.slug;
+    const slugBase = base.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 60);
+    const titles = new Set(allItems.map((x) => x.title || x.slug));
+    const slugs = new Set(allItems.map((x) => x.slug));
+    for (let n = 1; ; n++) {
+      const title = `${base} (${n})`;
+      const slug = slugBase ? `${slugBase}-${n}` : '';
+      if (!titles.has(title) && (!slug || !slugs.has(slug))) return { title, slug };
+    }
+  }
+
+  // Toggle the compose form between "new artifact" and "duplicate" looks. In duplicate mode
+  // the type is fixed (a copy keeps its type) and content is copied server-side, so both the
+  // Type and Content controls are hidden.
+  function setDuplicateUI(on) {
+    $('typeField').style.display = on ? 'none' : '';
+    $('contentField').style.display = on ? 'none' : '';
+    $('browseRow').style.display = on ? 'none' : '';
+    $('publish').textContent = on ? 'Create copy' : 'Publish';
+    $('composeTitle').textContent = on ? 'Duplicate artifact' : 'New artifact';
+  }
+
+  function exitDuplicateMode() {
+    duplicateSource = null;
+    setDuplicateUI(false);
+  }
+
+  function openDuplicate(a) {
+    duplicateSource = a;
+    const { title, slug } = duplicateName(a);
+    $('frame').value = a.frame === true ? 'on' : a.frame === false ? 'off' : 'default';
+    $('visibility').value = a.visibility || 'public';
+    $('passwordWrap').style.display = $('visibility').value === 'password' ? '' : 'none';
+    $('password').value = '';
+    $('slug').value = slug;
+    $('title').value = title;
+    composeTags.setTags(a.tags || []);
+    $('project').value = a.project || '';
+    setDuplicateUI(true);
+    togglePop('compose');
+  }
+
   const collapsed = new Set();
   let viewMode = 'grouped';
   try { viewMode = localStorage.getItem('artifacts:view') || 'grouped'; } catch {}
@@ -1433,6 +1520,8 @@
           patchItem(a, { slug: v }, {});
         });
 
+        menuItem(menu, 'Duplicate…', '', () => openDuplicate(a));
+
         menuItem(menu, a.expiresAt ? 'Expiry: ' + a.expiresAt.slice(0, 10) + '…' : 'Expiry…', '', async () => {
           const v = await dialog({
             title: 'Expiry for “' + a.slug + '”',
@@ -1705,7 +1794,7 @@
     if (open) setTimeout(() => $('search').focus(), 60);
   }
 
-  $('newBtn').addEventListener('click', () => togglePop('compose'));
+  $('newBtn').addEventListener('click', () => { exitDuplicateMode(); togglePop('compose'); });
   $('settingsBtn').addEventListener('click', () => togglePop('settings'));
   $('keysBtn').addEventListener('click', () => { togglePop('keys'); loadKeys(); });
   $('searchBtn').addEventListener('click', () => toggleSearch());
