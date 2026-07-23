@@ -621,9 +621,21 @@ function buildJsxHtml(source, title) {
     .replace('{{SOURCE}}', () => rewritten);
 }
 
-function buildMdHtml(source, title) {
+const MD_FONT_STACKS = {
+  system: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif',
+  serif:  'Georgia, Charter, "Times New Roman", serif',
+  mono:   'ui-monospace, SFMono-Regular, Menlo, monospace',
+};
+const MD_WIDTH_PX = { narrow: '640px', normal: '760px', wide: '900px' };
+const MD_SIZE_PX  = { small: '15px', normal: '16px', large: '18px' };
+
+function buildMdHtml(source, title, mdCfg = config.md) {
   return MD_SHELL
-    .replace('{{TITLE}}', () => escapeHtml(title))
+    .replaceAll('{{TITLE}}', () => escapeHtml(title))
+    .replace('{{FONT}}', () => MD_FONT_STACKS[mdCfg.font])
+    .replace('{{MAXWIDTH}}', () => MD_WIDTH_PX[mdCfg.width])
+    .replace('{{FONTSIZE}}', () => MD_SIZE_PX[mdCfg.size])
+    .replaceAll('{{THEME}}', () => mdCfg.theme)
     .replace('{{CONTENT}}', () => marked.parse(source));
 }
 
