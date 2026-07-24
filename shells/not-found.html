@@ -1,0 +1,80 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<title>Artifact unavailable</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Archivo:wght@700&family=Inter:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg: #ffffff;
+    --card: #ffffff;
+    --fg: #1f2328;
+    --muted: #59636e;
+    --border: #d8d2cc;
+    --accent: #c73d1d;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #0b0d0f; --card: #101317; --fg: #edeae4;
+      --muted: #9da3a9; --border: #242b33; --accent: #f0502a;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #0b0d0f; --card: #101317; --fg: #edeae4;
+    --muted: #9da3a9; --border: #242b33; --accent: #f0502a;
+  }
+  :root[data-theme="light"] {
+    --bg: #ffffff; --card: #ffffff; --fg: #1f2328;
+    --muted: #59636e; --border: #d8d2cc; --accent: #c73d1d;
+  }
+  * { box-sizing: border-box; }
+  html, body { min-height: 100%; margin: 0; }
+  body {
+    display: grid; min-height: 100vh; place-items: center; padding: 24px;
+    background: var(--bg); color: var(--fg);
+    background-image:
+      radial-gradient(900px 380px at 50% -10%, rgba(240, 80, 42, .08) 0%, transparent 72%),
+      radial-gradient(var(--border) 1px, transparent 1px);
+    background-size: auto, 12px 12px;
+    font-family: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  }
+  main {
+    width: 100%; max-width: 360px; padding: 28px 24px;
+    background: var(--card); border: 1px solid var(--border); border-radius: 12px;
+  }
+  .mark { width: 36px; height: 36px; margin-bottom: 24px; fill: var(--accent); }
+  .status {
+    margin: 0 0 8px; color: var(--accent); font-size: 11px; font-weight: 500;
+    letter-spacing: .12em; text-transform: uppercase;
+  }
+  h1 {
+    margin: 0 0 8px; font-family: 'Archivo', system-ui, sans-serif;
+    font-size: 22px; line-height: 1.15;
+  }
+  p:last-child { margin: 0; color: var(--muted); font-size: 14px; line-height: 1.55; }
+</style>
+</head>
+<body>
+  <main>
+    <svg class="mark" viewBox="0 0 76 76" aria-hidden="true">
+      <path d="M14 20h44v8H40v6c8 1 14 4 14 9v3H22v-3c0-5 6-8 14-9v-6H24c-6 0-10-4-10-8z"></path>
+      <rect x="26" y="48" width="24" height="6"></rect>
+      <rect x="20" y="56" width="36" height="6"></rect>
+    </svg>
+    <p class="status">404</p>
+    <h1>Artifact unavailable</h1>
+    <p>This link may be wrong, disabled, or no longer available. Check the link or ask its sender.</p>
+  </main>
+  <script>
+    try {
+      var theme = localStorage.getItem('artifactTheme');
+      if (theme === 'light' || theme === 'dark') document.documentElement.setAttribute('data-theme', theme);
+    } catch (e) {}
+  </script>
+</body>
+</html>

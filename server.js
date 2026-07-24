@@ -498,6 +498,7 @@ const JSX_SHELL = await fs.readFile(path.join(__dirname, 'shells', 'jsx.html'), 
 const MD_SHELL = await fs.readFile(path.join(__dirname, 'shells', 'md.html'), 'utf8');
 const FRAME_SHELL = await fs.readFile(path.join(__dirname, 'shells', 'frame.html'), 'utf8');
 const PASSWORD_SHELL = await fs.readFile(path.join(__dirname, 'shells', 'password.html'), 'utf8');
+const NOT_FOUND_SHELL = await fs.readFile(path.join(__dirname, 'shells', 'not-found.html'), 'utf8');
 
 // Per-artifact visibility. Absent meta.visibility === 'public' (today's behavior:
 // anyone with the unguessable link views). 'private' and 'password' are gated at
@@ -659,6 +660,10 @@ function buildPromptHtml(meta) {
   return PASSWORD_SHELL.replaceAll('{{SLUG}}', () => escapeHtml(meta.slug));
 }
 
+function buildNotFoundHtml() {
+  return NOT_FOUND_SHELL;
+}
+
 function escapeHtml(s) {
   return s
     .replace(/&/g, '&amp;')
@@ -688,7 +693,12 @@ async function readMeta(slug) {
 // One 404 shape for every serve-path miss (missing, disabled, locked-private, wrong slug)
 // so an unauthenticated caller cannot distinguish them — no existence oracle.
 function notFound(res) {
-  return res.status(404).type('text/plain').send('artifact not found');
+  return res.status(404).set({
+    'Content-Security-Policy': FRAME_CSP,
+    'X-Content-Type-Options': 'nosniff',
+    'Referrer-Policy': 'no-referrer',
+    'Cache-Control': 'no-cache',
+  }).type('html').send(buildNotFoundHtml());
 }
 
 // ---------------------------------------------------------------------------
