@@ -18,6 +18,17 @@ expect_code() { # expect_code <expected> <actual> <label>
 code=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/api/artifacts" -H "$JSON" -d '{"content":"<h1>x</h1>","type":"html"}')
 expect_code 401 "$code" "unauth publish"
 
+# missing artifact -> branded HTML 404
+notfound_headers=$(mktemp)
+notfound_body=$(mktemp)
+code=$(curl -s -D "$notfound_headers" -o "$notfound_body" -w '%{http_code}' "$BASE/a/does-not-exist-zzz")
+expect_code 404 "$code" "missing artifact"
+grep -qi '^Content-Type: text/html' "$notfound_headers" || fail "missing artifact is not HTML"
+grep -q 'Artifact unavailable' "$notfound_body" || fail "missing artifact page copy missing"
+rm "$notfound_headers"
+rm "$notfound_body"
+echo "ok: branded artifact-not-found page"
+
 # publish html -> 201. Explicit visibility:public because the server default is now
 # private; the serve-path assertions below need a publicly viewable artifact.
 code=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/api/artifacts" -H "$AUTH" -H "$JSON" -d '{"content":"<h1>smoke</h1>","type":"html","slug":"ci-smoke","visibility":"public"}')
