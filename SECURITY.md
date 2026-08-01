@@ -2,7 +2,7 @@
 
 ## Reporting a vulnerability
 
-Please report vulnerabilities privately via [GitHub Security Advisories](https://github.com/kuyazee/artifacts/security/advisories/new) — do not open a public issue. You should get a response within a few days.
+Please report vulnerabilities privately via [GitHub Security Advisories](https://github.com/anvilnine/artifacts/security/advisories/new) — do not open a public issue. You should get a response within a few days.
 
 ## Security model (what is and isn't a bug)
 

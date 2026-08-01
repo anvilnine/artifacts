@@ -5,7 +5,7 @@ Everything the API does, from your terminal. ([← back to README](../README.md)
 Ships with the repo (`cli.js`, no extra dependencies). Run it via `node cli.js`, or without cloning:
 
 ```bash
-npx github:kuyazee/artifacts <command>
+npx github:anvilnine/artifacts <command>
 ```
 
 ## Configuration

@@ -64,7 +64,7 @@ back, so choose deliberately with `--visibility`:
 Capture the CLI's stdout — it is the exact URL to share, tokened or bare:
 
 ```bash
-URL=$(npx --yes github:kuyazee/artifacts deploy dist --slug my-site --visibility private)
+URL=$(npx --yes github:anvilnine/artifacts deploy dist --slug my-site --visibility private)
 echo "Preview: $URL" >> "$GITHUB_STEP_SUMMARY"
 ```
 
@@ -116,10 +116,10 @@ jobs:
       # A zip site can't be overwritten, so drop the old one first.
       # `|| true` tolerates the first run where the slug does not exist.
       - name: Remove previous deploy
-        run: npx --yes github:kuyazee/artifacts delete my-site || true
+        run: npx --yes github:anvilnine/artifacts delete my-site || true
       - name: Deploy
         run: |
-          URL=$(npx --yes github:kuyazee/artifacts deploy dist \
+          URL=$(npx --yes github:anvilnine/artifacts deploy dist \
             --slug my-site --title "My Site" --visibility public)
           echo "Deployed: $URL" >> "$GITHUB_STEP_SUMMARY"
 ```
@@ -159,8 +159,8 @@ jobs:
       - run: npm run build
       - name: Deploy preview
         run: |
-          npx --yes github:kuyazee/artifacts delete "$SLUG" || true
-          URL=$(npx --yes github:kuyazee/artifacts deploy dist \
+          npx --yes github:anvilnine/artifacts delete "$SLUG" || true
+          URL=$(npx --yes github:anvilnine/artifacts deploy dist \
             --slug "$SLUG" --title "PR #${{ github.event.number }}" --visibility public)
           echo "PREVIEW_URL=$URL" >> "$GITHUB_ENV"
       - name: Comment the link
@@ -179,7 +179,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Delete preview
-        run: npx --yes github:kuyazee/artifacts delete "pr-${{ github.event.number }}" || true
+        run: npx --yes github:anvilnine/artifacts delete "pr-${{ github.event.number }}" || true
         env:
           SLUG: pr-${{ github.event.number }}
 ```

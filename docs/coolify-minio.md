@@ -65,7 +65,7 @@ Bring it up, open the console (`:9001`), log in with the root creds, then:
 Add a second resource for this app:
 
 - **Source:** this repo with Build Pack **Dockerfile**, or the prebuilt image
-  `ghcr.io/kuyazee/artifacts:latest`.
+  `ghcr.io/anvilnine/artifacts:latest`.
 - **Port:** `3000`. Point a domain at it (`https://artifacts.example.com`) through Coolify's proxy.
 - **No `/data` volume needed** — state lives in MinIO. (A volume does no harm, it just goes unused.)
 - **Healthcheck:** leave Coolify's container healthcheck **disabled**. `node:22-slim` has no

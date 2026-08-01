@@ -1,18 +1,18 @@
 {
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
-  "name": "io.github.kuyazee/artifacts",
+  "name": "io.github.anvilnine/artifacts",
   "title": "Artifacts",
   "description": "Self-hosted artifact publishing: POST HTML/JSX/Markdown/zip, get an unguessable URL on your domain",
   "repository": {
-    "url": "https://github.com/kuyazee/artifacts",
+    "url": "https://github.com/anvilnine/artifacts",
     "source": "github"
   },
-  "version": "1.0.0",
-  "websiteUrl": "https://github.com/kuyazee/artifacts",
+  "version": "1.3.0",
+  "websiteUrl": "https://github.com/anvilnine/artifacts",
   "packages": [
     {
       "registryType": "oci",
-      "identifier": "ghcr.io/kuyazee/artifacts:latest",
+      "identifier": "ghcr.io/anvilnine/artifacts:latest",
       "transport": {
         "type": "streamable-http",
         "url": "http://localhost:3000/mcp"
