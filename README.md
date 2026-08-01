@@ -61,6 +61,15 @@ cp .env.example .env   # set ARTIFACTS_API_KEY (openssl rand -hex 32) and BASE_U
 docker compose up -d
 ```
 
+Or skip the clone and run the image directly:
+
+```bash
+docker run -d -p 3000:3000 -v artifacts-data:/data \
+  -e ARTIFACTS_API_KEY=$(openssl rand -hex 32) \
+  -e BASE_URL=https://artifacts.example.com \
+  ghcr.io/anvilnine/artifacts:latest
+```
+
 Publish something:
 
 ```bash
@@ -107,6 +116,10 @@ bash .github/workflows/smoke.sh http://localhost:3000 <your-key>
 ```
 
 PRs welcome. See [CONTRIBUTING.md](CONTRIBUTING.md).
+
+## Hosted version
+
+Self-hosting is the product, and the open source version stays complete. If you would rather not run a server, Anvil Nine is building a managed version: same publishing flow, custom domains, backups handled for you. Join the waitlist: [Z: fill waitlist URL].
 
 ## Security
 
