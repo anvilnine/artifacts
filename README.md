@@ -119,7 +119,7 @@ PRs welcome. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Hosted version
 
-Self-hosting is the product, and the open source version stays complete. If you would rather not run a server, Anvil Nine is building a managed version: same publishing flow, custom domains, backups handled for you. Join the waitlist: [anvilnine.com/artifacts/cloud](https://anvilnine.com/artifacts/cloud).
+Self-hosting is the product, and the open source version stays complete. If you would rather not run a server, Anvil Nine is building a managed version: same publishing flow, custom domains, backups handled for you. A waitlist page opens with the first cloud announcement; watch this repo's releases until then.
 
 ## Security
 
