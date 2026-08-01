@@ -2,7 +2,7 @@ services:
   artifacts:
     build: .
     # Or use the prebuilt image instead of building locally:
-    # image: ghcr.io/kuyazee/artifacts:latest
+    # image: ghcr.io/anvilnine/artifacts:latest
     ports:
       - "3000:3000"
     environment:

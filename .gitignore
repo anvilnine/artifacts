@@ -3,3 +3,7 @@ data/
 .env
 .DS_Store
 .env.apikey
+
+# session planning docs, never committed
+DESIGN-IS-*/
+docs/superpowers/

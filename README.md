@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/kuyazee/artifacts/actions/workflows/ci.yml"><img src="https://github.com/kuyazee/artifacts/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="https://github.com/anvilnine/artifacts/actions/workflows/ci.yml"><img src="https://github.com/anvilnine/artifacts/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License: MIT"></a>
   <a href="package.json"><img src="https://img.shields.io/badge/node-%E2%89%A522-brightgreen.svg" alt="Node >= 22"></a>
 </p>
@@ -56,9 +56,18 @@ It runs as one container with a single admin account and, by default, no databas
 Clone, configure, start:
 
 ```bash
-git clone https://github.com/kuyazee/artifacts && cd artifacts
+git clone https://github.com/anvilnine/artifacts && cd artifacts
 cp .env.example .env   # set ARTIFACTS_API_KEY (openssl rand -hex 32) and BASE_URL
 docker compose up -d
+```
+
+Or skip the clone and run the image directly:
+
+```bash
+docker run -d -p 3000:3000 -v artifacts-data:/data \
+  -e ARTIFACTS_API_KEY=$(openssl rand -hex 32) \
+  -e BASE_URL=https://artifacts.example.com \
+  ghcr.io/anvilnine/artifacts:latest
 ```
 
 Publish something:
@@ -107,6 +116,10 @@ bash .github/workflows/smoke.sh http://localhost:3000 <your-key>
 ```
 
 PRs welcome. See [CONTRIBUTING.md](CONTRIBUTING.md).
+
+## Hosted version
+
+Self-hosting is the product, and the open source version stays complete. If you would rather not run a server, Anvil Nine is building a managed version: same publishing flow, custom domains, backups handled for you. Join the waitlist: [Z: fill waitlist URL].
 
 ## Security
 

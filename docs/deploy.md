@@ -5,7 +5,7 @@ How to run artifacts on your own infrastructure. ([← back to README](../README
 ## docker compose (recommended)
 
 ```bash
-git clone https://github.com/kuyazee/artifacts && cd artifacts
+git clone https://github.com/anvilnine/artifacts && cd artifacts
 cp .env.example .env   # set ARTIFACTS_API_KEY and BASE_URL
 docker compose up -d
 ```
@@ -22,7 +22,7 @@ ARTIFACTS_API_KEY=$(openssl rand -hex 32) BASE_URL=https://artifacts.example.com
 docker run -d -p 3000:3000 -v artifacts-data:/data \
   -e ARTIFACTS_API_KEY=$(openssl rand -hex 32) \
   -e BASE_URL=https://artifacts.example.com \
-  ghcr.io/kuyazee/artifacts:latest
+  ghcr.io/anvilnine/artifacts:latest
 ```
 
 ## bare node
