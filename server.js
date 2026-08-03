@@ -1280,7 +1280,18 @@ async function deleteArtifact(slug) {
 
 const app = express();
 app.disable('x-powered-by');
-app.use(express.json({ limit: '10mb' }));
+
+// Body parsing runs before routing, so an unauthenticated caller could make the server
+// parse 10 MB of JSON on /api/auth/login before the rate limiter ever looked at them.
+// Credential routes take a username, a password, or a slug — 16 kB is generous — so they
+// get their own small parser and everything else keeps the publish-sized limit.
+const jsonPublish = express.json({ limit: '10mb' });
+const jsonCredential = express.json({ limit: '16kb' });
+app.use((req, res, next) => {
+  const credential = req.path.startsWith('/api/auth/') ||
+    (req.path.startsWith('/a/') && req.path.endsWith('/unlock'));
+  return (credential ? jsonCredential : jsonPublish)(req, res, next);
+});
 
 // Whole domain is non-crawlable.
 app.use((req, res, next) => {
@@ -2200,7 +2211,9 @@ app.use((err, req, res, next) => {
     return res.status(err.status).json({ error: err.message });
   }
   if (err?.type === 'entity.too.large') {
-    return res.status(413).json({ error: 'body too large (10mb json / 50mb zip limit)' });
+    return res.status(413).json({
+      error: 'body too large (10mb json / 50mb zip / 16kb on credential routes)',
+    });
   }
   console.error(err);
   res.status(500).json({ error: 'internal server error' });
