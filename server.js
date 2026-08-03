@@ -1230,6 +1230,32 @@ const ARTIFACT_HEADERS = {
   'Cache-Control': 'no-cache',
 };
 
+// The dashboard is the one page that carries the admin session, so it gets its own policy:
+// same-origin everything, Google Fonts (the only third party it loads), inline style/script
+// because there is no build step, and no framing at all. X-Frame-Options repeats
+// frame-ancestors for browsers that predate it.
+const APP_CSP = [
+  "default-src 'self';",
+  "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com;",
+  "font-src 'self' https://fonts.gstatic.com;",
+  "script-src 'self' 'unsafe-inline';",
+  "img-src 'self' data:;",
+  "connect-src 'self';",
+  "frame-src 'none';",
+  "object-src 'none';",
+  "base-uri 'none';",
+  "form-action 'self';",
+  "frame-ancestors 'none';",
+].join(' ');
+
+const APP_HEADERS = {
+  'Content-Security-Policy': APP_CSP,
+  'X-Frame-Options': 'DENY',
+  'X-Content-Type-Options': 'nosniff',
+  'Referrer-Policy': 'no-referrer',
+  'Cache-Control': 'no-store',
+};
+
 // Strict extension -> MIME map covering every extension the zip validator allows
 // (ZIP_ALLOWED_EXT) plus inline outputs. The app owns Content-Type — it is never sniffed
 // nor taken from a backend's stored metadata. An unknown extension serves as
@@ -1336,12 +1362,20 @@ async function serveObject(req, res, key, { forceType } = {}) {
 }
 
 // The frame wrapper is our own page: inline styles/script + a same-origin iframe.
+// frame-ancestors 'none' is safe here even though artifacts are embeddable: an iframe load
+// carries Sec-Fetch-Dest: iframe, which the /a/:slug handler serves raw, so an embedder
+// never gets this wrapper. It does stop the password prompt (same CSP) from being framed
+// and clickjacked. object-src/base-uri close the usual injected-tag escapes.
 const FRAME_CSP = [
   "default-src 'self';",
   "style-src 'self' 'unsafe-inline';",
   "script-src 'self' 'unsafe-inline';",
   "img-src 'self' data:;",
   "frame-src 'self';",
+  "object-src 'none';",
+  "base-uri 'none';",
+  "form-action 'self';",
+  "frame-ancestors 'none';",
 ].join(' ');
 
 // Capability-link exchange: a valid ?k=<token> sets the slug-scoped unlock cookie, then
@@ -2070,6 +2104,7 @@ app.get('/healthz', (req, res) => {
 });
 
 app.get('/', (req, res) => {
+  res.set(APP_HEADERS);
   res.sendFile(path.join(__dirname, 'public', 'index.html'));
 });
 
