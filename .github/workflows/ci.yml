@@ -3,6 +3,7 @@ name: CI
 on:
   push:
     branches: [main]
+    tags: ['v*']
   pull_request:
 
 permissions:
@@ -203,7 +204,7 @@ jobs:
         run: bash .github/workflows/smoke.sh http://localhost:3000 ci-test-key
 
   docker:
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
     needs: [smoke, smoke-s3, smoke-git, smoke-postgres, smoke-sqlite]
     runs-on: ubuntu-latest
     steps:
@@ -226,3 +227,15 @@ jobs:
           docker tag artifacts-host ghcr.io/${{ github.repository_owner }}/artifacts:${{ github.sha }}
           docker push ghcr.io/${{ github.repository_owner }}/artifacts:latest
           docker push ghcr.io/${{ github.repository_owner }}/artifacts:${{ github.sha }}
+      # On a v1.3.0 tag this also publishes :1.3.0 and :1.3, so deploys can pin a version.
+      - name: Push version tags
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          image=ghcr.io/${{ github.repository_owner }}/artifacts
+          version=${REF_NAME#v}
+          docker tag artifacts-host "$image:$version"
+          docker tag artifacts-host "$image:${version%.*}"
+          docker push "$image:$version"
+          docker push "$image:${version%.*}"
