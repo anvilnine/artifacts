@@ -164,19 +164,24 @@ const USERNAME_RE = /^[a-zA-Z0-9._-]{3,32}$/;
 const ADMIN_USERNAME = process.env.ARTIFACTS_ADMIN_USERNAME;
 const ADMIN_PASSWORD = process.env.ARTIFACTS_ADMIN_PASSWORD;
 
+// Two independent HMAC secrets. sessionSecret signs capability links and per-slug unlock
+// cookies (long-lived, shared with readers); adminSecret signs the admin session cookie
+// only. Keeping them apart is what lets a password change rotate admin sessions without
+// invalidating every share link that is already out in the world.
 async function loadAuth() {
   const buf = await storage.getBuffer(AUTH_KEY);
-  if (!buf) return { version: 1, admin: null, sessionSecret: null, keys: [] };
+  if (!buf) return { version: 1, admin: null, sessionSecret: null, adminSecret: null, keys: [] };
   try {
     const raw = JSON.parse(buf.toString('utf8'));
     return {
       version: 1,
       admin: raw.admin || null,
       sessionSecret: raw.sessionSecret || null,
+      adminSecret: raw.adminSecret || null,
       keys: Array.isArray(raw.keys) ? raw.keys : [],
     };
   } catch {
-    return { version: 1, admin: null, sessionSecret: null, keys: [] };
+    return { version: 1, admin: null, sessionSecret: null, adminSecret: null, keys: [] };
   }
 }
 
@@ -226,14 +231,31 @@ async function saveAuth() {
   await storage.flush?.();
 }
 
-// The HMAC secret that signs session cookies — generated + persisted the first
-// time a session is issued, never baked into a boot-time write.
+// A throwaway credential with a real scrypt hash, used to verify a login for an unknown
+// username. Without it the route returns immediately on a username miss and takes ~100ms
+// on a hit, which tells an attacker the admin's username. Built once at boot so the first
+// wrong-username request is not itself the slow one.
+const DECOY_ADMIN = await hashPassword(crypto.randomBytes(32).toString('hex'));
+
+// The HMAC secret that signs capability links and unlock cookies — generated + persisted
+// the first time one is issued, never baked into a boot-time write.
 async function ensureSessionSecret() {
   if (!auth.sessionSecret) {
     auth.sessionSecret = crypto.randomBytes(32).toString('hex');
     await saveAuth();
   }
   return auth.sessionSecret;
+}
+
+// The HMAC secret for admin session cookies. An instance upgrading from a single-secret
+// auth.json has none yet, so it is generated on first use — which signs out any admin
+// session issued before the upgrade. Share links are unaffected.
+async function ensureAdminSecret() {
+  if (!auth.adminSecret) {
+    auth.adminSecret = crypto.randomBytes(32).toString('hex');
+    await saveAuth();
+  }
+  return auth.adminSecret;
 }
 
 // Passwords: scrypt (built-in, memory-hard). Keys: sha256 — API keys are already
@@ -290,7 +312,7 @@ function readCookie(req, name) {
 }
 
 async function issueSession(res, username) {
-  const secret = await ensureSessionSecret();
+  const secret = await ensureAdminSecret();
   const token = signSession({ sub: username, exp: Date.now() + SESSION_TTL_MS }, secret);
   res.cookie(SESSION_COOKIE, token, {
     httpOnly: true,
@@ -303,7 +325,7 @@ async function issueSession(res, username) {
 
 // Resolve a valid admin session cookie to a principal, or null.
 function sessionPrincipal(req) {
-  const payload = verifySession(readCookie(req, SESSION_COOKIE), auth.sessionSecret);
+  const payload = verifySession(readCookie(req, SESSION_COOKIE), auth.adminSecret);
   if (!payload) return null;
   if (typeof payload.exp === 'number' && payload.exp <= Date.now()) return null;
   if (!auth.admin || payload.sub !== auth.admin.username) return null;
@@ -1667,6 +1689,9 @@ app.post('/api/auth/setup', async (req, res, next) => {
     await ensureSessionSecret();
     await saveAuth();
     await issueSession(res, username);
+    // Whoever reaches an instance with no admin yet claims it. Log it so a takeover during
+    // that window is visible in the same stream as the login and unlock events.
+    logAuth('setup', { ip: clientIp(req), username, outcome: 'ok' });
     res.status(201).json({ username });
   } catch (err) {
     next(err);
@@ -1683,7 +1708,11 @@ app.post('/api/auth/login', async (req, res, next) => {
       return res.status(429).json({ error: 'too many attempts, try again later' });
     }
     const { username, password } = req.body || {};
-    if (!auth.admin || auth.admin.username !== username || !(await verifyPassword(password, auth.admin))) {
+    // Hash against the decoy when the username does not match, so a wrong username and a
+    // wrong password cost the same. `matched` still decides the outcome.
+    const matched = !!auth.admin && auth.admin.username === username;
+    const ok = await verifyPassword(password, matched ? auth.admin : DECOY_ADMIN);
+    if (!matched || !ok) {
       loginLimiter.fail(ip);
       logAuth('login', { ip, username: typeof username === 'string' ? username : null, outcome: 'fail' });
       throw new ApiError(401, 'invalid credentials');
@@ -1708,7 +1737,13 @@ app.post('/api/auth/password', requireSession, async (req, res, next) => {
     }
     validatePassword(newPassword);
     auth.admin = { username: auth.admin.username, ...(await hashPassword(newPassword)) };
+    // Changing the password is how an admin responds to a suspected stolen cookie, so it
+    // has to actually evict one. Rotating adminSecret invalidates every admin session,
+    // then the caller gets a fresh cookie so the browser they are sitting at stays signed
+    // in. Capability links keep working — those are signed with sessionSecret.
+    auth.adminSecret = crypto.randomBytes(32).toString('hex');
     await saveAuth();
+    await issueSession(res, auth.admin.username);
     res.json({ ok: true });
   } catch (err) {
     next(err);
