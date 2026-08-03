@@ -662,6 +662,53 @@ function buildMdHtml(source, title, mdCfg = config.md) {
     .replace('{{CONTENT}}', () => marked.parse(source));
 }
 
+// md artifacts render at serve time so a config change shows up on the next view. That
+// parse is synchronous and scales with the document: 1 MB costs ~130ms of blocked event
+// loop, 8 MB costs ~780ms. A public md artifact is readable by anyone holding the link,
+// so without a cache any reader can stall the whole process once per request.
+//
+// Keyed on the md config as well as the artifact, so editing the global knobs still takes
+// effect immediately. Writers drop their slug's entries (dropMdRender) rather than relying
+// on updatedAt, which is only millisecond-precise. Bounded by rendered bytes, not entry
+// count, because the entries worth caching are the large ones.
+const MD_CACHE_MAX_BYTES = 48 * 1024 * 1024;
+const mdRenderCache = new Map();
+let mdCacheBytes = 0;
+
+// SLUG_RE allows no '|', so the separator can never appear in the slug half of the key.
+function mdCacheKey(slug, mdCfg) {
+  return `${slug}|${mdCfg.font}:${mdCfg.width}:${mdCfg.size}:${mdCfg.theme}`;
+}
+
+function renderMd(slug, meta, source, mdCfg = config.md) {
+  const key = mdCacheKey(slug, mdCfg);
+  const hit = mdRenderCache.get(key);
+  if (hit !== undefined) {
+    mdRenderCache.delete(key); // re-insert so iteration order stays least-recent-first
+    mdRenderCache.set(key, hit);
+    return hit;
+  }
+  const html = buildMdHtml(source, meta.title || slug, mdCfg);
+  mdRenderCache.set(key, html);
+  mdCacheBytes += html.length;
+  while (mdCacheBytes > MD_CACHE_MAX_BYTES && mdRenderCache.size > 1) {
+    const oldest = mdRenderCache.keys().next().value;
+    mdCacheBytes -= mdRenderCache.get(oldest).length;
+    mdRenderCache.delete(oldest);
+  }
+  return html;
+}
+
+// Any write to a slug (replace, rename, duplicate target, delete) invalidates its renders.
+function dropMdRender(slug) {
+  for (const key of mdRenderCache.keys()) {
+    if (key.slice(0, key.indexOf('|')) === slug) {
+      mdCacheBytes -= mdRenderCache.get(key).length;
+      mdRenderCache.delete(key);
+    }
+  }
+}
+
 // Parent "frame" page: a slim toolbar with the artifact loaded in an iframe.
 // Function replacements avoid `$`-substitution in the escaped values.
 function buildFrameHtml(meta, rawUrl) {
@@ -995,6 +1042,7 @@ async function saveArtifact({ content, type = 'html', slug, title, expiresAt, fr
     contentType: 'application/json',
   });
   await storage.flush?.(); // durably commit the completed write (git); no-op elsewhere
+  dropMdRender(finalSlug);
   // A non-public artifact needs the session secret resident to mint its capability token;
   // it is created lazily (first login otherwise), so force it here (tokenEpoch ⇒ non-public).
   if (meta.tokenEpoch !== undefined) await ensureSessionSecret();
@@ -1068,6 +1116,7 @@ async function duplicateArtifact(sourceSlug, body = {}) {
     contentType: 'application/json',
   });
   await storage.flush?.();
+  dropMdRender(targetSlug);
   if (meta.tokenEpoch !== undefined) await ensureSessionSecret();
   return { slug: targetSlug, url: tokenedUrl(meta), visibility: meta.visibility || 'public' };
 }
@@ -1210,6 +1259,8 @@ async function patchArtifact(slug, patch) {
     contentType: 'application/json',
   });
   await storage.flush?.();
+  dropMdRender(activeSlug); // both names: a rename moves the artifact off activeSlug
+  dropMdRender(meta.slug);
   if (meta.tokenEpoch !== undefined) await ensureSessionSecret();
   return { slug: meta.slug, url: tokenedUrl(meta), visibility: meta.visibility || 'public' };
 }
@@ -1220,6 +1271,7 @@ async function deleteArtifact(slug) {
   }
   await storage.deleteSlug(slug);
   await storage.flush?.();
+  dropMdRender(slug);
 }
 
 // ---------------------------------------------------------------------------
@@ -1486,7 +1538,7 @@ app.get('/a/:slug', async (req, res) => {
     const buf = await storage.getBuffer(`${slug}/source.md`);
     if (!buf) return notFound(res);
     res.set('Cache-Control', 'no-cache'); // reflect global config changes on next view
-    return res.type('html').send(buildMdHtml(buf.toString('utf8'), meta.title || slug, config.md));
+    return res.type('html').send(renderMd(slug, meta, buf.toString('utf8'), config.md));
   }
   serveObject(req, res, `${slug}/index.html`);
 });
