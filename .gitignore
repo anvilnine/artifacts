@@ -3,6 +3,7 @@ data/
 .env
 .DS_Store
 .env.apikey
+.playwright-mcp/
 
 # session planning docs, never committed
 DESIGN-IS-*/
