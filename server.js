@@ -164,19 +164,24 @@ const USERNAME_RE = /^[a-zA-Z0-9._-]{3,32}$/;
 const ADMIN_USERNAME = process.env.ARTIFACTS_ADMIN_USERNAME;
 const ADMIN_PASSWORD = process.env.ARTIFACTS_ADMIN_PASSWORD;
 
+// Two independent HMAC secrets. sessionSecret signs capability links and per-slug unlock
+// cookies (long-lived, shared with readers); adminSecret signs the admin session cookie
+// only. Keeping them apart is what lets a password change rotate admin sessions without
+// invalidating every share link that is already out in the world.
 async function loadAuth() {
   const buf = await storage.getBuffer(AUTH_KEY);
-  if (!buf) return { version: 1, admin: null, sessionSecret: null, keys: [] };
+  if (!buf) return { version: 1, admin: null, sessionSecret: null, adminSecret: null, keys: [] };
   try {
     const raw = JSON.parse(buf.toString('utf8'));
     return {
       version: 1,
       admin: raw.admin || null,
       sessionSecret: raw.sessionSecret || null,
+      adminSecret: raw.adminSecret || null,
       keys: Array.isArray(raw.keys) ? raw.keys : [],
     };
   } catch {
-    return { version: 1, admin: null, sessionSecret: null, keys: [] };
+    return { version: 1, admin: null, sessionSecret: null, adminSecret: null, keys: [] };
   }
 }
 
@@ -226,14 +231,31 @@ async function saveAuth() {
   await storage.flush?.();
 }
 
-// The HMAC secret that signs session cookies — generated + persisted the first
-// time a session is issued, never baked into a boot-time write.
+// A throwaway credential with a real scrypt hash, used to verify a login for an unknown
+// username. Without it the route returns immediately on a username miss and takes ~100ms
+// on a hit, which tells an attacker the admin's username. Built once at boot so the first
+// wrong-username request is not itself the slow one.
+const DECOY_ADMIN = await hashPassword(crypto.randomBytes(32).toString('hex'));
+
+// The HMAC secret that signs capability links and unlock cookies — generated + persisted
+// the first time one is issued, never baked into a boot-time write.
 async function ensureSessionSecret() {
   if (!auth.sessionSecret) {
     auth.sessionSecret = crypto.randomBytes(32).toString('hex');
     await saveAuth();
   }
   return auth.sessionSecret;
+}
+
+// The HMAC secret for admin session cookies. An instance upgrading from a single-secret
+// auth.json has none yet, so it is generated on first use — which signs out any admin
+// session issued before the upgrade. Share links are unaffected.
+async function ensureAdminSecret() {
+  if (!auth.adminSecret) {
+    auth.adminSecret = crypto.randomBytes(32).toString('hex');
+    await saveAuth();
+  }
+  return auth.adminSecret;
 }
 
 // Passwords: scrypt (built-in, memory-hard). Keys: sha256 — API keys are already
@@ -290,7 +312,7 @@ function readCookie(req, name) {
 }
 
 async function issueSession(res, username) {
-  const secret = await ensureSessionSecret();
+  const secret = await ensureAdminSecret();
   const token = signSession({ sub: username, exp: Date.now() + SESSION_TTL_MS }, secret);
   res.cookie(SESSION_COOKIE, token, {
     httpOnly: true,
@@ -303,7 +325,7 @@ async function issueSession(res, username) {
 
 // Resolve a valid admin session cookie to a principal, or null.
 function sessionPrincipal(req) {
-  const payload = verifySession(readCookie(req, SESSION_COOKIE), auth.sessionSecret);
+  const payload = verifySession(readCookie(req, SESSION_COOKIE), auth.adminSecret);
   if (!payload) return null;
   if (typeof payload.exp === 'number' && payload.exp <= Date.now()) return null;
   if (!auth.admin || payload.sub !== auth.admin.username) return null;
@@ -640,6 +662,53 @@ function buildMdHtml(source, title, mdCfg = config.md) {
     .replace('{{CONTENT}}', () => marked.parse(source));
 }
 
+// md artifacts render at serve time so a config change shows up on the next view. That
+// parse is synchronous and scales with the document: 1 MB costs ~130ms of blocked event
+// loop, 8 MB costs ~780ms. A public md artifact is readable by anyone holding the link,
+// so without a cache any reader can stall the whole process once per request.
+//
+// Keyed on the md config as well as the artifact, so editing the global knobs still takes
+// effect immediately. Writers drop their slug's entries (dropMdRender) rather than relying
+// on updatedAt, which is only millisecond-precise. Bounded by rendered bytes, not entry
+// count, because the entries worth caching are the large ones.
+const MD_CACHE_MAX_BYTES = 48 * 1024 * 1024;
+const mdRenderCache = new Map();
+let mdCacheBytes = 0;
+
+// SLUG_RE allows no '|', so the separator can never appear in the slug half of the key.
+function mdCacheKey(slug, mdCfg) {
+  return `${slug}|${mdCfg.font}:${mdCfg.width}:${mdCfg.size}:${mdCfg.theme}`;
+}
+
+function renderMd(slug, meta, source, mdCfg = config.md) {
+  const key = mdCacheKey(slug, mdCfg);
+  const hit = mdRenderCache.get(key);
+  if (hit !== undefined) {
+    mdRenderCache.delete(key); // re-insert so iteration order stays least-recent-first
+    mdRenderCache.set(key, hit);
+    return hit;
+  }
+  const html = buildMdHtml(source, meta.title || slug, mdCfg);
+  mdRenderCache.set(key, html);
+  mdCacheBytes += html.length;
+  while (mdCacheBytes > MD_CACHE_MAX_BYTES && mdRenderCache.size > 1) {
+    const oldest = mdRenderCache.keys().next().value;
+    mdCacheBytes -= mdRenderCache.get(oldest).length;
+    mdRenderCache.delete(oldest);
+  }
+  return html;
+}
+
+// Any write to a slug (replace, rename, duplicate target, delete) invalidates its renders.
+function dropMdRender(slug) {
+  for (const key of mdRenderCache.keys()) {
+    if (key.slice(0, key.indexOf('|')) === slug) {
+      mdCacheBytes -= mdRenderCache.get(key).length;
+      mdRenderCache.delete(key);
+    }
+  }
+}
+
 // Parent "frame" page: a slim toolbar with the artifact loaded in an iframe.
 // Function replacements avoid `$`-substitution in the escaped values.
 function buildFrameHtml(meta, rawUrl) {
@@ -973,6 +1042,7 @@ async function saveArtifact({ content, type = 'html', slug, title, expiresAt, fr
     contentType: 'application/json',
   });
   await storage.flush?.(); // durably commit the completed write (git); no-op elsewhere
+  dropMdRender(finalSlug);
   // A non-public artifact needs the session secret resident to mint its capability token;
   // it is created lazily (first login otherwise), so force it here (tokenEpoch ⇒ non-public).
   if (meta.tokenEpoch !== undefined) await ensureSessionSecret();
@@ -1046,6 +1116,7 @@ async function duplicateArtifact(sourceSlug, body = {}) {
     contentType: 'application/json',
   });
   await storage.flush?.();
+  dropMdRender(targetSlug);
   if (meta.tokenEpoch !== undefined) await ensureSessionSecret();
   return { slug: targetSlug, url: tokenedUrl(meta), visibility: meta.visibility || 'public' };
 }
@@ -1188,6 +1259,8 @@ async function patchArtifact(slug, patch) {
     contentType: 'application/json',
   });
   await storage.flush?.();
+  dropMdRender(activeSlug); // both names: a rename moves the artifact off activeSlug
+  dropMdRender(meta.slug);
   if (meta.tokenEpoch !== undefined) await ensureSessionSecret();
   return { slug: meta.slug, url: tokenedUrl(meta), visibility: meta.visibility || 'public' };
 }
@@ -1198,6 +1271,7 @@ async function deleteArtifact(slug) {
   }
   await storage.deleteSlug(slug);
   await storage.flush?.();
+  dropMdRender(slug);
 }
 
 // ---------------------------------------------------------------------------
@@ -1206,7 +1280,18 @@ async function deleteArtifact(slug) {
 
 const app = express();
 app.disable('x-powered-by');
-app.use(express.json({ limit: '10mb' }));
+
+// Body parsing runs before routing, so an unauthenticated caller could make the server
+// parse 10 MB of JSON on /api/auth/login before the rate limiter ever looked at them.
+// Credential routes take a username, a password, or a slug — 16 kB is generous — so they
+// get their own small parser and everything else keeps the publish-sized limit.
+const jsonPublish = express.json({ limit: '10mb' });
+const jsonCredential = express.json({ limit: '16kb' });
+app.use((req, res, next) => {
+  const credential = req.path.startsWith('/api/auth/') ||
+    (req.path.startsWith('/a/') && req.path.endsWith('/unlock'));
+  return (credential ? jsonCredential : jsonPublish)(req, res, next);
+});
 
 // Whole domain is non-crawlable.
 app.use((req, res, next) => {
@@ -1214,10 +1299,16 @@ app.use((req, res, next) => {
   next();
 });
 
+// Google Fonts goes in default-src rather than a narrow style-src/font-src pair: adding an
+// explicit style-src here would stop styles falling back to default-src and break artifacts
+// that pull CSS from cdnjs / unpkg / jsdelivr. A stylesheet cannot execute script, so this
+// does not widen the script surface. It does mean a viewer's IP reaches Google on any
+// artifact that asks for a webfont, which is also true of the md shell.
 const ARTIFACT_CSP = [
   "default-src 'self' 'unsafe-inline' 'unsafe-eval' data: blob:",
   'https://esm.sh https://cdn.tailwindcss.com https://cdnjs.cloudflare.com',
-  'https://unpkg.com https://cdn.jsdelivr.net;',
+  'https://unpkg.com https://cdn.jsdelivr.net',
+  'https://fonts.googleapis.com https://fonts.gstatic.com;',
   "connect-src 'self' https://esm.sh;",
   "img-src * data: blob:",
 ].join(' ');
@@ -1228,6 +1319,32 @@ const ARTIFACT_HEADERS = {
   'X-Content-Type-Options': 'nosniff',
   'Referrer-Policy': 'no-referrer',
   'Cache-Control': 'no-cache',
+};
+
+// The dashboard is the one page that carries the admin session, so it gets its own policy:
+// same-origin everything, Google Fonts (the only third party it loads), inline style/script
+// because there is no build step, and no framing at all. X-Frame-Options repeats
+// frame-ancestors for browsers that predate it.
+const APP_CSP = [
+  "default-src 'self';",
+  "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com;",
+  "font-src 'self' https://fonts.gstatic.com;",
+  "script-src 'self' 'unsafe-inline';",
+  "img-src 'self' data:;",
+  "connect-src 'self';",
+  "frame-src 'none';",
+  "object-src 'none';",
+  "base-uri 'none';",
+  "form-action 'self';",
+  "frame-ancestors 'none';",
+].join(' ');
+
+const APP_HEADERS = {
+  'Content-Security-Policy': APP_CSP,
+  'X-Frame-Options': 'DENY',
+  'X-Content-Type-Options': 'nosniff',
+  'Referrer-Policy': 'no-referrer',
+  'Cache-Control': 'no-store',
 };
 
 // Strict extension -> MIME map covering every extension the zip validator allows
@@ -1336,12 +1453,21 @@ async function serveObject(req, res, key, { forceType } = {}) {
 }
 
 // The frame wrapper is our own page: inline styles/script + a same-origin iframe.
+// frame-ancestors 'none' is safe here even though artifacts are embeddable: an iframe load
+// carries Sec-Fetch-Dest: iframe, which the /a/:slug handler serves raw, so an embedder
+// never gets this wrapper. It does stop the password prompt (same CSP) from being framed
+// and clickjacked. object-src/base-uri close the usual injected-tag escapes.
 const FRAME_CSP = [
   "default-src 'self';",
-  "style-src 'self' 'unsafe-inline';",
+  "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com;",
+  "font-src 'self' https://fonts.gstatic.com;",
   "script-src 'self' 'unsafe-inline';",
   "img-src 'self' data:;",
   "frame-src 'self';",
+  "object-src 'none';",
+  "base-uri 'none';",
+  "form-action 'self';",
+  "frame-ancestors 'none';",
 ].join(' ');
 
 // Capability-link exchange: a valid ?k=<token> sets the slug-scoped unlock cookie, then
@@ -1430,7 +1556,7 @@ app.get('/a/:slug', async (req, res) => {
     const buf = await storage.getBuffer(`${slug}/source.md`);
     if (!buf) return notFound(res);
     res.set('Cache-Control', 'no-cache'); // reflect global config changes on next view
-    return res.type('html').send(buildMdHtml(buf.toString('utf8'), meta.title || slug, config.md));
+    return res.type('html').send(renderMd(slug, meta, buf.toString('utf8'), config.md));
   }
   serveObject(req, res, `${slug}/index.html`);
 });
@@ -1633,6 +1759,9 @@ app.post('/api/auth/setup', async (req, res, next) => {
     await ensureSessionSecret();
     await saveAuth();
     await issueSession(res, username);
+    // Whoever reaches an instance with no admin yet claims it. Log it so a takeover during
+    // that window is visible in the same stream as the login and unlock events.
+    logAuth('setup', { ip: clientIp(req), username, outcome: 'ok' });
     res.status(201).json({ username });
   } catch (err) {
     next(err);
@@ -1649,7 +1778,11 @@ app.post('/api/auth/login', async (req, res, next) => {
       return res.status(429).json({ error: 'too many attempts, try again later' });
     }
     const { username, password } = req.body || {};
-    if (!auth.admin || auth.admin.username !== username || !(await verifyPassword(password, auth.admin))) {
+    // Hash against the decoy when the username does not match, so a wrong username and a
+    // wrong password cost the same. `matched` still decides the outcome.
+    const matched = !!auth.admin && auth.admin.username === username;
+    const ok = await verifyPassword(password, matched ? auth.admin : DECOY_ADMIN);
+    if (!matched || !ok) {
       loginLimiter.fail(ip);
       logAuth('login', { ip, username: typeof username === 'string' ? username : null, outcome: 'fail' });
       throw new ApiError(401, 'invalid credentials');
@@ -1674,7 +1807,13 @@ app.post('/api/auth/password', requireSession, async (req, res, next) => {
     }
     validatePassword(newPassword);
     auth.admin = { username: auth.admin.username, ...(await hashPassword(newPassword)) };
+    // Changing the password is how an admin responds to a suspected stolen cookie, so it
+    // has to actually evict one. Rotating adminSecret invalidates every admin session,
+    // then the caller gets a fresh cookie so the browser they are sitting at stays signed
+    // in. Capability links keep working — those are signed with sessionSecret.
+    auth.adminSecret = crypto.randomBytes(32).toString('hex');
     await saveAuth();
+    await issueSession(res, auth.admin.username);
     res.json({ ok: true });
   } catch (err) {
     next(err);
@@ -2070,6 +2209,7 @@ app.get('/healthz', (req, res) => {
 });
 
 app.get('/', (req, res) => {
+  res.set(APP_HEADERS);
   res.sendFile(path.join(__dirname, 'public', 'index.html'));
 });
 
@@ -2078,7 +2218,9 @@ app.use((err, req, res, next) => {
     return res.status(err.status).json({ error: err.message });
   }
   if (err?.type === 'entity.too.large') {
-    return res.status(413).json({ error: 'body too large (10mb json / 50mb zip limit)' });
+    return res.status(413).json({
+      error: 'body too large (10mb json / 50mb zip / 16kb on credential routes)',
+    });
   }
   console.error(err);
   res.status(500).json({ error: 'internal server error' });

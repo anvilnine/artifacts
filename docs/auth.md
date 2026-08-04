@@ -63,7 +63,9 @@ artifacts keys revoke <id>
 | `POST` | `/api/auth/logout` | clears the cookie |
 | `POST` | `/api/auth/password` | `{ currentPassword, newPassword }` (logged in) |
 
-`POST /api/auth/login` is rate-limited to 10 failures per 15 minutes per client IP (a `429` with `Retry-After` after that); a successful login never consumes budget. Client-IP resolution honors `TRUST_PROXY` — see [rate limiting and the edge](deploy.md#rate-limiting-and-the-edge).
+`POST /api/auth/login` is rate-limited to 10 failures per 15 minutes per client IP (a `429` with `Retry-After` after that); a successful login never consumes budget. Client-IP resolution honors `TRUST_PROXY` — see [rate limiting and the edge](deploy.md#rate-limiting-and-the-edge). Credential routes cap the request body at 16 kB.
+
+Changing the password signs out every other admin session. The browser making the change gets a fresh cookie and stays signed in, so use it if you think a session cookie leaked. Capability links for private and password artifacts are signed with a separate secret and keep working; revoke those per artifact with `PATCH {"rotateToken": true}`.
 
 ## Using a key
 
