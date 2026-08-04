@@ -1299,10 +1299,16 @@ app.use((req, res, next) => {
   next();
 });
 
+// Google Fonts goes in default-src rather than a narrow style-src/font-src pair: adding an
+// explicit style-src here would stop styles falling back to default-src and break artifacts
+// that pull CSS from cdnjs / unpkg / jsdelivr. A stylesheet cannot execute script, so this
+// does not widen the script surface. It does mean a viewer's IP reaches Google on any
+// artifact that asks for a webfont, which is also true of the md shell.
 const ARTIFACT_CSP = [
   "default-src 'self' 'unsafe-inline' 'unsafe-eval' data: blob:",
   'https://esm.sh https://cdn.tailwindcss.com https://cdnjs.cloudflare.com',
-  'https://unpkg.com https://cdn.jsdelivr.net;',
+  'https://unpkg.com https://cdn.jsdelivr.net',
+  'https://fonts.googleapis.com https://fonts.gstatic.com;',
   "connect-src 'self' https://esm.sh;",
   "img-src * data: blob:",
 ].join(' ');
@@ -1453,7 +1459,8 @@ async function serveObject(req, res, key, { forceType } = {}) {
 // and clickjacked. object-src/base-uri close the usual injected-tag escapes.
 const FRAME_CSP = [
   "default-src 'self';",
-  "style-src 'self' 'unsafe-inline';",
+  "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com;",
+  "font-src 'self' https://fonts.gstatic.com;",
   "script-src 'self' 'unsafe-inline';",
   "img-src 'self' data:;",
   "frame-src 'self';",
