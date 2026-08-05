@@ -413,6 +413,12 @@
 
   .empty { padding: 26px; text-align: center; color: var(--taupe-dim); font-size: 13px; border: 1px dashed var(--rim-soft); border-radius: var(--r-lg); }
 
+  /* zero-artifact state: same dashed box, plus a headline and the paste action */
+  .empty.start { display: flex; flex-direction: column; align-items: center; gap: 10px; padding: 34px 20px; }
+  .empty.start strong { font-family: var(--f-display); font-size: 16px; font-weight: 700; color: var(--cream); letter-spacing: -.01em; }
+  .empty.start span { max-width: 340px; line-height: 1.5; }
+  .empty.start button { margin-top: 4px; }
+
   /* list loading skeleton, matches the .item row shape. The global
      reduced-motion rule freezes the shimmer to a static bar. */
   .skel {
@@ -1095,6 +1101,31 @@
     $('rows').appendChild(empty);
   }
 
+  // Zero-artifact state. The button opens the compose form already set to html with the
+  // cursor in the content box, so an empty dashboard is two clicks from a published URL.
+  function showEmptyStart() {
+    const box = document.createElement('div');
+    box.className = 'empty start';
+    const head = document.createElement('strong');
+    head.textContent = 'Nothing published yet';
+    const sub = document.createElement('span');
+    sub.textContent = 'Paste HTML, a React component, or Markdown and get a link back. Files go in the box above.';
+    const btn = document.createElement('button');
+    btn.id = 'pasteStart';
+    btn.textContent = 'Paste HTML';
+    btn.addEventListener('click', openPaste);
+    box.append(head, sub, btn);
+    $('rows').appendChild(box);
+  }
+
+  // Open the compose form ready for a paste. The type is forced back to html because a
+  // previous publish leaves the select on whatever was used last.
+  function openPaste() {
+    exitDuplicateMode();
+    $('type').value = 'html';
+    togglePop('compose', 'content');
+  }
+
   function pill(text, variant) {
     const s = document.createElement('span');
     s.className = variant ? 'pill ' + variant : 'pill';
@@ -1270,7 +1301,7 @@
     rows.innerHTML = '';
     rows.classList.toggle('grid', viewMode === 'grid');
 
-    if (!allItems.length) return showEmpty('Nothing published yet. Drop a file above to start.');
+    if (!allItems.length) return showEmptyStart();
     if (!filtered.length) return showEmpty('No matches for “' + q + '”.');
 
     const hasProjects = allItems.some((a) => a.project);
@@ -1772,7 +1803,7 @@
     $('scrim').classList.remove('open');
   }
 
-  function togglePop(name) {
+  function togglePop(name, focusId) {
     const [pop, btn] = POPS[name];
     const wasOpen = $(pop).classList.contains('open');
     closePops();
@@ -1782,7 +1813,7 @@
     $(btn).classList.add('on');
     $(btn).setAttribute('aria-expanded', 'true');
     $('scrim').classList.add('open');
-    const first = $(pop).querySelector('input, select, textarea');
+    const first = focusId ? $(focusId) : $(pop).querySelector('input, select, textarea');
     if (first) setTimeout(() => first.focus(), 60);
   }
 
