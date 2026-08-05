@@ -17,6 +17,10 @@ import { createRateLimiter } from './ratelimit.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
+// package.json is the single source of truth for the version we report over MCP.
+// The old hardcoded '1.0.0' sat here while package.json was already at 1.3.1.
+const VERSION = JSON.parse(await fs.readFile(path.join(__dirname, 'package.json'), 'utf8')).version;
+
 const PORT = Number(process.env.PORT || 3000);
 const BASE_URL = (process.env.BASE_URL || `http://localhost:${PORT}`).replace(/\/$/, '');
 const API_KEY = process.env.ARTIFACTS_API_KEY;
@@ -1894,7 +1898,7 @@ app.delete('/api/keys/:id', requireAdmin, async (req, res, next) => {
 // ---------------------------------------------------------------------------
 
 function createMcpServer(scopes = SCOPES) {
-  const server = new McpServer({ name: 'artifacts-host', version: '1.0.0' });
+  const server = new McpServer({ name: 'artifacts-host', version: VERSION });
 
   // Per-tool scope gate — the key that authenticated /mcp carries a scope; a
   // read-only key can list but not mutate, delete needs full. A thrown Error

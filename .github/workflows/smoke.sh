@@ -323,9 +323,39 @@ echo "ok: password mode unlock round-trip"
 curl -sf -X DELETE "$BASE/api/artifacts/cap-one" -H "$AUTH" > /dev/null
 curl -sf -X DELETE "$BASE/api/artifacts/cap-pw" -H "$AUTH" > /dev/null
 
+# --- identity: package.json, server.json, the Dockerfile label and the MCP handshake agree ---
+# These drifted apart once. Compare them here so a bump or rename that misses one fails
+# CI instead of shipping a wrong version or namespace to MCP clients. Assumes the checkout
+# and the instance under test come from the same commit, which holds in CI.
+REPO_DIR=$(cd "$(dirname "$0")/../.." && pwd)
+json_field() { node -e 'process.stdout.write(String(JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"))[process.argv[2]] ?? ""))' "$1" "$2"; }
+
+pkg_version=$(json_field "$REPO_DIR/package.json" version)
+[ -n "$pkg_version" ] || fail "package.json has no version field"
+server_json_version=$(json_field "$REPO_DIR/server.json" version)
+[ "$server_json_version" = "$pkg_version" ] || fail "server.json version '$server_json_version' != package.json '$pkg_version'"
+echo "ok: server.json version matches package.json ($pkg_version)"
+
+# The MCP registry reads the Dockerfile label to check who owns the io.github.<ns>
+# namespace, so it has to name the same server as server.json.
+mcp_id=$(json_field "$REPO_DIR/server.json" name)
+[ -n "$mcp_id" ] || fail "server.json has no name field"
+grep -qF "LABEL io.modelcontextprotocol.server.name=\"$mcp_id\"" "$REPO_DIR/Dockerfile" \
+  || fail "Dockerfile MCP label does not match server.json name '$mcp_id'"
+echo "ok: Dockerfile MCP label matches server.json ($mcp_id)"
+
+mcp_init=$(curl -s -X POST "$BASE/mcp" -H "$AUTH" -H "$JSON" -H 'Accept: application/json, text/event-stream' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"smoke","version":"1"}}}')
+# Pull the field out rather than matching the whole serverInfo object, so a future SDK
+# that reorders keys or adds a title reports the real mismatch instead of a shape mismatch.
+mcp_version=$(printf '%s' "$mcp_init" | sed -n 's/.*"serverInfo":{[^}]*"version":"\([^"]*\)".*/\1/p')
+[ -n "$mcp_version" ] || fail "MCP initialize returned no serverInfo version (got: $mcp_init)"
+[ "$mcp_version" = "$pkg_version" ] || fail "MCP serverInfo version '$mcp_version' != package.json '$pkg_version'"
+echo "ok: MCP serverInfo version matches package.json"
+
 # CLI round-trip (cli.js lives next to this checkout; skipped when deps absent,
 # e.g. the container-smoke job which doesn't run npm ci)
-CLI_DIR=$(cd "$(dirname "$0")/../.." && pwd)
+CLI_DIR=$REPO_DIR
 if [ ! -d "$CLI_DIR/node_modules" ]; then
   echo "skip: cli smoke (no node_modules)"
   echo "all smoke tests passed"
