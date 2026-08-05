@@ -115,6 +115,10 @@ The whole test suite is one shell script:
 bash .github/workflows/smoke.sh http://localhost:3000 <your-key>
 ```
 
+That covers the dashboard too. `dashboard-check.mjs` fetches `/`, parses the inline script in
+`public/index.html`, and checks that every element the script grabs by id is still in the markup.
+It runs no browser, so it catches a syntax error or a deleted element but not a runtime error.
+
 PRs welcome. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Hosted version
