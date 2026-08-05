@@ -85,6 +85,17 @@ echo "ok: md config defaults"
 code=$(curl -s -o /dev/null -w '%{http_code}' -X PUT "$BASE/api/config" -H "$AUTH" -H "$JSON" -d '{"md":{"font":"comic"}}')
 expect_code 400 "$code" "invalid md.font rejected"
 
+# accepted update -> round-trips through the storage backend and merges rather than
+# replaces. Without this the suite only ever proves config READS work: every other
+# config assertion here passes against defaults, so a broken write path stays green.
+updated=$(curl -s -X PUT "$BASE/api/config" -H "$AUTH" -H "$JSON" -d '{"md":{"width":"wide"}}')
+echo "$updated" | grep -q '"width":"wide"' || fail "config update did not apply md.width"
+echo "$updated" | grep -q '"font":"system"' || fail "config update dropped untouched md.font"
+echo "$updated" | grep -q '"enabled":true' || fail "config update dropped untouched frame block"
+curl -s "$BASE/api/config" -H "$AUTH" | grep -q '"width":"wide"' || fail "config update did not persist"
+echo "ok: config update round-trip + partial merge"
+curl -sf -X PUT "$BASE/api/config" -H "$AUTH" -H "$JSON" -d '{"md":{"width":"normal"}}' > /dev/null
+
 # publish md -> serve-time render carries the theme bootstrap and rendered body
 curl -sf -X POST "$BASE/api/artifacts" -H "$AUTH" -H "$JSON" \
   -d '{"content":"# md smoke\n\nhi","type":"md","slug":"ci-md","visibility":"public"}' > /dev/null
