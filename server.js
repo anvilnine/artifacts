@@ -14,6 +14,8 @@ import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/
 
 import { createStorage, UnsafeKeyError } from './storage/index.js';
 import { createRateLimiter } from './ratelimit.js';
+import { createConfigStore } from './lib/config.js';
+import { ApiError } from './lib/errors.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -33,113 +35,13 @@ const storage = await createStorage();
 
 const nanoid = customAlphabet('abcdefghijklmnopqrstuvwxyz0123456789', 10);
 
-// ---------------------------------------------------------------------------
-// Server config — global frame settings, stored through the storage backend
-// ---------------------------------------------------------------------------
-
-// A reserved root-level key (single segment, so it never collides with a slug — slugs
-// forbid `.` — and is excluded from listMetas, which only matches `<slug>/meta.json`).
-// Routing config through storage keeps the global frame setting as durable as artifacts:
-// it survives a fresh-container restart on the s3/git/postgres backends too.
-const CONFIG_KEY = 'config.json';
-
-function boolEnv(name) {
-  const v = process.env[name];
-  if (v === undefined) return undefined;
-  return v === '1' || v.toLowerCase() === 'true';
-}
-
-const MD_FONTS  = ['system', 'serif', 'mono'];
-const MD_WIDTHS = ['narrow', 'normal', 'wide'];
-const MD_SIZES  = ['small', 'normal', 'large'];
-const MD_THEMES = ['auto', 'light', 'dark'];
-
-function enumEnv(name, allowed) {
-  const v = process.env[name];
-  return v !== undefined && allowed.includes(v) ? v : undefined;
-}
-
-const DEFAULT_CONFIG = {
-  frame: {
-    enabled: boolEnv('FRAME_ENABLED') ?? true,
-    default: boolEnv('FRAME_DEFAULT') ?? true,
-  },
-  md: {
-    font:  enumEnv('MD_FONT', MD_FONTS)   ?? 'system',
-    width: enumEnv('MD_WIDTH', MD_WIDTHS) ?? 'normal',
-    size:  enumEnv('MD_SIZE', MD_SIZES)   ?? 'normal',
-    theme: enumEnv('MD_THEME', MD_THEMES) ?? 'auto',
-  },
-};
-
-function normalizeConfig(raw) {
-  const frame = raw?.frame || {};
-  const md = raw?.md || {};
-  const pick = (val, allowed, def) => (allowed.includes(val) ? val : def);
-  return {
-    frame: {
-      enabled: typeof frame.enabled === 'boolean' ? frame.enabled : DEFAULT_CONFIG.frame.enabled,
-      default: typeof frame.default === 'boolean' ? frame.default : DEFAULT_CONFIG.frame.default,
-    },
-    md: {
-      font:  pick(md.font,  MD_FONTS,  DEFAULT_CONFIG.md.font),
-      width: pick(md.width, MD_WIDTHS, DEFAULT_CONFIG.md.width),
-      size:  pick(md.size,  MD_SIZES,  DEFAULT_CONFIG.md.size),
-      theme: pick(md.theme, MD_THEMES, DEFAULT_CONFIG.md.theme),
-    },
-  };
-}
-
-// Read persisted config, or fall back to the env/defaults in memory. Defaults are NOT
-// written back on boot — that would commit+push on the git backend every startup; the
-// file is created only when an operator changes a setting via updateConfig.
-async function loadConfig() {
-  const buf = await storage.getBuffer(CONFIG_KEY);
-  if (!buf) return DEFAULT_CONFIG;
-  try {
-    return normalizeConfig(JSON.parse(buf.toString('utf8')));
-  } catch {
-    return DEFAULT_CONFIG;
-  }
-}
-
-let config = await loadConfig();
-
-async function updateConfig(patch) {
-  const frame = patch?.frame || {};
-  for (const key of ['enabled', 'default']) {
-    if (frame[key] !== undefined && typeof frame[key] !== 'boolean') {
-      throw new ApiError(400, `frame.${key} must be a boolean`);
-    }
-  }
-  const md = patch?.md || {};
-  const mdChecks = { font: MD_FONTS, width: MD_WIDTHS, size: MD_SIZES, theme: MD_THEMES };
-  for (const [key, allowed] of Object.entries(mdChecks)) {
-    if (md[key] !== undefined && !allowed.includes(md[key])) {
-      throw new ApiError(400, `md.${key} must be one of ${allowed.join(', ')}`);
-    }
-  }
-  config = {
-    frame: {
-      enabled: frame.enabled ?? config.frame.enabled,
-      default: frame.default ?? config.frame.default,
-    },
-    md: {
-      font:  md.font  ?? config.md.font,
-      width: md.width ?? config.md.width,
-      size:  md.size  ?? config.md.size,
-      theme: md.theme ?? config.md.theme,
-    },
-  };
-  await storage.put(CONFIG_KEY, JSON.stringify(config, null, 2), { contentType: 'application/json' });
-  await storage.flush?.();
-  return config;
-}
+// Global frame settings and markdown render defaults. See lib/config.js.
+const config = await createConfigStore(storage);
 
 // ---------------------------------------------------------------------------
 // Auth — one admin account (session login for the dashboard) plus managed API
 // keys (scoped bearer tokens for CLI / MCP). Both live under a reserved key,
-// exactly like config.json above, so they persist across a fresh-container
+// exactly like the config.json key (see lib/config.js), so they persist across a fresh-container
 // restart on every backend (local/s3/git/postgres/sqlite) with no schema or
 // migration. The bootstrap ARTIFACTS_API_KEY stays valid as an all-scope
 // break-glass admin bearer alongside the managed keys.
@@ -513,7 +415,8 @@ function parseKeyInput(name, scopes, expiresAt) {
 // Whether the viewer frame is shown for this artifact: global master switch
 // AND (per-item override, or the global default when the item has no override).
 function frameActive(meta) {
-  return config.frame.enabled && (typeof meta.frame === 'boolean' ? meta.frame : config.frame.default);
+  const { frame } = config.current;
+  return frame.enabled && (typeof meta.frame === 'boolean' ? meta.frame : frame.default);
 }
 
 const JSX_SHELL = await fs.readFile(path.join(__dirname, 'shells', 'jsx.html'), 'utf8');
@@ -652,7 +555,7 @@ const MD_FONT_STACKS = {
 const MD_WIDTH_PX = { narrow: '640px', normal: '760px', wide: '900px' };
 const MD_SIZE_PX  = { small: '15px', normal: '16px', large: '18px' };
 
-function buildMdHtml(source, title, mdCfg = config.md) {
+function buildMdHtml(source, title, mdCfg = config.current.md) {
   return MD_SHELL
     .replaceAll('{{TITLE}}', () => escapeHtml(title))
     .replace('{{FONT}}', () => MD_FONT_STACKS[mdCfg.font])
@@ -680,7 +583,7 @@ function mdCacheKey(slug, mdCfg) {
   return `${slug}|${mdCfg.font}:${mdCfg.width}:${mdCfg.size}:${mdCfg.theme}`;
 }
 
-function renderMd(slug, meta, source, mdCfg = config.md) {
+function renderMd(slug, meta, source, mdCfg = config.current.md) {
   const key = mdCacheKey(slug, mdCfg);
   const hit = mdRenderCache.get(key);
   if (hit !== undefined) {
@@ -740,13 +643,6 @@ function escapeHtml(s) {
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;')
     .replace(/'/g, '&#39;');
-}
-
-class ApiError extends Error {
-  constructor(status, message) {
-    super(message);
-    this.status = status;
-  }
 }
 
 async function readMeta(slug) {
@@ -1556,7 +1452,7 @@ app.get('/a/:slug', async (req, res) => {
     const buf = await storage.getBuffer(`${slug}/source.md`);
     if (!buf) return notFound(res);
     res.set('Cache-Control', 'no-cache'); // reflect global config changes on next view
-    return res.type('html').send(renderMd(slug, meta, buf.toString('utf8'), config.md));
+    return res.type('html').send(renderMd(slug, meta, buf.toString('utf8'), config.current.md));
   }
   serveObject(req, res, `${slug}/index.html`);
 });
@@ -1723,12 +1619,12 @@ app.get('/api/artifacts', requireAuth('read'), async (req, res, next) => {
 });
 
 app.get('/api/config', requireAuth('read'), (req, res) => {
-  res.json(config);
+  res.json(config.current);
 });
 
 app.put('/api/config', requireAuth('full'), async (req, res, next) => {
   try {
-    res.json(await updateConfig(req.body));
+    res.json(await config.update(req.body));
   } catch (err) {
     next(err);
   }

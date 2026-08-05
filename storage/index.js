@@ -5,7 +5,7 @@
 // the original on-disk layout so an existing local `/data` volume needs no migration.
 //
 // Backends implement the small interface below; business logic (validation, rendering,
-// meta shape) stays in server.js. Selecting a backend loads only that backend's optional
+// meta shape) stays in server.js and lib/. Selecting a backend loads only that backend's optional
 // dependency — a plain `local` install pulls nothing extra.
 //
 //   interface Storage {
@@ -20,7 +20,7 @@
 //     flush?()                  // optional: durably commit a completed write (git)
 //   }
 //
-// flush() is optional. server.js calls `await storage.flush?.()` at the end of each logical
+// flush() is optional. The app calls `await storage.flush?.()` at the end of each logical
 // write (publish / replace / patch / delete), so a backend that batches — the git backend
 // coalesces a multi-file write into ONE commit+push — has a single "operation complete"
 // signal. Backends that persist per-put (local, s3) don't implement it.
