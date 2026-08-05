@@ -1452,6 +1452,19 @@ async function serveObject(req, res, key, { forceType } = {}) {
   }
 }
 
+// A zip site may ship its own `404.html`; a miss anywhere under /a/:slug/ serves that page
+// with a real 404 status, so a static-site build's not-found page works the way it does on
+// every other host. No 404.html in the zip: the plain-text miss serveObject would have sent.
+// The caller has already set ARTIFACT_HEADERS, so the page runs under the same CSP as the
+// rest of the site.
+async function serveSiteNotFound(res, slug) {
+  const got = await storage.get(`${slug}/site/404.html`).catch(() => null);
+  if (!got) return res.status(404).type('text/plain').send('not found');
+  res.status(404).set({ 'Content-Type': 'text/html; charset=utf-8' });
+  if (got.size != null) res.set('Content-Length', String(got.size));
+  pipeStream(res, got.stream);
+}
+
 // The frame wrapper is our own page: inline styles/script + a same-origin iframe.
 // frame-ancestors 'none' is safe here even though artifacts are embeddable: an iframe load
 // carries Sec-Fetch-Dest: iframe, which the /a/:slug handler serves raw, so an embedder
@@ -1592,9 +1605,11 @@ app.get('/a/:slug/*', async (req, res) => {
   let key = `${slug}/site/${rel}`;
   if (rel === '' || rel.endsWith('/')) {
     key = `${slug}/site/${rel}index.html`;
+    if (!(await storage.head(key).catch(() => null))) return serveSiteNotFound(res, slug);
   } else if (!(await storage.head(key).catch(() => null))) {
     const alt = `${slug}/site/${rel}/index.html`;
     if (await storage.head(alt).catch(() => null)) key = alt;
+    else return serveSiteNotFound(res, slug);
   }
   serveObject(req, res, key);
 });
