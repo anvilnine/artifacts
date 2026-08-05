@@ -63,11 +63,16 @@ wiped and artifacts are lost. Set `STORAGE_BACKEND=s3` to store them in a durabl
 S3-compatible bucket instead; the app then holds no local state and artifacts survive any
 restart.
 
-The global viewer-frame config (`GET`/`PUT /api/config`) is stored through the same backend, so
-it is as durable as your artifacts. It is loaded once at boot and cached in memory; a running
-process picks up its own `PUT /api/config` immediately, but if you run **multiple replicas**
-against a shared backend, other replicas apply a runtime config change only after they restart.
-Set the frame defaults with `FRAME_ENABLED`/`FRAME_DEFAULT` env vars for a fleet-wide default.
+The global config (`GET`/`PUT /api/config`), covering the viewer frame and the markdown render
+settings, is stored through the same backend, so it is as durable as your artifacts. It is loaded
+once at boot and cached in memory; a running process picks up its own `PUT /api/config`
+immediately, but if you run **multiple replicas** against a shared backend, other replicas apply a
+runtime config change only after they restart.
+
+`FRAME_ENABLED`/`FRAME_DEFAULT` and the `MD_*` vars set a fleet-wide default only while no config
+has been saved. The first accepted `PUT` writes all six fields to the backend, and every replica
+then reads those on restart and ignores the env vars. To change a saved setting across a fleet,
+`PUT` it rather than editing env.
 
 ### S3 (and S3-compatible: R2, B2, MinIO, Spaces, Wasabi, GCS interop)
 

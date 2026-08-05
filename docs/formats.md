@@ -12,7 +12,8 @@ Rendered server-side (via marked) into a styled page. The original source stays 
 
 ### Markdown render settings
 
-Four global knobs, set in the dashboard Settings popover or with `PUT /api/config`:
+Four global knobs, set in the dashboard Settings popover or with `PUT /api/config`. The `MD_FONT`,
+`MD_WIDTH`, `MD_SIZE` and `MD_THEME` env vars supply the starting values until something is saved:
 
 - `md.font`: `system`, `serif`, or `mono`.
 - `md.width`: `narrow` (640px), `normal` (760px), or `wide` (900px).

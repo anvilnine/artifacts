@@ -12,8 +12,8 @@ PATCH  /api/artifacts/:slug  {slug?, disabled?, expiresAt?, tags?, project?, fra
 DELETE /api/artifacts/:slug                                                  → {deleted}   [full]
 GET    /api/artifacts        list (?tag= and/or ?project= to filter)         → [...]   [read]
 GET    /api/artifacts/:slug/link  mint a fresh share link, no mutation       → {url, visibility}   [read]
-GET    /api/config           {frame: {enabled, default}}                     → global frame config   [read]
-PUT    /api/config           {frame: {enabled?, default?}}                   → updated config   [full]
+GET    /api/config                                                           → {frame: {enabled, default}, md: {font, width, size, theme}}   [read]
+PUT    /api/config           {frame?: {enabled?, default?}, md?: {font?, width?, size?, theme?}} → updated config   [full]
 GET    /a/:slug              rendered artifact, framed when active (public unless private/password)
 GET    /a/:slug?k=<token>    capability-link exchange: sets the unlock cookie, 302s to a clean URL (private/password)
 GET    /a/:slug?raw=1        bare artifact without the frame
@@ -37,7 +37,7 @@ Semantics:
 
 Whether an artifact is framed resolves as `config.frame.enabled && (meta.frame ?? config.frame.default)`:
 
-- **`GET/PUT /api/config`** manage the global `{frame: {enabled, default}}` (both booleans). `enabled` is the master switch; `default` applies to items with no per-item value. `PUT` accepts a partial `frame` object and merges it. First boot seeds the config from the optional `FRAME_ENABLED` / `FRAME_DEFAULT` env vars (both default `true`), persisting it to `DATA_DIR/config.json`.
+- **`GET/PUT /api/config`** manage the global config: `{frame: {enabled, default}}` (both booleans) plus the four markdown render settings documented in [Markdown render settings](formats.md#markdown-render-settings). `enabled` is the master switch; `default` applies to items with no per-item value. `PUT` accepts a partial `frame` or `md` object and merges it. The optional `FRAME_ENABLED` / `FRAME_DEFAULT` env vars (both default `true` when unset) supply the values while no config has been saved. The server writes nothing on boot. `config.json` appears the first time a `PUT` is accepted, which keeps the git backend from committing on every startup. It is a reserved key in whatever backend you run, landing at `DATA_DIR/artifacts/config.json` on the local one. Once it exists it holds all six fields, so the env vars stop having any effect.
 - **Per item**, the `frame` field on `POST` / `PUT` / `PATCH` is `true` (always framed), `false` (never framed), or — via `PATCH {"frame": null}` — cleared so the item inherits the global default.
 
 When the frame is globally disabled or off for an item, `/a/:slug` serves the artifact exactly as `?raw=1` does.
