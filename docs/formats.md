@@ -56,6 +56,21 @@ Note: rendering uses esm.sh + Tailwind CDN, so artifacts need internet to render
 
 A zipped static project (HTML + CSS + JS + images) served under `/a/{slug}/`. Upload via the web UI (drop a `.zip`), the [CLI](cli.md) (`artifacts deploy ./dir`), or the [zip endpoint](api.md#zip-sites-multi-file-static-projects) — validation rules and limits are documented there.
 
+### Custom not-found page
+
+Put a `404.html` at the root of the zip and any miss under `/a/{slug}/` serves it with a 404
+status: a missing file, a missing directory, a directory with no `index.html`. Without one, a miss
+is a plain-text `not found`. The page is served the same way as the rest of the site, so relative
+asset URLs inside it resolve against `/a/{slug}/`. Most static site generators already emit a
+`404.html`, so this needs no extra work for an Astro or Eleventy build.
+
+<img src="screenshot-zip-404.png" alt="A zip site's own 404.html served for a missing path" width="700">
+
+Two things it does not change. A locked artifact (private, or password with no unlock cookie)
+still returns the standard artifact-not-found page for every path, so `404.html` never becomes a
+way to tell a private site apart from one that does not exist. And a request for `/a/{slug}/404.html`
+itself is an ordinary file read: 200, not 404.
+
 ### Static framework builds (Astro, Vite, etc.)
 
 Output from static site generators drops straight into the zip endpoint — an Astro `astro build` (or Vite/Eleventy/etc.) `dist/` folder is just HTML + CSS + JS. The one thing to watch: because sites are served under the `/a/{slug}/` **subpath**, a build that emits **root-absolute** asset URLs (`/_astro/app.css`, `/assets/index.js`) will 404 — those resolve to the domain root, not the artifact. Build with the framework's base/subpath option set to `/a/{slug}/`:

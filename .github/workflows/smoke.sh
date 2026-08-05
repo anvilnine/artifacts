@@ -180,6 +180,36 @@ expect_code 200 "$code" "zip asset"
 curl -s "$BASE/api/artifacts?tag=zipped" -H "$AUTH" | grep -q '"ci-zip"' || fail "zip tags not stored"
 echo "ok: zip tags"
 
+# zip site without a 404.html: a miss stays the plain-text not-found
+code=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/a/ci-zip/nope.html")
+expect_code 404 "$code" "zip miss, no 404.html in zip"
+curl -s "$BASE/a/ci-zip/nope.html" | grep -q '^not found$' || fail "zip miss body changed"
+echo "ok: zip miss falls back to plain not-found"
+
+# zip site with a 404.html: every miss under the site serves that page, still status 404
+mkdir -p "$ZIPDIR/site404/deep"
+echo '<!doctype html><h1>zip smoke 404</h1>' > "$ZIPDIR/site404/index.html"
+echo '<!doctype html><h1>custom miss page</h1>' > "$ZIPDIR/site404/404.html"
+echo '<!doctype html><h1>deep index</h1>' > "$ZIPDIR/site404/deep/index.html"
+(cd "$ZIPDIR/site404" && zip -qr ../site404.zip .)
+code=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/api/artifacts/zip?slug=ci-zip-404&visibility=public" -H "$AUTH" -H "Content-Type: application/zip" --data-binary @"$ZIPDIR/site404.zip")
+expect_code 201 "$code" "zip with 404.html deploy"
+for miss in nope.html missing/ missing/deeper/index.html; do
+  code=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/a/ci-zip-404/$miss")
+  expect_code 404 "$code" "custom 404 status ($miss)"
+  curl -s "$BASE/a/ci-zip-404/$miss" | grep -q 'custom miss page' || fail "custom 404 body not served ($miss)"
+done
+echo "ok: zip custom 404 page"
+
+# real paths still win over the 404 page, and 404.html itself is a normal 200 file
+code=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/a/ci-zip-404/deep/")
+expect_code 200 "$code" "deep index still served"
+code=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/a/ci-zip-404/deep")
+expect_code 200 "$code" "directory without trailing slash still served"
+code=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/a/ci-zip-404/404.html")
+expect_code 200 "$code" "404.html fetched directly"
+curl -sf -X DELETE "$BASE/api/artifacts/ci-zip-404" -H "$AUTH" > /dev/null
+
 # duplicate: inline artifact copies content + inherits fields under a new slug
 dupresp=$(curl -s -X POST "$BASE/api/artifacts/ci-smoke-2/duplicate" -H "$AUTH" -H "$JSON" \
   -d '{"slug":"ci-dup","title":"smoke copy","visibility":"public"}')

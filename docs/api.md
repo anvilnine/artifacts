@@ -84,4 +84,6 @@ The archive is validated before anything is stored:
 - path traversal (`../`), absolute paths, and symlinks are rejected
 - limits: 50 MB zip, 100 MB uncompressed, 2000 files; `__MACOSX/`, `.DS_Store`, `Thumbs.db` are ignored
 
+A `404.html` at the root of the zip becomes the site's not-found page: any miss under `/a/{slug}/` serves it with a 404 status, and sites without one keep the plain-text `not found`. Locked artifacts are unaffected, they return the standard artifact-not-found page on every path. See [formats](formats.md#custom-not-found-page).
+
 Rename, disable/enable, expiry, and delete all work the same as single-file artifacts. `PUT` (inline content) is refused on zip sites — delete and re-upload instead. The web UI accepts dropped `.zip` files. No MCP tool for zips (binary payload) — agents should use the curl call above or the [CLI](cli.md).
