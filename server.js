@@ -2,7 +2,6 @@ import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { promisify } from 'node:util';
 
 import AdmZip from 'adm-zip';
 import express from 'express';
@@ -14,6 +13,7 @@ import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/
 
 import { createStorage, UnsafeKeyError } from './storage/index.js';
 import { createRateLimiter } from './ratelimit.js';
+import { createAuthStore } from './lib/auth.js';
 import { createConfigStore } from './lib/config.js';
 import { ApiError } from './lib/errors.js';
 
@@ -42,236 +42,36 @@ const nanoid = customAlphabet('abcdefghijklmnopqrstuvwxyz0123456789', 10);
 // Global frame settings and markdown render defaults. See lib/config.js.
 const config = await createConfigStore(storage);
 
-// ---------------------------------------------------------------------------
-// Auth — one admin account (session login for the dashboard) plus managed API
-// keys (scoped bearer tokens for CLI / MCP). Both live under a reserved key,
-// exactly like the config.json key (see lib/config.js), so they persist across a fresh-container
-// restart on every backend (local/s3/git/postgres/sqlite) with no schema or
-// migration. The bootstrap ARTIFACTS_API_KEY stays valid as an all-scope
-// break-glass admin bearer alongside the managed keys.
-// ---------------------------------------------------------------------------
-
-const AUTH_KEY = 'auth.json';
-const SCOPES = ['read', 'publish', 'full'];
-// full implies publish implies read — a caller's effective level is its highest scope.
-const SCOPE_RANK = { read: 0, publish: 1, full: 2 };
-const SESSION_COOKIE = 'artifacts_session';
-const SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
-// Lifetime of a capability share link (?k=<token>). The token is what the operator
-// copies for a private/password artifact; it exchanges for a slug-scoped unlock cookie.
-const CAP_TOKEN_TTL_MS = Number(process.env.CAP_TOKEN_TTL_DAYS || 30) * 24 * 60 * 60 * 1000;
-// lastUsedAt is best-effort telemetry, not audit — throttle the write so a busy
-// key does not commit+push on the git backend (or hammer SQL) on every request.
-// On multi-replica deploys each replica throttles independently; the value is
-// therefore approximate, which is fine for "when was this key last seen".
-const LASTUSED_THROTTLE_MS = 5 * 60 * 1000;
-const USERNAME_RE = /^[a-zA-Z0-9._-]{3,32}$/;
-
-const ADMIN_USERNAME = process.env.ARTIFACTS_ADMIN_USERNAME;
-const ADMIN_PASSWORD = process.env.ARTIFACTS_ADMIN_PASSWORD;
-
-// Two independent HMAC secrets. sessionSecret signs capability links and per-slug unlock
-// cookies (long-lived, shared with readers); adminSecret signs the admin session cookie
-// only. Keeping them apart is what lets a password change rotate admin sessions without
-// invalidating every share link that is already out in the world.
-async function loadAuth() {
-  const buf = await storage.getBuffer(AUTH_KEY);
-  if (!buf) return { version: 1, admin: null, sessionSecret: null, adminSecret: null, keys: [] };
-  try {
-    const raw = JSON.parse(buf.toString('utf8'));
-    return {
-      version: 1,
-      admin: raw.admin || null,
-      sessionSecret: raw.sessionSecret || null,
-      adminSecret: raw.adminSecret || null,
-      keys: Array.isArray(raw.keys) ? raw.keys : [],
-    };
-  } catch {
-    return { version: 1, admin: null, sessionSecret: null, adminSecret: null, keys: [] };
-  }
-}
-
-let auth = await loadAuth();
-
-// scrypt is memory-hard and was synchronous, blocking the event loop on the two
-// unauthenticated credential routes (login, unlock). Run it on the libuv threadpool
-// and cap concurrency so a flood degrades those routes instead of stalling the process.
-// Declared before the boot-time admin seed below, which calls hashPassword during init.
-const scryptAsync = promisify(crypto.scrypt);
-const SCRYPT_MAX_CONCURRENT = 2;
-const SCRYPT_MAX_QUEUE = 20;
-let scryptActive = 0;
-const scryptQueue = [];
-function withScrypt(fn) {
-  return new Promise((resolve, reject) => {
-    const run = () => {
-      scryptActive++;
-      Promise.resolve()
-        .then(fn)
-        .then(resolve, reject)
-        .finally(() => {
-          scryptActive--;
-          const next = scryptQueue.shift();
-          if (next) next();
-        });
-    };
-    if (scryptActive < SCRYPT_MAX_CONCURRENT) return run();
-    if (scryptQueue.length >= SCRYPT_MAX_QUEUE) {
-      return reject(new ApiError(429, 'server busy — retry shortly'));
-    }
-    scryptQueue.push(run);
-  });
-}
-
-// Seed the single admin account from env on first boot (skips the setup screen).
-// Like config.json, auth.json is otherwise created lazily — never written on a
-// plain boot with nothing to persist.
-if (!auth.admin && ADMIN_USERNAME && ADMIN_PASSWORD) {
-  auth.admin = { username: ADMIN_USERNAME, ...(await hashPassword(ADMIN_PASSWORD)) };
-  await saveAuth();
-  console.log(`admin account "${ADMIN_USERNAME}" created from env`);
-}
-
-async function saveAuth() {
-  await storage.put(AUTH_KEY, JSON.stringify(auth, null, 2), { contentType: 'application/json' });
-  await storage.flush?.();
-}
-
-// A throwaway credential with a real scrypt hash, used to verify a login for an unknown
-// username. Without it the route returns immediately on a username miss and takes ~100ms
-// on a hit, which tells an attacker the admin's username. Built once at boot so the first
-// wrong-username request is not itself the slow one.
-const DECOY_ADMIN = await hashPassword(crypto.randomBytes(32).toString('hex'));
-
-// The HMAC secret that signs capability links and unlock cookies — generated + persisted
-// the first time one is issued, never baked into a boot-time write.
-async function ensureSessionSecret() {
-  if (!auth.sessionSecret) {
-    auth.sessionSecret = crypto.randomBytes(32).toString('hex');
-    await saveAuth();
-  }
-  return auth.sessionSecret;
-}
-
-// The HMAC secret for admin session cookies. An instance upgrading from a single-secret
-// auth.json has none yet, so it is generated on first use — which signs out any admin
-// session issued before the upgrade. Share links are unaffected.
-async function ensureAdminSecret() {
-  if (!auth.adminSecret) {
-    auth.adminSecret = crypto.randomBytes(32).toString('hex');
-    await saveAuth();
-  }
-  return auth.adminSecret;
-}
-
-// Passwords: scrypt (built-in, memory-hard). Keys: sha256 — API keys are already
-// 24 bytes of entropy, so a fast hash is safe and keeps lookup constant-time.
-async function hashPassword(password, salt = crypto.randomBytes(16).toString('hex')) {
-  const buf = await withScrypt(() => scryptAsync(password, salt, 64));
-  return { salt, passwordHash: buf.toString('hex') };
-}
-
-async function verifyPassword(password, admin) {
-  if (typeof password !== 'string' || !admin?.passwordHash || !admin?.salt) return false;
-  const hash = await withScrypt(() => scryptAsync(password, admin.salt, 64));
-  const stored = Buffer.from(admin.passwordHash, 'hex');
-  return hash.length === stored.length && crypto.timingSafeEqual(hash, stored);
-}
-
-function hashKey(token) {
-  return crypto.createHash('sha256').update(token).digest('hex');
-}
-
-// Session cookie = base64url(payload).HMAC(payload). Stateless; revocation of the
-// admin session is by rotating sessionSecret (password change keeps it, by design).
-function signSession(payload, secret) {
-  const body = Buffer.from(JSON.stringify(payload)).toString('base64url');
-  const sig = crypto.createHmac('sha256', secret).update(body).digest('base64url');
-  return `${body}.${sig}`;
-}
-
-function verifySession(token, secret) {
-  if (!token || !secret) return null;
-  const dot = token.indexOf('.');
-  if (dot === -1) return null;
-  const body = token.slice(0, dot);
-  const sig = token.slice(dot + 1);
-  const expected = crypto.createHmac('sha256', secret).update(body).digest('base64url');
-  const a = Buffer.from(sig);
-  const b = Buffer.from(expected);
-  if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) return null;
-  try {
-    return JSON.parse(Buffer.from(body, 'base64url').toString('utf8'));
-  } catch {
-    return null;
-  }
-}
-
-function readCookie(req, name) {
-  const header = req.headers.cookie || '';
-  for (const part of header.split(';')) {
-    const idx = part.indexOf('=');
-    if (idx === -1) continue;
-    if (part.slice(0, idx).trim() === name) return decodeURIComponent(part.slice(idx + 1).trim());
-  }
-  return null;
-}
-
-async function issueSession(res, username) {
-  const secret = await ensureAdminSecret();
-  const token = signSession({ sub: username, exp: Date.now() + SESSION_TTL_MS }, secret);
-  res.cookie(SESSION_COOKIE, token, {
-    httpOnly: true,
-    secure: BASE_URL.startsWith('https'),
-    sameSite: 'strict',
-    maxAge: SESSION_TTL_MS,
-    path: '/',
-  });
-}
-
-// Resolve a valid admin session cookie to a principal, or null.
-function sessionPrincipal(req) {
-  const payload = verifySession(readCookie(req, SESSION_COOKIE), auth.adminSecret);
-  if (!payload) return null;
-  if (typeof payload.exp === 'number' && payload.exp <= Date.now()) return null;
-  if (!auth.admin || payload.sub !== auth.admin.username) return null;
-  return { admin: true, scopes: SCOPES, session: true };
-}
-
-function hasScope(scopes, required) {
-  const rank = Math.max(-1, ...scopes.map((s) => SCOPE_RANK[s] ?? -1));
-  return rank >= SCOPE_RANK[required];
-}
-
-// Bootstrap key = all-scope admin bearer; else a managed key matched by sha256,
-// rejected if disabled or expired. Returns the principal (with the mutable key
-// record, for lastUsedAt) or null.
-function resolveApiKey(token) {
-  if (!token) return null;
-  const a = Buffer.from(token);
-  const b = Buffer.from(API_KEY);
-  if (a.length === b.length && crypto.timingSafeEqual(a, b)) {
-    return { admin: true, scopes: SCOPES, keyId: null, key: null };
-  }
-  const h = Buffer.from(hashKey(token));
-  for (const key of auth.keys) {
-    if (key.disabled) continue;
-    const kh = Buffer.from(key.hash);
-    if (kh.length !== h.length || !crypto.timingSafeEqual(kh, h)) continue;
-    if (key.expiresAt && Date.parse(key.expiresAt) <= Date.now()) return null;
-    return { admin: false, scopes: key.scopes, keyId: key.id, key };
-  }
-  return null;
-}
-
-function touchKey(key) {
-  if (!key) return;
-  const now = Date.now();
-  const last = key.lastUsedAt ? Date.parse(key.lastUsedAt) : 0;
-  if (now - last < LASTUSED_THROTTLE_MS) return;
-  key.lastUsedAt = new Date(now).toISOString();
-  saveAuth().catch((err) => console.error('lastUsedAt persist failed:', err));
-}
+// The single admin account, the managed API keys, and the two HMAC secrets. See
+// lib/auth.js. Every name below is used by the auth routes, the key routes, and the
+// serve-path visibility gate further down this file.
+const {
+  auth,
+  SCOPES,
+  SESSION_COOKIE,
+  DECOY_ADMIN,
+  saveAuth,
+  ensureSessionSecret,
+  hashPassword,
+  verifyPassword,
+  hashKey,
+  signSession,
+  verifySession,
+  readCookie,
+  issueSession,
+  sessionPrincipal,
+  hasScope,
+  publicKey,
+  validatePassword,
+  validateCredentials,
+  parseKeyInput,
+  requireApiKey,
+  requireAuth,
+  requireSession,
+  requireAdmin,
+  signCapToken,
+  verifyCapToken,
+} = await createAuthStore(storage, { apiKey: API_KEY, baseUrl: BASE_URL });
 
 // Rate-limit bucket for this request. Under cloudflared every request arrives from
 // loopback, so the real client is only in CF-Connecting-IP; trusting that header is
@@ -304,116 +104,6 @@ function ipBucket(ip) {
 // greppable, no dependency, no PII beyond the client IP the operator already sees.
 function logAuth(event, fields) {
   console.warn(JSON.stringify({ ts: new Date().toISOString(), event, ...fields }));
-}
-
-// Machine callers (REST / CLI / MCP): Bearer token meeting a minimum scope.
-function requireApiKey(scope) {
-  return (req, res, next) => {
-    const header = req.headers.authorization || '';
-    const token = header.startsWith('Bearer ') ? header.slice(7) : '';
-    const principal = resolveApiKey(token);
-    if (!principal) return res.status(401).json({ error: 'unauthorized' });
-    if (!hasScope(principal.scopes, scope)) {
-      return res.status(403).json({ error: `forbidden: requires "${scope}" scope` });
-    }
-    req.principal = principal;
-    touchKey(principal.key);
-    next();
-  };
-}
-
-// Artifact/config endpoints: an admin session cookie (dashboard, all scopes) OR a
-// bearer key (CLI/MCP/REST, scoped). Unifies the two callers on one gate — the
-// browser dropped its bearer for the session cookie, so a bearer-only guard would
-// 401 the dashboard.
-function requireAuth(scope) {
-  return (req, res, next) => {
-    let principal = sessionPrincipal(req);
-    if (!principal) {
-      const header = req.headers.authorization || '';
-      const token = header.startsWith('Bearer ') ? header.slice(7) : '';
-      principal = resolveApiKey(token);
-    }
-    if (!principal) return res.status(401).json({ error: 'unauthorized' });
-    if (!hasScope(principal.scopes, scope)) {
-      return res.status(403).json({ error: `forbidden: requires "${scope}" scope` });
-    }
-    req.principal = principal;
-    touchKey(principal.key); // no-op for session principals (no .key)
-    next();
-  };
-}
-
-// Dashboard-only endpoints: a valid admin session cookie.
-function requireSession(req, res, next) {
-  const principal = sessionPrincipal(req);
-  if (!principal) return res.status(401).json({ error: 'unauthorized' });
-  req.principal = principal;
-  next();
-}
-
-// Key-management endpoints: admin session cookie OR the bootstrap admin bearer
-// (so the CLI can mint keys). Managed keys — even full-scope — cannot manage keys.
-function requireAdmin(req, res, next) {
-  const session = sessionPrincipal(req);
-  if (session) {
-    req.principal = session;
-    return next();
-  }
-  const header = req.headers.authorization || '';
-  const token = header.startsWith('Bearer ') ? header.slice(7) : '';
-  const a = Buffer.from(token);
-  const b = Buffer.from(API_KEY);
-  if (a.length === b.length && crypto.timingSafeEqual(a, b)) {
-    req.principal = { admin: true, scopes: SCOPES, keyId: null };
-    return next();
-  }
-  return res.status(401).json({ error: 'unauthorized' });
-}
-
-function publicKey(k) {
-  return {
-    id: k.id,
-    name: k.name,
-    prefix: k.prefix,
-    scopes: k.scopes,
-    createdAt: k.createdAt,
-    expiresAt: k.expiresAt ?? null,
-    lastUsedAt: k.lastUsedAt ?? null,
-    disabled: !!k.disabled,
-  };
-}
-
-function validatePassword(pw) {
-  if (typeof pw !== 'string' || pw.length < 8) {
-    throw new ApiError(400, 'password must be at least 8 characters');
-  }
-}
-
-function validateCredentials(username, password) {
-  if (typeof username !== 'string' || !USERNAME_RE.test(username)) {
-    throw new ApiError(400, 'username must be 3-32 chars [a-zA-Z0-9._-]');
-  }
-  validatePassword(password);
-}
-
-function parseKeyInput(name, scopes, expiresAt) {
-  if (typeof name !== 'string' || !name.trim() || name.trim().length > 64) {
-    throw new ApiError(400, 'name (1-64 chars) is required');
-  }
-  let list = scopes;
-  if (typeof list === 'string') list = [list];
-  if (!Array.isArray(list) || !list.length) list = ['publish'];
-  for (const s of list) {
-    if (!SCOPES.includes(s)) throw new ApiError(400, `invalid scope "${s}" (read|publish|full)`);
-  }
-  let exp = null;
-  if (expiresAt !== undefined && expiresAt !== null && expiresAt !== '') {
-    const t = Date.parse(expiresAt);
-    if (Number.isNaN(t)) throw new ApiError(400, 'expiresAt must be an ISO 8601 date string');
-    exp = new Date(t).toISOString();
-  }
-  return { name: name.trim(), scopes: list, expiresAt: exp };
 }
 
 // Whether the viewer frame is shown for this artifact: global master switch
@@ -450,19 +140,6 @@ function unlockCookieName(slug) {
 // live token AND unlock cookie for the slug, since both bind the epoch they were minted at.
 function metaEpoch(meta) {
   return typeof meta.tokenEpoch === 'number' ? meta.tokenEpoch : 0;
-}
-
-// Capability token carried in the share URL (?k=…). Keyed on the session secret like the
-// session/unlock cookies, but typ:'cap' keeps the three token kinds non-interchangeable.
-// No per-artifact secret is stored — nothing sensitive can leak through the list API.
-function signCapToken(slug, epoch, ttlMs = CAP_TOKEN_TTL_MS) {
-  return signSession({ typ: 'cap', slug, epoch, exp: Date.now() + ttlMs }, auth.sessionSecret);
-}
-
-function verifyCapToken(token, slug, epoch) {
-  const p = verifySession(token, auth.sessionSecret);
-  if (!p || p.typ !== 'cap' || p.slug !== slug || p.epoch !== epoch) return false;
-  return !(typeof p.exp === 'number' && p.exp <= Date.now());
 }
 
 // The URL to hand out: public is the bare link; private/password carry a token so the
