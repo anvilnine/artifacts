@@ -48,7 +48,10 @@ console.log('ok: dashboard shell served');
 
 // --- 2. the inline script parses ---
 
-const scripts = [...html.matchAll(/<script>([\s\S]*?)<\/script>/g)];
+// Attributes allowed, so a later `<script defer>` is still parsed instead of silently
+// skipped. `src` scripts have no inline body to check and would fail the empty-body parse.
+const SCRIPT_RE = /<script(?![^>]*\ssrc=)[^>]*>([\s\S]*?)<\/script>/g;
+const scripts = [...html.matchAll(SCRIPT_RE)];
 if (scripts.length === 0) fail('dashboard has no inline script');
 
 for (const match of scripts) {
@@ -69,7 +72,7 @@ console.log(`ok: dashboard inline script parses (${scripts.length} block(s))`);
 const code = scripts.map((m) => m[1]).join('\n');
 // Ids declared by the script itself (inside template strings) do not count: the point is
 // that the static markup still carries what the script reaches for on load.
-const markup = html.replace(/<script>[\s\S]*?<\/script>/g, '');
+const markup = html.replace(SCRIPT_RE, '');
 const declared = new Set([...markup.matchAll(/\sid=["']([^"']+)["']/g)].map((m) => m[1]));
 const grabbed = new Set([
   ...[...code.matchAll(/\$\(\s*['"]([^'"]+)['"]\s*\)/g)].map((m) => m[1]),
