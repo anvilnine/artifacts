@@ -229,7 +229,9 @@ jobs:
             sleep 0.5
           done
           bash .github/workflows/smoke.sh http://localhost:3000 ci-test-key
-      # Runners are reused, so drop the container and image instead of filling the disk.
+      # A GitHub-hosted runner is thrown away after the job, so this is not needed there. It is
+      # here so the job stays correct if it ever moves to the org's self-hosted runner, where the
+      # container and image would survive and the name would collide on a re-run.
       - name: Clean up
         if: always()
         run: |
