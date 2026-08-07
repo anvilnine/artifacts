@@ -364,6 +364,12 @@ mcp_version=$(printf '%s' "$mcp_init" | sed -n 's/.*"serverInfo":{[^}]*"version"
 [ "$mcp_version" = "$pkg_version" ] || fail "MCP serverInfo version '$mcp_version' != package.json '$pkg_version'"
 echo "ok: MCP serverInfo version matches package.json"
 
+# --- dashboard: the served shell parses and still lines up with its own markup ---
+# Nothing else in CI loads `/`, so a broken inline script in public/index.html used to
+# ship green. No browser here; see the header of dashboard-check.mjs for what that
+# leaves uncovered.
+node "$(dirname "$0")/dashboard-check.mjs" "$BASE"
+
 # CLI round-trip (cli.js lives next to this checkout; skipped when deps absent,
 # e.g. the container-smoke job which doesn't run npm ci)
 CLI_DIR=$REPO_DIR
