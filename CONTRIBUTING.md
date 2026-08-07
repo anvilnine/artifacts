@@ -24,6 +24,19 @@ bash .github/workflows/smoke.sh http://localhost:3000 test
 
 If you add or change API behavior, extend `smoke.sh` to cover it.
 
+## Releasing
+
+Use npm to bump the version:
+
+```bash
+npm version patch   # or minor / major
+```
+
+The `version` lifecycle script runs `scripts/sync-version.js`, which copies the new number into
+`server.json` and stages it, so package.json, package-lock.json and server.json land in one commit.
+`server.js` reads its version out of package.json at boot, so nothing else needs an edit. The
+identity checks at the end of `smoke.sh` fail if the two files ever disagree.
+
 ## Pull requests
 
 - Keep PRs focused — one change per PR.

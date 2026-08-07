@@ -24,7 +24,8 @@
   },
   "scripts": {
     "start": "node server.js",
-    "dev": "node --env-file=.env server.js"
+    "dev": "node --env-file=.env server.js",
+    "version": "node scripts/sync-version.js"
   },
   "engines": {
     "node": ">=22"
