@@ -13,7 +13,22 @@ import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/
 
 import { createStorage, UnsafeKeyError } from './storage/index.js';
 import { createRateLimiter } from './ratelimit.js';
-import { createAuthStore } from './lib/auth.js';
+import {
+  createAuthStore,
+  SCOPES,
+  SESSION_COOKIE,
+  hashPassword,
+  verifyPassword,
+  hashKey,
+  signSession,
+  verifySession,
+  readCookie,
+  hasScope,
+  publicKey,
+  validatePassword,
+  validateCredentials,
+  parseKeyInput,
+} from './lib/auth.js';
 import { createConfigStore } from './lib/config.js';
 import { ApiError } from './lib/errors.js';
 
@@ -47,24 +62,11 @@ const config = await createConfigStore(storage);
 // serve-path visibility gate further down this file.
 const {
   auth,
-  SCOPES,
-  SESSION_COOKIE,
   DECOY_ADMIN,
   saveAuth,
   ensureSessionSecret,
-  hashPassword,
-  verifyPassword,
-  hashKey,
-  signSession,
-  verifySession,
-  readCookie,
   issueSession,
   sessionPrincipal,
-  hasScope,
-  publicKey,
-  validatePassword,
-  validateCredentials,
-  parseKeyInput,
   requireApiKey,
   requireAuth,
   requireSession,
