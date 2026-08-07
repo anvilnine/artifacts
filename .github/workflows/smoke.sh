@@ -111,6 +111,143 @@ echo "ok: md navbar theme toggle"
 
 curl -sf -X DELETE "$BASE/api/artifacts/ci-md" -H "$AUTH" > /dev/null
 
+# --- redirects: a real 301 to the stored target, not a JS bounce ---
+# %{redirect_url} is curl's parsed Location, so these compare the whole value instead of
+# grepping a header line where an unanchored pattern would match a longer target.
+code=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/api/artifacts" -H "$AUTH" -H "$JSON" \
+  -d '{"content":"https://example.com/landing?a=1","type":"redirect","slug":"ci-redir","visibility":"public"}')
+expect_code 201 "$code" "publish redirect"
+redir_headers=$(mktemp)
+code=$(curl -s -D "$redir_headers" -o /dev/null -w '%{http_code}' "$BASE/a/ci-redir")
+expect_code 301 "$code" "redirect serve"
+loc=$(curl -s -o /dev/null -w '%{redirect_url}' "$BASE/a/ci-redir")
+[ "$loc" = 'https://example.com/landing?a=1' ] || fail "redirect Location wrong: $loc"
+grep -qi '^Cache-Control: no-store' "$redir_headers" || fail "redirect is cacheable"
+[ "$(grep -ci '^Location:' "$redir_headers")" = 1 ] || fail "redirect did not send exactly one Location"
+rm "$redir_headers"
+echo "ok: redirect serves 301"
+
+# it is listed like any other artifact (the dashboard renders this payload)
+curl -s "$BASE/api/artifacts" -H "$AUTH" | grep -qF '"slug":"ci-redir"' || fail "redirect not listed"
+curl -s "$BASE/api/artifacts" -H "$AUTH" | grep -qF '"type":"redirect"' || fail "redirect type not listed"
+echo "ok: redirect listed"
+
+# the frame never wraps a redirect, and ?raw=1 does not bypass it
+code=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/a/ci-redir?raw=1")
+expect_code 301 "$code" "redirect raw"
+loc=$(curl -s -o /dev/null -w '%{redirect_url}' "$BASE/a/ci-redir?raw=1")
+[ "$loc" = 'https://example.com/landing?a=1' ] || fail "raw redirect Location wrong: $loc"
+# /source shows the normalized target as inert text
+src_headers=$(mktemp)
+curl -s -D "$src_headers" -o /dev/null "$BASE/a/ci-redir/source"
+grep -qi '^Content-Type: text/plain' "$src_headers" || fail "redirect source is not text/plain"
+rm "$src_headers"
+curl -s "$BASE/a/ci-redir/source" | grep -qF 'https://example.com/landing?a=1' || fail "redirect source missing target"
+# a subpath is not a thing for a redirect
+code=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/a/ci-redir/anything")
+expect_code 404 "$code" "redirect subpath"
+echo "ok: redirect ignores frame and raw"
+
+# the target is normalized and trimmed before it is stored, so what serves is not the input
+curl -sf -X POST "$BASE/api/artifacts" -H "$AUTH" -H "$JSON" \
+  -d '{"content":"  HTTPS://EXAMPLE.COM/Landing?a=1  ","type":"redirect","slug":"ci-redir-norm","visibility":"public"}' > /dev/null
+loc=$(curl -s -o /dev/null -w '%{redirect_url}' "$BASE/a/ci-redir-norm")
+[ "$loc" = 'https://example.com/Landing?a=1' ] || fail "redirect target not normalized: $loc"
+curl -sf -X DELETE "$BASE/api/artifacts/ci-redir-norm" -H "$AUTH" > /dev/null
+echo "ok: redirect target normalized"
+
+# non-http targets are refused at publish time, so they can never reach a Location header
+for bad in 'javascript:alert(1)' 'JaVaScRiPt:alert(1)' 'data:text/html,<script>x</script>' '//evil.example' '/relative/path' 'not a url'; do
+  code=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/api/artifacts" -H "$AUTH" -H "$JSON" \
+    -d "{\"content\":\"$bad\",\"type\":\"redirect\",\"slug\":\"ci-redir-bad\"}")
+  expect_code 400 "$code" "redirect target rejected: $bad"
+done
+echo "ok: redirect target scheme allowlist"
+
+# a target carrying CRLF cannot split the response into two headers
+curl -sf -X POST "$BASE/api/artifacts" -H "$AUTH" -H "$JSON" \
+  -d '{"content":"https://example.com/x\r\nX-Injected: 1","type":"redirect","slug":"ci-redir-crlf","visibility":"public"}' > /dev/null
+crlf_headers=$(mktemp)
+curl -s -D "$crlf_headers" -o /dev/null "$BASE/a/ci-redir-crlf"
+if grep -qi '^X-Injected:' "$crlf_headers"; then fail "redirect target split the response headers"; fi
+[ "$(grep -ci '^Location:' "$crlf_headers")" = 1 ] || fail "CRLF target produced more than one Location"
+rm "$crlf_headers"
+curl -sf -X DELETE "$BASE/api/artifacts/ci-redir-crlf" -H "$AUTH" > /dev/null
+echo "ok: redirect target cannot inject a header"
+
+# the length cap measures the stored target, not the input. 342 multi-byte characters are
+# 356 characters in, well past 2048 once percent-encoded. Checking the input instead would
+# publish this and then serve 404 for good.
+long=$(printf 'https://example.com/'; for i in $(seq 1 342); do printf 'é'; done)
+code=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/api/artifacts" -H "$AUTH" -H "$JSON" \
+  --data-binary "$(printf '{"content":"%s","type":"redirect","slug":"ci-redir-long"}' "$long")")
+expect_code 400 "$code" "over-long redirect target"
+echo "ok: redirect length cap measures the stored target"
+
+# updating the target changes where the 301 points, and it is still a 301
+curl -sf -X PUT "$BASE/api/artifacts/ci-redir" -H "$AUTH" -H "$JSON" \
+  -d '{"content":"https://example.org/moved","type":"redirect"}' > /dev/null
+code=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/a/ci-redir")
+expect_code 301 "$code" "redirect serve after update"
+loc=$(curl -s -o /dev/null -w '%{redirect_url}' "$BASE/a/ci-redir")
+[ "$loc" = 'https://example.org/moved' ] || fail "redirect target not updated: $loc"
+echo "ok: redirect target update"
+
+# an html artifact converted to a redirect serves the 301, not the index.html left behind
+curl -sf -X POST "$BASE/api/artifacts" -H "$AUTH" -H "$JSON" \
+  -d '{"content":"<h1>was html</h1>","type":"html","slug":"ci-redir-conv","visibility":"public"}' > /dev/null
+curl -sf -X PUT "$BASE/api/artifacts/ci-redir-conv" -H "$AUTH" -H "$JSON" \
+  -d '{"content":"https://example.com/converted","type":"redirect"}' > /dev/null
+code=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/a/ci-redir-conv")
+expect_code 301 "$code" "converted artifact serves the redirect"
+loc=$(curl -s -o /dev/null -w '%{redirect_url}' "$BASE/a/ci-redir-conv")
+[ "$loc" = 'https://example.com/converted' ] || fail "converted redirect Location wrong: $loc"
+if curl -s "$BASE/a/ci-redir-conv" | grep -q 'was html'; then fail "converted artifact still serves its old body"; fi
+curl -sf -X DELETE "$BASE/api/artifacts/ci-redir-conv" -H "$AUTH" > /dev/null
+echo "ok: html converted to a redirect"
+
+# a copy keeps the target
+dupslug=$(curl -s -X POST "$BASE/api/artifacts/ci-redir/duplicate" -H "$AUTH" -H "$JSON" \
+  -d '{"slug":"ci-redir-copy","visibility":"public"}' | sed -n 's/.*"slug":"\([^"]*\)".*/\1/p')
+[ "$dupslug" = "ci-redir-copy" ] || fail "redirect duplicate did not return the new slug"
+loc=$(curl -s -o /dev/null -w '%{redirect_url}' "$BASE/a/ci-redir-copy")
+[ "$loc" = 'https://example.org/moved' ] || fail "duplicated redirect Location wrong: $loc"
+curl -sf -X DELETE "$BASE/api/artifacts/ci-redir-copy" -H "$AUTH" > /dev/null
+echo "ok: redirect duplicate keeps the target"
+
+# expiry behaves like every other type: 410 once the caller can see it at all
+curl -sf -X PATCH "$BASE/api/artifacts/ci-redir" -H "$AUTH" -H "$JSON" \
+  -d '{"expiresAt":"2020-01-01T00:00:00.000Z"}' > /dev/null
+code=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/a/ci-redir")
+expect_code 410 "$code" "expired redirect"
+curl -sf -X PATCH "$BASE/api/artifacts/ci-redir" -H "$AUTH" -H "$JSON" -d '{"expiresAt":null}' > /dev/null
+echo "ok: expired redirect"
+
+# a private redirect is gated on every serve path: no cookie, no Location anywhere
+resp=$(curl -s -X POST "$BASE/api/artifacts" -H "$AUTH" -H "$JSON" \
+  -d '{"content":"https://example.com/secret","type":"redirect","slug":"ci-redir-priv","visibility":"private"}')
+redircap=$(printf '%s' "$resp" | sed -n 's/.*"url":"\([^"]*\)".*/\1/p')
+for path in '' '?raw=1' '/source' '/anything' '?k=not-a-token'; do
+  code=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/a/ci-redir-priv$path")
+  expect_code 404 "$code" "private redirect$path"
+  if curl -s -D - -o /dev/null "$BASE/a/ci-redir-priv$path" | grep -qi '^Location:'; then
+    fail "private redirect leaked target on $path"
+  fi
+done
+echo "ok: private redirect stays gated"
+
+# its capability link still works: 302 to set the unlock cookie, then the 301
+curl -s -c /tmp/redirjar -o /dev/null "$redircap"
+code=$(curl -s -b /tmp/redirjar -o /dev/null -w '%{http_code}' "$BASE/a/ci-redir-priv")
+expect_code 301 "$code" "unlocked private redirect"
+loc=$(curl -s -b /tmp/redirjar -o /dev/null -w '%{redirect_url}' "$BASE/a/ci-redir-priv")
+[ "$loc" = 'https://example.com/secret' ] || fail "unlocked redirect Location wrong: $loc"
+rm -f /tmp/redirjar
+echo "ok: capability link unlocks a private redirect"
+
+curl -sf -X DELETE "$BASE/api/artifacts/ci-redir" -H "$AUTH" > /dev/null
+curl -sf -X DELETE "$BASE/api/artifacts/ci-redir-priv" -H "$AUTH" > /dev/null
+
 # tags: publish with tags -> stored lowercased + deduped
 curl -sf -X POST "$BASE/api/artifacts" -H "$AUTH" -H "$JSON" \
   -d '{"content":"<h1>tags</h1>","type":"html","slug":"ci-tags","tags":["Demo","ci","demo"]}' > /dev/null

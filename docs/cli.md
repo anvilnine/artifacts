@@ -20,7 +20,7 @@ export ARTIFACTS_API_KEY=...
 ## Commands
 
 ```
-artifacts publish <file> [--slug s] [--title t] [--tags a,b] [--project p] [--expires ISO] [--type html|jsx|tsx|md] [--frame on|off] [--visibility public|private|password] [--password pw]
+artifacts publish <file> [--slug s] [--title t] [--tags a,b] [--project p] [--expires ISO] [--type html|jsx|tsx|md|redirect] [--frame on|off] [--visibility public|private|password] [--password pw]
 artifacts deploy <dir|zip> [--slug s] [--title t] [--tags a,b] [--project p] [--expires ISO] [--visibility public|private|password] [--password pw]
 artifacts update <slug> <file> [--title t] [--tags a,b] [--project p]
 artifacts list [--tag t] [--project p]
@@ -40,7 +40,7 @@ artifacts keys create <name> [--scopes read,publish,full] [--expires ISO]
 artifacts keys revoke <id>
 ```
 
-Type is inferred from the file extension (`.html`, `.jsx`, `.tsx`, `.md`); pass `--type` to override. `deploy` zips a directory for you and posts it to the zip endpoint. `tag` replaces an artifact's tags (`none` clears them); `list --tag` shows only artifacts carrying that tag.
+Type is inferred from the file extension (`.html`, `.jsx`, `.tsx`, `.md`); pass `--type` to override. A redirect has no extension to infer from, so it needs `--type redirect` and a file holding the target URL: `artifacts publish target.txt --type redirect --slug pricing`. `deploy` zips a directory for you and posts it to the zip endpoint. `tag` replaces an artifact's tags (`none` clears them); `list --tag` shows only artifacts carrying that tag.
 
 ## API keys
 

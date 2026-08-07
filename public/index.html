@@ -1376,7 +1376,11 @@
       line.className = 'item-line';
       const link = document.createElement('a');
       link.className = 'slug'; link.target = '_blank';
+      // A redirect sends this tab to a third-party origin, so pin the rel rather than
+      // leaning on the browser's implied noopener.
+      link.rel = 'noopener noreferrer';
       link.href = '/a/' + a.slug; link.textContent = a.slug;
+      if (a.type === 'redirect') link.title = 'Follows the redirect';
       line.appendChild(link);
       const badge = document.createElement('span');
       badge.className = 'badge'; badge.textContent = a.type;
@@ -1505,7 +1509,9 @@
 
       const fstate = a.frame === true ? 'on' : a.frame === false ? 'off' : 'auto';
       const more = dropdown('⋯', 'more-btn', (menu) => {
-        menuItem(menu, 'Frame: ' + fstate + '…', '', async () => {
+        // A redirect has no page to wrap, so the server never reaches the frame branch for
+        // one. Offering the control here would take the choice and change nothing.
+        if (a.type !== 'redirect') menuItem(menu, 'Frame: ' + fstate + '…', '', async () => {
           const v = await dialog({
             title: 'Top frame for “' + a.slug + '”',
             body: 'The slim viewer toolbar shown above the artifact.',

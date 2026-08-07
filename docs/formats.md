@@ -104,6 +104,37 @@ for a working, fully self-contained Flutter web app.
 > edge-to-edge, append `?raw=1` to the URL or turn the frame off for that artifact
 > (`artifacts frame <slug> off`).
 
+## Redirects
+
+`type: "redirect"` turns a slug into a short link. The content is the target URL, and a visit answers a real HTTP 301 with the target in `Location`. Nothing is rendered, so there is no page to view and no JavaScript bounce.
+
+```bash
+curl -X POST https://artifacts.example.com/api/artifacts \
+  -H "Authorization: Bearer $ARTIFACTS_API_KEY" -H 'Content-Type: application/json' \
+  -d '{"type":"redirect","content":"https://example.com/pricing","slug":"pricing"}'
+```
+
+Rules:
+
+- The target must be an absolute `http://` or `https://` URL. Anything else is a 400 at publish time, so a `javascript:` or `data:` target can never reach a viewer's browser.
+- The stored target is the normalized URL, not the bytes you sent: surrounding whitespace goes, the scheme and host lowercase, and everything else percent-encodes. The 2048-character cap is measured on that normalized value.
+- The response carries `Cache-Control: no-store`. A browser would otherwise pin a 301 for good and strand returning visitors on the old target, so `no-store` is what makes repointing the slug with a `PUT` take effect on the next visit.
+- Redirects skip the viewer frame, and `?raw=1` does not change that. `GET /a/:slug/source` returns the stored target as plain text.
+- The 301 carries `Referrer-Policy: no-referrer`, so the target never learns which slug sent the visitor. That also keeps a `?k=` capability token out of the referrer on the hop.
+- Visibility works the same as every other type. A private redirect with no capability link answers 404 on every path and never sends `Location`.
+- Search engines do not follow these. Every response from the server carries `X-Robots-Tag: noindex, nofollow`, which is the same rule that keeps artifacts out of search results.
+
+<img src="screenshot-redirect-list.png" alt="Two redirect artifacts in the dashboard list, each with a redirect badge" width="700">
+
+### What a redirect artifact costs you
+
+Publishing one turns your domain into an open redirector for that slug. Anyone who can reach the slug goes wherever the target points, and only a key holder can set the target, but two consequences follow:
+
+- Your domain stops being safe to put in anyone's URL allowlist. OAuth `redirect_uri` prefix checks, SSO return-URL filters, and mail or proxy link filters that trust the whole domain can all be walked through a redirect artifact.
+- A phishing link can wear your domain. The slug is unguessable, so the link has to leak or be handed out first, but once it is out it looks like you.
+
+The server never fetches the target. A target on `localhost`, a private range, or `169.254.169.254` only reaches whoever clicks the link, so there is no server-side request forgery here. A target pointing back at its own slug loops until the visitor's browser gives up, which is a nuisance for that visitor and nothing more.
+
 ## Viewer frame
 
-Any of the above can render inside a slim top **frame** — a toolbar with the title, a copy-link button, and a hide toggle — with the artifact itself isolated in an iframe. Toggle it globally from the web UI's **Settings** panel (or `artifacts config`), and override it per artifact (`artifacts frame <slug> on|off|default`). Append `?raw=1` to any URL to view the artifact with no frame. Full behavior in [docs/api.md](api.md#viewer-frame).
+Every type above except redirects can render inside a slim top **frame** — a toolbar with the title, a copy-link button, and a hide toggle — with the artifact itself isolated in an iframe. Toggle it globally from the web UI's **Settings** panel (or `artifacts config`), and override it per artifact (`artifacts frame <slug> on|off|default`). Append `?raw=1` to any URL to view the artifact with no frame. Full behavior in [docs/api.md](api.md#viewer-frame).

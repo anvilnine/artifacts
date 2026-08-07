@@ -185,7 +185,7 @@ function artifactUnlocked(req, meta) {
   return unlockValid(req, meta);
 }
 
-const TYPES = ['html', 'jsx', 'tsx', 'md'];
+const TYPES = ['html', 'jsx', 'tsx', 'md', 'redirect'];
 const SLUG_RE = /^[a-z0-9][a-z0-9-]{2,63}$/;
 const TAG_RE = /^[a-z0-9][a-z0-9-]{0,31}$/;
 const MAX_TAGS = 10;
@@ -193,7 +193,9 @@ const MAX_TAGS = 10;
 // slug — Unicode letters/digits, spaces, and - _ . — but bounded, and must
 // start with a letter or digit. Internal whitespace is collapsed on input.
 const PROJECT_RE = /^[\p{L}\p{N}][\p{L}\p{N}\p{M} ._-]{0,63}$/u;
-const SOURCE_EXT = { html: 'html', jsx: 'jsx', tsx: 'tsx', md: 'md' };
+const SOURCE_EXT = { html: 'html', jsx: 'jsx', tsx: 'tsx', md: 'md', redirect: 'url' };
+// Longest target a redirect artifact may store, measured on the normalized URL.
+const MAX_REDIRECT_TARGET_LEN = 2048;
 
 // Pinned versions shared with the jsx shell. `external=react` keeps packages on
 // the shell's React instance — separate copies cause "Invalid hook call".
@@ -537,6 +539,34 @@ function isExpired(meta) {
   return Boolean(meta.expiresAt && Date.parse(meta.expiresAt) <= Date.now());
 }
 
+// The target of a redirect artifact, normalized. Checked again at serve time before it
+// reaches a Location header, so a target that got past this (hand-edited storage, a file
+// written by an older build) still cannot ship a non-http scheme to a viewer. That makes
+// the length check run twice on the same string, so it measures the normalized href and
+// not the input: percent-encoding can multiply a short input several times over, and a
+// value that passed here but failed there would publish 201 and then serve 404 forever.
+function parseRedirectTarget(value) {
+  const raw = typeof value === 'string' ? value.trim() : '';
+  let url;
+  try {
+    url = new URL(raw);
+  } catch {
+    throw new ApiError(400, 'content must be an absolute http:// or https:// URL for a redirect');
+  }
+  // The scheme allowlist is the point of this function: a stored `javascript:` or `data:`
+  // target would turn a Location header into script execution on the viewer's click.
+  if (url.protocol !== 'http:' && url.protocol !== 'https:') {
+    throw new ApiError(400, 'content must be an absolute http:// or https:// URL for a redirect');
+  }
+  if (url.href.length > MAX_REDIRECT_TARGET_LEN) {
+    throw new ApiError(
+      400,
+      `redirect target too long (${url.href.length} > ${MAX_REDIRECT_TARGET_LEN} characters once normalized)`,
+    );
+  }
+  return url.href;
+}
+
 async function saveArtifact({ content, type = 'html', slug, title, expiresAt, frame, tags, project, visibility, password }, { replace = false } = {}) {
   if (typeof content !== 'string' || !content.trim()) {
     throw new ApiError(400, 'content (non-empty string) is required');
@@ -576,11 +606,13 @@ async function saveArtifact({ content, type = 'html', slug, title, expiresAt, fr
   if (type === 'html') html = content;
   else if (type === 'jsx' || type === 'tsx') html = buildJsxHtml(content, finalTitle);
   // md renders at serve time from source.md; nothing baked here.
+  // redirect stores the normalized target and nothing else; the serve path reads it back.
+  const body = type === 'redirect' ? parseRedirectTarget(content) : content;
 
   if (html !== undefined) {
     await storage.put(`${finalSlug}/index.html`, html, { contentType: 'text/html; charset=utf-8' });
   }
-  await storage.put(`${finalSlug}/source.${SOURCE_EXT[type]}`, content, {
+  await storage.put(`${finalSlug}/source.${SOURCE_EXT[type]}`, body, {
     contentType: 'text/plain; charset=utf-8',
   });
   const meta = {
@@ -1115,6 +1147,29 @@ app.get('/a/:slug', async (req, res) => {
     }
     return notFound(res);
   }
+  // A redirect artifact is the Location header, so it runs before the frame and raw
+  // branches: there is no body to wrap in a toolbar and no bare version to link to.
+  // 301 is the honest status for a slug that exists to point somewhere else. A browser
+  // would normally pin a 301 for good, which would strand every visitor on the old target
+  // after a PUT, so no-store is what keeps repointing the slug working. Crawlers do not
+  // follow it either way: the whole domain answers X-Robots-Tag: noindex, nofollow.
+  if (meta.type === 'redirect') {
+    const buf = await storage.getBuffer(`${slug}/source.url`);
+    if (!buf) return notFound(res);
+    let target;
+    try {
+      target = parseRedirectTarget(buf.toString('utf8'));
+    } catch {
+      return notFound(res);
+    }
+    res.set({
+      'Cache-Control': 'no-store',
+      'X-Content-Type-Options': 'nosniff',
+      'Referrer-Policy': 'no-referrer',
+    });
+    return res.redirect(301, target);
+  }
+
   // Framed view: serve the wrapper page (toolbar + iframe → ?raw=1). `?raw=1`
   // is the escape hatch the iframe uses to load the bare artifact.
   // A sub-frame load (the toolbar iframe, and any navigation the user makes inside it) carries
@@ -1489,10 +1544,10 @@ function createMcpServer(scopes = SCOPES) {
     {
       title: 'Publish artifact',
       description:
-        'Publish an HTML, JSX/TSX (single React component with default export), or Markdown artifact. Returns the public URL. Omit slug for a random unguessable one.',
+        'Publish an HTML, JSX/TSX (single React component with default export), or Markdown artifact. Returns the public URL. Omit slug for a random unguessable one. type "redirect" instead publishes a short link: content is the absolute http(s) target and the URL answers 301.',
       inputSchema: {
-        content: z.string().describe('Full source of the artifact'),
-        type: z.enum(['html', 'jsx', 'tsx', 'md']).default('html'),
+        content: z.string().describe('Full source of the artifact, or the target URL when type is "redirect"'),
+        type: z.enum(['html', 'jsx', 'tsx', 'md', 'redirect']).default('html'),
         slug: z.string().optional().describe('Custom URL slug [a-z0-9-], 3-64 chars'),
         title: z.string().optional(),
         expiresAt: z
@@ -1536,7 +1591,7 @@ function createMcpServer(scopes = SCOPES) {
       inputSchema: {
         slug: z.string(),
         content: z.string(),
-        type: z.enum(['html', 'jsx', 'tsx', 'md']).default('html'),
+        type: z.enum(['html', 'jsx', 'tsx', 'md', 'redirect']).default('html'),
         title: z.string().optional(),
         frame: z
           .boolean()

@@ -41,12 +41,13 @@ It runs as one container with a single admin account and, by default, no databas
 
 ## Features
 
-- **Four content types.** HTML, JSX/TSX (a single React component, no build step), Markdown, and zipped static sites.
+- **Content types.** HTML, JSX/TSX (a single React component, no build step), Markdown, and zipped static sites.
 - **Agent-native, human-friendly.** A built-in MCP server lets Claude Code, Codex, or any MCP client publish with one tool call. Humans get a drag-and-drop web UI at `/` (behind an admin login) and a [CLI](docs/cli.md).
 - **Two-tier auth.** An admin logs into the dashboard with a password; CLI and MCP carry scoped, revocable [API keys](docs/auth.md) (`read` / `publish` / `full`) with optional expiry, so you never share one master secret.
 - **Private by default, with per-artifact visibility.** A new artifact is `private`, shared through a signed capability link (`?k=…`) you can rotate to revoke. Switch any artifact to `public` (anyone with the bare link) or password-protected. Nothing is discoverable by default: unguessable slugs, `noindex` everywhere. See [visibility](docs/api.md#visibility).
-- **Optional viewer frame.** A slim top toolbar (title, copy link, hide) like Claude, Gemini, and ChatGPT artifacts. Toggle it globally in Settings or per artifact; `?raw=1` always serves the bare content.
+- **Optional viewer frame.** A slim top toolbar (title, copy link, hide) like Claude, Gemini, and ChatGPT artifacts. Toggle it globally in Settings or per artifact; `?raw=1` serves the bare content. Redirects are never framed.
 - **Markdown render settings.** Pick the reading font, content width, base font size, and starting theme for every Markdown artifact in Settings. Markdown renders from its source on each view, so a change shows on existing artifacts too. Framed Markdown gets a navbar button that cycles Auto, Light, and Dark for that reader. See [docs/formats.md](docs/formats.md#markdown-render-settings).
+- **Redirects.** `type: "redirect"` turns a slug into a short link that answers an HTTP 301 at the server, where other hosts fall back to a JavaScript bounce. The target must be an absolute http(s) URL, and the response is uncacheable, so repointing the slug takes effect on the next visit. Read the cost of running an open redirector on your domain first: [docs/formats.md](docs/formats.md#redirects).
 - **Organize by project.** Group artifacts built for the same project into collapsible sections, with a search box across project, title, slug, and tags. Tags stay for cross-cutting labels.
 - **Lifecycle controls.** Custom slugs, rename, tags, disable without deleting, auto-expire, delete.
 - **Abuse-resistant.** Login and unlock endpoints are rate-limited per client IP (failures only), and password hashing runs off the event loop, so a burst of guesses slows those two routes instead of stalling the server. Set `TRUST_PROXY` for the real client IP behind Cloudflare or a reverse proxy. See [deploying](docs/deploy.md#rate-limiting-and-the-edge).
