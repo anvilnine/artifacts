@@ -6,9 +6,10 @@ on:
     tags: ['v*']
   pull_request:
 
+# Read-only by default. Only the publish job below asks for `packages: write`, so a
+# pull request run never holds a token that can write to the registry.
 permissions:
   contents: read
-  packages: write
 
 jobs:
   smoke:
@@ -203,10 +204,47 @@ jobs:
       - name: Smoke test API against sqlite
         run: bash .github/workflows/smoke.sh http://localhost:3000 ci-test-key
 
+  # Pull requests build the image and boot it, so a broken Dockerfile (or a change to what the
+  # container reads at boot) fails before merge instead of after. No push, and no registry
+  # credentials: this job is read-only and has no login step.
+  docker-build:
+    if: github.event_name == 'pull_request'
+    needs: [smoke, smoke-s3, smoke-git, smoke-postgres, smoke-sqlite]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    env:
+      IMAGE: artifacts-host:ci-${{ github.run_id }}
+      CONTAINER: artifacts-ci-${{ github.run_id }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build image
+        run: docker build -t "$IMAGE" .
+      - name: Smoke test container
+        run: |
+          docker run -d --name "$CONTAINER" -p 3000:3000 \
+            -e ARTIFACTS_API_KEY=ci-test-key "$IMAGE"
+          for i in $(seq 1 20); do
+            curl -sf http://localhost:3000/healthz && break
+            sleep 0.5
+          done
+          bash .github/workflows/smoke.sh http://localhost:3000 ci-test-key
+      # A GitHub-hosted runner is thrown away after the job, so this is not needed there. It is
+      # here so the job stays correct if it ever moves to the org's self-hosted runner, where the
+      # container and image would survive and the name would collide on a re-run.
+      - name: Clean up
+        if: always()
+        run: |
+          docker rm -f "$CONTAINER" || true
+          docker image rm -f "$IMAGE" || true
+
   docker:
     if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
     needs: [smoke, smoke-s3, smoke-git, smoke-postgres, smoke-sqlite]
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
     steps:
       - uses: actions/checkout@v4
       - name: Build image
