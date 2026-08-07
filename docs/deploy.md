@@ -49,7 +49,61 @@ Or keep the configuration in a file: `cp .env.example .env`, edit it, then `npm 
 | `DEFAULT_VISIBILITY` | no | `private` | Visibility for a new artifact when the caller gives none: `private` or `public`. Ships `private` (opt in to public). |
 | `CAP_TOKEN_TTL_DAYS` | no | `30` | Lifetime of a capability share link (`?k=` token) for `private`/`password` artifacts. |
 
-Day-to-day, give CLI and MCP clients scoped [managed API keys](auth.md) rather than the bootstrap key. Auth state (admin account, session-signing secret, managed keys) persists under a reserved `auth.json` object through the storage backend, so it survives a restart on every backend with no migration. Like the frame config, it is loaded once at boot; running **multiple replicas** against a shared backend is best paired with a pre-seeded admin (`ARTIFACTS_ADMIN_*`) — a session cookie signed by one replica's boot-time secret is not valid on a replica that started before that secret was written.
+Day-to-day, give CLI and MCP clients scoped [managed API keys](auth.md) rather than the bootstrap key. Auth state (the admin account, two HMAC secrets, and the managed keys) persists under a reserved `auth.json` object through the storage backend, so it survives a restart on any backend that is itself durable (see [storage backends](#storage-backends)) with no migration. Like the frame config, it is loaded once at boot and cached in memory.
+
+The two secrets are separate on purpose, and neither is written at boot:
+
+- `adminSecret` signs the admin session cookie. It is generated the first time a session is issued, which is the first login or completing the dashboard setup screen.
+- `sessionSecret` signs capability links (`?k=`) and the per-slug unlock cookies. It is generated at whichever comes first: completing the dashboard setup screen, or the first `private` or `password` publish.
+
+Keeping them apart is what lets a password change sign out every admin session without breaking share links that are already out there.
+
+`auth.json` holds both secrets, the admin password hash and salt, and a sha256 of every managed key, so treat it as a secret file. On the `local` backend it is `${DATA_DIR}/artifacts/auth.json`, written mode `0644`; `chmod 600` it and give it to the user the server runs as. The server does not tighten the mode for you.
+
+### Running multiple replicas
+
+Only `s3` and `postgres` can back a fleet. `local` and `sqlite` are single-host, and the `git` backend is single-writer by design ([git](#git-commit-every-change-to-a-git-remote)).
+
+Do two things before the replicas start: set `ARTIFACTS_ADMIN_USERNAME` and `ARTIFACTS_ADMIN_PASSWORD` on every one of them, and make sure both HMAC secrets already exist in `auth.json`. Skip either and the fleet breaks a different way.
+
+The env seed closes the setup screen. An instance with no admin serves an unauthenticated one-time `POST /api/auth/setup` that hands whoever calls it a full-scope admin session. Each replica decides that from its own memory, so a replica that has not seen an admin will accept a second setup and overwrite the account that already exists. Seeding from env makes every replica answer `409`.
+
+The secrets have to pre-exist because a replica reads `auth.json` once at boot and never sees a secret written after it started. Log in on replica A before replica B has ever seen `adminSecret`, and B answers `401` to that cookie until it restarts. The env seed does not help here: it writes the account with both secrets still `null`.
+
+Two ways to get the secrets in place:
+
+- Boot one instance, complete setup or log in once, and publish one private artifact. That writes both. Then start the rest.
+- Write them yourself before the first boot. On the `local` backend:
+
+```bash
+mkdir -p "$DATA_DIR/artifacts"
+printf '{"version":1,"admin":null,"sessionSecret":"%s","adminSecret":"%s","keys":[]}\n' \
+  "$(openssl rand -hex 32)" "$(openssl rand -hex 32)" > "$DATA_DIR/artifacts/auth.json"
+chmod 600 "$DATA_DIR/artifacts/auth.json"
+```
+
+Generate each secret with `openssl rand -hex 32`, as above. A literal placeholder pasted from a document is a published secret, and nothing validates the field: a 4-character value is accepted as an HMAC key.
+
+That block writes a whole `auth.json`, so use it only on a deployment that has never booted. Where one already has an admin or managed keys, edit the two secret fields in place; the block would delete both. On s3 the same object is `${S3_PREFIX}auth.json` in the bucket. On `postgres` it is a row rather than a file, so use the boot-once route there.
+
+Check it took. A wrong path or a JSON typo is swallowed on load, and the instance boots looking healthy with both secrets `null` again, so read the object back and confirm both fields are non-null before starting the fleet.
+
+### Changing a password or a key on a fleet
+
+Stop every replica first. Change the credential on one. Start the rest.
+
+That order is not a nicety. Each replica holds the whole auth record in memory and writes all of it back on any change, so the last writer wins over the entire object rather than over the field it touched. A replica running since before the change reverts it on its next write, and an ordinary authenticated read is enough to trigger one, because a key's `lastUsedAt` is refreshed through the same write path. Reproduced on two replicas over one `DATA_DIR`: a password change on A, one authenticated read on B, and the file is back to A's old `adminSecret`; after a restart the old password logs in and the new one is refused. The same clobber deletes a key minted on another replica and turns a disabled key back on, because those live in the same object.
+
+The same load-once rule bites in both directions while a fleet is live, which is why the stop-first order matters:
+
+- A managed key minted on one replica answers `401` everywhere else until each replica restarts. A key you revoke or disable on one replica keeps working everywhere else until each replica restarts.
+- A password change rotates `adminSecret` only on the replica that served it. A stolen session cookie stays valid, with full admin scope, on every other replica for the rest of its 30-day life, and the old password itself still logs in there while the new one is refused. A password change on a live fleet revokes nothing by itself.
+
+There is no zero-downtime version of this. A rolling restart leaves old and new replicas disagreeing, and the old ones can write their stale snapshot back over the change. To recover a fleet already in this state: stop every replica, read `auth.json` out of the backend and confirm both secrets are non-null, start one replica and confirm a login works, then start the rest.
+
+Capability links are unaffected by all of it. They are signed with `sessionSecret` and checked against per-artifact state that is read from storage on every request, so `PATCH {"rotateToken": true}` does take effect across a fleet immediately.
+
+The global config behaves like the auth record, for the same reason. See [storage backends](#storage-backends).
 
 ## Storage backends
 
@@ -104,7 +158,8 @@ up empty.
 > **Security — the bucket MUST be private.** Artifacts are always served *through* this app,
 > so their hardening headers, `noindex`, and expiry/disable checks apply. A public bucket (or a
 > browser-facing CDN/presigned URL) would bypass all of that and expose every artifact — see
-> [SECURITY.md](../SECURITY.md). Never make the bucket or its objects public.
+> [SECURITY.md](../SECURITY.md). The bucket also holds `auth.json`, so a public one hands out
+> both signing secrets and the admin password hash. Never make the bucket or its objects public.
 
 ### git (commit every change to a git remote)
 
@@ -137,7 +192,9 @@ JavaScript (no `git` binary, no shell), so a slug or filename can never be run a
 > **Security & operational notes.**
 > - **The remote MUST be private.** A public repo makes every artifact browsable and indexable
 >   on the host, defeating unguessable slugs, `noindex`, and expiry/disable — see
->   [SECURITY.md](../SECURITY.md).
+>   [SECURITY.md](../SECURITY.md). `auth.json` is staged and pushed like any other object, so
+>   the remote also carries both signing secrets, the admin password hash, and every managed
+>   key's hash, and keeps them in history after a rotation.
 > - **Single writer.** Run exactly one instance against a given branch. The git backend pushes
 >   on every change; two concurrent writers would produce non-fast-forward rejections. A failed
 >   push surfaces as a 5xx (the publish is not reported as durable).
