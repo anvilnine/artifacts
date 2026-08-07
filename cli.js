@@ -8,9 +8,9 @@ import AdmZip from 'adm-zip';
 const USAGE = `artifacts — publish to a self-hosted artifacts instance
 
 Usage:
-  artifacts publish <file> [--slug s] [--title t] [--tags a,b] [--project p] [--expires ISO] [--type html|jsx|tsx|md] [--frame on|off] [--visibility public|private|password] [--password pw]
+  artifacts publish <file> [--slug s] [--title t] [--tags a,b] [--project p] [--expires ISO] [--type html|jsx|tsx|md|redirect] [--frame on|off] [--visibility public|private|password] [--password pw]
   artifacts deploy <dir|zip> [--slug s] [--title t] [--tags a,b] [--project p] [--expires ISO] [--visibility public|private|password] [--password pw]
-  artifacts update <slug> <file> [--title t] [--tags a,b] [--project p] [--type html|jsx|tsx|md]
+  artifacts update <slug> <file> [--title t] [--tags a,b] [--project p] [--type html|jsx|tsx|md|redirect]
   artifacts list [--tag t] [--project p]
   artifacts rename <slug> <new-slug>
   artifacts disable <slug>
@@ -99,7 +99,7 @@ function fail(message) {
 function inferType(file) {
   if (opts.type) return opts.type;
   const type = EXT_TYPES[path.extname(file).toLowerCase()];
-  if (!type) fail(`cannot infer type from "${file}" — pass --type html|jsx|tsx|md`);
+  if (!type) fail(`cannot infer type from "${file}" — pass --type html|jsx|tsx|md|redirect`);
   return type;
 }
 

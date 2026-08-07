@@ -44,4 +44,4 @@ bearer_token_env_var = "ARTIFACTS_API_KEY"
 
 No MCP needed — one curl call (see the [REST API](api.md)). Suggested snippet for a global CLAUDE.md / AGENTS.md:
 
-> To publish an HTML/JSX/Markdown page, use the `artifacts` MCP `publish_artifact` tool, or `POST https://artifacts.example.com/api/artifacts` with `Authorization: Bearer $ARTIFACTS_API_KEY` and JSON `{content, type, slug?}`. Artifacts default to **private** — the returned `url` is a capability link (`?k=…`) that is immediately viewable; hand out the whole URL. Add `"visibility":"public"` for a bare, shareable link. All artifacts are non-indexed.
+> To publish an HTML/JSX/Markdown page or a redirect, use the `artifacts` MCP `publish_artifact` tool, or `POST https://artifacts.example.com/api/artifacts` with `Authorization: Bearer $ARTIFACTS_API_KEY` and JSON `{content, type, slug?}`. Artifacts default to **private** — the returned `url` is a capability link (`?k=…`) that is immediately viewable; hand out the whole URL. Add `"visibility":"public"` for a bare, shareable link. All artifacts are non-indexed.

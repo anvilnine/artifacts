@@ -5,7 +5,7 @@ Full HTTP reference, including zip-site deploys. ([← back to README](../README
 The `/api/artifacts*` and `/api/config` routes accept **either** an `Authorization: Bearer <key>` (a scoped [managed key](auth.md) or the bootstrap `ARTIFACTS_API_KEY`) **or** a valid admin session cookie (how the dashboard calls them). `/mcp` is bearer-only. Each write route enforces a minimum scope (below). Reads under `/a/` are public unless the artifact's [visibility](#visibility) is set.
 
 ```
-POST   /api/artifacts        {content, type: html|jsx|tsx|md, slug?, title?, tags?, project?, expiresAt?, frame?, visibility?, password?} → 201 {slug, url, visibility}   [publish]
+POST   /api/artifacts        {content, type: html|jsx|tsx|md|redirect, slug?, title?, tags?, project?, expiresAt?, frame?, visibility?, password?} → 201 {slug, url, visibility}   [publish]
 POST   /api/artifacts/zip    raw zip body (?slug=&title=&tags=&project=&expiresAt=&visibility=&password=) → 201 {slug, url, files, visibility}   [publish]
 PUT    /api/artifacts/:slug  {content, type, title?, tags?, project?, expiresAt?, frame?, visibility?, password?} → {slug, url, visibility}   [publish]
 PATCH  /api/artifacts/:slug  {slug?, disabled?, expiresAt?, tags?, project?, frame?, visibility?, password?, rotateToken?} → {slug, url, visibility}   [publish]
@@ -17,7 +17,7 @@ PUT    /api/config           {frame?: {enabled?, default?}, md?: {font?, width?,
 GET    /a/:slug              rendered artifact, framed when active (public unless private/password)
 GET    /a/:slug?k=<token>    capability-link exchange: sets the unlock cookie, 302s to a clean URL (private/password)
 GET    /a/:slug?raw=1        bare artifact without the frame
-GET    /a/:slug/source       original uploaded source, text/plain
+GET    /a/:slug/source       original uploaded source, text/plain (for a redirect, the stored target)
 POST   /a/:slug/unlock       {password} → sets a per-slug unlock cookie (password mode only)
 ```
 
@@ -26,6 +26,7 @@ The `[read|publish|full]` tag on each route is the minimum key scope required (`
 Semantics:
 
 - Body limits: 10 MB JSON, 50 MB zip.
+- `type: "redirect"` publishes a short link instead of a page: `content` is the target, and `GET /a/:slug` answers `301` with `Location: <target>`, `Cache-Control: no-store` and `Referrer-Policy: no-referrer`. The target must be an absolute `http://` or `https://` URL; anything else is a `400`. What gets stored is the normalized URL, capped at 2048 characters. Redirects are never framed and ignore `?raw=1`, and `GET /a/:slug/source` returns the stored target as `text/plain`. Full behavior, including what an open redirector costs you, in [Redirects](formats.md#redirects).
 - `POST` with an existing slug → `409` (use `PUT` to update).
 - Disabled artifacts return `404`; expired ones (`expiresAt` in the past) return `410`. Both keep their content — re-enable or clear/extend the expiry to serve again.
 - Tags: an array of strings, or one comma-separated string (the only form the zip endpoint's `?tags=` accepts). Each tag must match `[a-z0-9][a-z0-9-]{0,31}`; max 10 per artifact. Input is lowercased and deduplicated. `PATCH` replaces the whole list; an empty list clears it. `PUT` without `tags` keeps the existing ones. Artifacts published before tags existed list as `"tags": []`. In the web UI, tags render as chips — click one to filter the list.
@@ -33,7 +34,7 @@ Semantics:
 
 ## Viewer frame
 
-`GET /a/:slug` can wrap the artifact in a slim top frame (title + copy-link + hide toggle) that loads the artifact in an iframe. `?raw=1` always returns the bare artifact — it's the URL the frame's iframe points at, and the escape hatch for embedding.
+`GET /a/:slug` can wrap the artifact in a slim top frame (title + copy-link + hide toggle) that loads the artifact in an iframe. `?raw=1` returns the bare artifact — it's the URL the frame's iframe points at, and the escape hatch for embedding. Redirects are the exception: they are never framed, and `?raw=1` still answers the 301.
 
 Whether an artifact is framed resolves as `config.frame.enabled && (meta.frame ?? config.frame.default)`:
 
