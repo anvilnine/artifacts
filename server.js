@@ -15,6 +15,7 @@ import { createStorage, UnsafeKeyError } from './storage/index.js';
 import { createRateLimiter } from './ratelimit.js';
 import {
   createAuthStore,
+  AuthFileError,
   SCOPES,
   SESSION_COOKIE,
   hashPassword,
@@ -73,7 +74,13 @@ const {
   requireAdmin,
   signCapToken,
   verifyCapToken,
-} = await createAuthStore(storage, { apiKey: API_KEY, baseUrl: BASE_URL });
+} = await createAuthStore(storage, { apiKey: API_KEY, baseUrl: BASE_URL }).catch((err) => {
+  // An unreadable auth.json is an operator problem with a recovery path, so print the line
+  // and stop. Everything else (a storage backend that is down, a bug) keeps its stack.
+  if (!(err instanceof AuthFileError)) throw err;
+  console.error(err.message);
+  process.exit(1);
+});
 
 // Rate-limit bucket for this request. Under cloudflared every request arrives from
 // loopback, so the real client is only in CF-Connecting-IP; trusting that header is
