@@ -86,20 +86,20 @@ Generate each secret with `openssl rand -hex 32`, as above. A literal placeholde
 
 That block writes a whole `auth.json`, so use it only on a deployment that has never booted. Where one already has an admin or managed keys, edit the two secret fields in place; the block would delete both. On s3 the same object is `${S3_PREFIX}auth.json` in the bucket. On `postgres` it is a row rather than a file, so use the boot-once route there.
 
-Check it took. A wrong path or a JSON typo is swallowed on load, and the instance boots looking healthy with both secrets `null` again, so read the object back and confirm both fields are non-null before starting the fleet.
+Check it took. A JSON typo stops the boot with a message (see [a corrupt auth.json](auth.md#a-corrupt-authjson)), but a wrong path is silent: the instance comes up healthy on a fresh record with both secrets `null` again. Read the object back and confirm both fields are non-null before starting the fleet.
 
 ### Changing a password or a key on a fleet
 
-Stop every replica first. Change the credential on one. Start the rest.
+The change itself is safe to make on a live fleet: it sticks. What it does not do is take effect on the other replicas until they restart.
 
-That order is not a nicety. Each replica holds the whole auth record in memory and writes all of it back on any change, so the last writer wins over the entire object rather than over the field it touched. A replica running since before the change reverts it on its next write, and an ordinary authenticated read is enough to trigger one, because a key's `lastUsedAt` is refreshed through the same write path. Reproduced on two replicas over one `DATA_DIR`: a password change on A, one authenticated read on B, and the file is back to A's old `adminSecret`; after a restart the old password logs in and the new one is refused. The same clobber deletes a key minted on another replica and turns a disabled key back on, because those live in the same object.
+Writes merge. Every write reloads `auth.json`, applies the one change to what the backend holds, and writes that back, so a replica that has been up since before your change no longer reverts it. Up to and including v1.3.1 it did: each replica held the whole record from boot and wrote all of it back on any change of its own, and an ordinary authenticated read was enough to trigger one, because a key's `lastUsedAt` goes through the same path. The reload and the write are still two steps and no backend here offers compare-and-set, so two replicas writing inside that window can still lose one of the changes. The window is now one request rather than the lifetime of a process.
 
-The same load-once rule bites in both directions while a fleet is live, which is why the stop-first order matters:
+Reads are still per-process, and that is the part to plan around:
 
 - A managed key minted on one replica answers `401` everywhere else until each replica restarts. A key you revoke or disable on one replica keeps working everywhere else until each replica restarts.
-- A password change rotates `adminSecret` only on the replica that served it. A stolen session cookie stays valid, with full admin scope, on every other replica for the rest of its 30-day life, and the old password itself still logs in there while the new one is refused. A password change on a live fleet revokes nothing by itself.
+- A password change rotates `adminSecret` only on the replica that served it. A stolen session cookie stays valid, with full admin scope, on every other replica for the rest of its 30-day life, and the old password still logs in there while the new one is refused. A password change on a live fleet revokes nothing by itself.
 
-There is no zero-downtime version of this. A rolling restart leaves old and new replicas disagreeing, and the old ones can write their stale snapshot back over the change. To recover a fleet already in this state: stop every replica, read `auth.json` out of the backend and confirm both secrets are non-null, start one replica and confirm a login works, then start the rest.
+So when you are responding to a suspected leak, restart every replica after the change. When you are doing routine key housekeeping, you can leave the fleet up and let the restart happen whenever you next deploy.
 
 Capability links are unaffected by all of it. They are signed with `sessionSecret` and checked against per-artifact state that is read from storage on every request, so `PATCH {"rotateToken": true}` does take effect across a fleet immediately.
 

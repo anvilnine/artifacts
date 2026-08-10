@@ -219,6 +219,44 @@ jobs:
           code=$(curl -s -o /dev/null -w '%{http_code}' http://localhost:3000/a/restart-proof)
           [ "$code" = "200" ] || { echo "FAIL: artifact did not survive restart (got $code)"; exit 1; }
           echo "ok: artifact survived a fresh restart via postgres"
+      - name: Two replicas do not clobber each other's auth writes
+        run: |
+          # postgres is one of the two backends that can host a fleet, so this is where the
+          # replica case belongs. Replica B boots before the admin exists, which is the state
+          # that used to do the damage: it held the whole auth record from boot and wrote all
+          # of it back on any change of its own.
+          node server.js & # replica B, same database, left running for the next step
+          for i in $(seq 1 20); do curl -sf http://localhost:3001/healthz && break; sleep 0.5; done
+        env:
+          PORT: 3001
+      - name: Password change survives the other replica's next write
+        run: |
+          AUTH='Authorization: Bearer ci-test-key'
+          JSON='Content-Type: application/json'
+          # Claim the admin on replica A and change the password there.
+          curl -sf -X POST http://localhost:3000/api/auth/setup -H "$JSON" -c /tmp/jar \
+            -d '{"username":"fleet-admin","password":"first-password"}' > /dev/null
+          curl -sf -X POST http://localhost:3000/api/auth/password -H "$JSON" -b /tmp/jar \
+            -d '{"currentPassword":"first-password","newPassword":"second-password"}' > /dev/null
+          # Any write on replica B is enough. In production the usual one is not an admin
+          # action at all: a key's lastUsedAt is refreshed through the same path, so an
+          # ordinary bearer read does it.
+          curl -sf -X POST http://localhost:3001/api/keys -H "$AUTH" -H "$JSON" \
+            -d '{"name":"minted-on-b","scopes":["read"]}' > /dev/null
+          # A third replica reads the file fresh. It is the only honest way to ask what the
+          # backend actually holds now.
+          PORT=3002 node server.js &
+          for i in $(seq 1 20); do curl -sf http://localhost:3002/healthz && break; sleep 0.5; done
+          new=$(curl -s -o /dev/null -w '%{http_code}' -X POST http://localhost:3002/api/auth/login \
+            -H "$JSON" -d '{"username":"fleet-admin","password":"second-password"}')
+          old=$(curl -s -o /dev/null -w '%{http_code}' -X POST http://localhost:3002/api/auth/login \
+            -H "$JSON" -d '{"username":"fleet-admin","password":"first-password"}')
+          [ "$new" = "200" ] || { echo "FAIL: new password -> $new (the change was reverted)"; exit 1; }
+          [ "$old" = "401" ] || { echo "FAIL: old password -> $old (the change was reverted)"; exit 1; }
+          echo "ok: the password change on A survived the write on B"
+          curl -sf -H "$AUTH" http://localhost:3002/api/keys | grep -q minted-on-b \
+            || { echo "FAIL: the key minted on B is gone"; exit 1; }
+          echo "ok: the key minted on B survived too"
 
   smoke-sqlite:
     runs-on: ubuntu-latest
