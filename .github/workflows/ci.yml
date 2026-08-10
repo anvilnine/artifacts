@@ -45,6 +45,36 @@ jobs:
           done
       - name: Smoke test API
         run: bash .github/workflows/smoke.sh http://localhost:3000 ci-test-key
+      - name: Key routes survive a malformed auth.json
+        run: |
+          # A hand edit, or a crash partway through a write, leaves records the bearer path
+          # skips: no hash, plus a null or a bare string in the array. Every key-management
+          # route used to 500 on those, which is the screen the boot warning sends the
+          # operator to. Plant all three and drive the routes the dashboard drives.
+          pkill -f 'node server.js' || true
+          sleep 1
+          node -e '
+            const fs = require("fs");
+            const p = process.env.DATA_DIR + "/artifacts/auth.json";
+            const a = JSON.parse(fs.readFileSync(p, "utf8"));
+            a.keys = [null, "ak_live_oops", { id: "k_broken", name: "broken" }];
+            fs.writeFileSync(p, JSON.stringify(a, null, 2));
+          '
+          node server.js &
+          for i in $(seq 1 20); do curl -sf http://localhost:3000/healthz && break; sleep 0.5; done
+          AUTH='Authorization: Bearer ci-test-key'
+          code=$(curl -s -o /tmp/keys.json -w '%{http_code}' -H "$AUTH" http://localhost:3000/api/keys)
+          [ "$code" = "200" ] || { echo "FAIL: GET /api/keys -> $code"; exit 1; }
+          grep -q '"broken":true' /tmp/keys.json || { echo "FAIL: broken record not flagged"; cat /tmp/keys.json; exit 1; }
+          if grep -q '"id":null' /tmp/keys.json; then echo "FAIL: unaddressable entry listed"; cat /tmp/keys.json; exit 1; fi
+          echo "ok: GET /api/keys lists the broken record and skips the unaddressable entries"
+          code=$(curl -s -o /dev/null -w '%{http_code}' -X PATCH -H "$AUTH" -H 'Content-Type: application/json' \
+            -d '{"disabled":true}' http://localhost:3000/api/keys/k_broken)
+          [ "$code" = "200" ] || { echo "FAIL: PATCH /api/keys/k_broken -> $code"; exit 1; }
+          code=$(curl -s -o /dev/null -w '%{http_code}' -X DELETE -H "$AUTH" http://localhost:3000/api/keys/k_broken)
+          [ "$code" = "200" ] || { echo "FAIL: DELETE /api/keys/k_broken -> $code"; exit 1; }
+          if curl -s -H "$AUTH" http://localhost:3000/api/keys | grep -q k_broken; then echo "FAIL: revoked record still listed"; exit 1; fi
+          echo "ok: the broken record patches and revokes from the key screen"
 
   smoke-s3:
     runs-on: ubuntu-latest

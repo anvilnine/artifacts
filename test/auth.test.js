@@ -2,7 +2,7 @@
 // storage object, so a plain in-memory stub is enough to drive a whole auth record.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { createAuthStore, AuthFileError, hashKey } from '../lib/auth.js';
+import { createAuthStore, AuthFileError, hashKey, publicKey } from '../lib/auth.js';
 
 const AUTH_KEY = 'auth.json';
 
@@ -184,4 +184,52 @@ test('disabled and expired keys are still rejected, a valid one is not', async (
   assert.equal(callGuard(store, 'publish', GOOD_TOKEN).code, 401);
   assert.equal(callGuard(store, 'publish', 'ak_live_expired').code, 401);
   assert.equal(callGuard(store, 'publish', 'ak_live_valid').nexted, true);
+});
+
+// The bearer path skips a broken record; the key screen has to render it instead, since the
+// boot warning tells the operator to go there and revoke it. publicKey used to read k.scopes
+// straight through, so GET /api/keys answered 500 and the dashboard threw on scopes.join().
+test('publicKey survives a record with no hash and no scopes, and flags it', () => {
+  const row = publicKey({ id: 'k_bad', name: 'ci' });
+
+  assert.equal(row.broken, true);
+  assert.deepEqual(row.scopes, []);
+  assert.equal(row.prefix, '');
+  assert.equal(row.id, 'k_bad');
+  assert.equal(row.lastUsedAt, null);
+});
+
+test('publicKey leaves a healthy record alone and marks it not broken', () => {
+  const row = publicKey({ ...goodKey(), lastUsedAt: new Date(0).toISOString() });
+
+  assert.equal(row.broken, false);
+  assert.deepEqual(row.scopes, ['publish']);
+  assert.equal(row.name, 'good');
+  assert.equal(row.prefix, 'ak_live_g');
+  assert.equal(row.disabled, false);
+});
+
+// Both callers slice the timestamps for display, so a non-string here throws in the browser
+// and in `artifacts keys list` instead of in a route, where nothing catches it.
+test('publicKey drops timestamps and an id that are not strings', () => {
+  const row = publicKey({ id: 7, name: 'ci', expiresAt: 12345, lastUsedAt: {}, createdAt: [] });
+
+  assert.equal(row.id, null);
+  assert.equal(row.expiresAt, null);
+  assert.equal(row.lastUsedAt, null);
+  assert.equal(row.createdAt, null);
+});
+
+// A name that is not a string reached the dashboard as "undefined · " in the row title.
+test('publicKey names an unnamed record rather than passing undefined through', () => {
+  assert.equal(publicKey({ id: 'k_bad' }).name, '(unnamed)');
+});
+
+// publicKey never returns the hash. The list route is admin-only, but the whole point of
+// storing a sha256 is that it does not leave the process.
+test('publicKey does not carry the hash out', () => {
+  const row = publicKey(goodKey());
+
+  assert.equal(row.hash, undefined);
+  assert.equal(JSON.stringify(row).includes(hashKey(GOOD_TOKEN)), false);
 });

@@ -1718,19 +1718,21 @@
 
   function buildKeyRow(k) {
     const row = document.createElement('div');
-    row.className = 'key-row' + (k.disabled ? ' off' : '');
+    row.className = 'key-row' + (k.disabled || k.broken ? ' off' : '');
 
     const meta = document.createElement('div');
     meta.className = 'kmeta';
     const name = document.createElement('div');
     name.className = 'kname';
-    name.textContent = k.name + ' · ' + k.scopes.join('/');
+    name.textContent = k.name + ' · ' + (k.broken ? 'broken record' : k.scopes.join('/'));
     const sub = document.createElement('div');
     sub.className = 'ksub';
     const bits = [k.prefix + '…'];
     if (k.expiresAt) bits.push('expires ' + k.expiresAt.slice(0, 10));
     bits.push(k.lastUsedAt ? ('used ' + k.lastUsedAt.slice(0, 10)) : 'never used');
-    sub.textContent = bits.join(' · ');
+    // A broken record is missing the hash or the scopes the bearer path reads, so it answers
+    // 401 no matter what. Enabling it would change nothing; revoking it is the whole fix.
+    sub.textContent = k.broken ? 'always answers 401. Revoke it and mint a new key.' : bits.join(' · ');
     meta.append(name, sub);
 
     const acts = document.createElement('div');
@@ -1753,7 +1755,8 @@
       await fetch('/api/keys/' + k.id, { method: 'DELETE' });
       loadKeys();
     });
-    acts.append(tgl, del);
+    if (k.broken) acts.append(del);
+    else acts.append(tgl, del);
 
     row.append(meta, acts);
     return row;
