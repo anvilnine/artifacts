@@ -202,6 +202,10 @@ test('a key whose expiresAt does not parse is rejected, not treated as never exp
     ['garbage', 'ak_live_junkstr'],
     [{}, 'ak_live_junkobj'],
     [true, 'ak_live_junkbool'],
+    // `false` is the case that separates the real fix from a shorter wrong one. A guard
+    // written as `if (!k.expiresAt) return false` reads it as "no expiry" and the key goes
+    // back to living forever, with every other case here still green.
+    [false, 'ak_live_junkfalse'],
     [[], 'ak_live_junkarr'],
   ];
   const keys = junk.map(([expiresAt, token], i) => ({
