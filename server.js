@@ -1465,9 +1465,6 @@ app.post('/api/auth/logout', (req, res) => {
 app.post('/api/auth/password', requireSession, async (req, res, next) => {
   try {
     const { currentPassword, newPassword } = req.body || {};
-    if (!(await verifyPassword(currentPassword, auth.admin))) {
-      throw new ApiError(401, 'current password incorrect');
-    }
     validatePassword(newPassword);
     const hashed = await hashPassword(newPassword);
     // Changing the password is how an admin responds to a suspected stolen cookie, so it
@@ -1475,8 +1472,14 @@ app.post('/api/auth/password', requireSession, async (req, res, next) => {
     // then the caller gets a fresh cookie so the browser they are sitting at stays signed
     // in. Capability links keep working — those are signed with sessionSecret.
     const rotated = crypto.randomBytes(32).toString('hex');
-    await update((a) => {
+    await update(async (a) => {
       if (!a.admin) throw new ApiError(409, 'no admin account');
+      // The current password is checked against the stored record, not this process's cached
+      // copy. On a fleet the cache can be a password change old, and accepting a superseded
+      // password here would let it set a new one.
+      if (!(await verifyPassword(currentPassword, a.admin))) {
+        throw new ApiError(401, 'current password incorrect');
+      }
       a.admin = { username: a.admin.username, ...hashed };
       a.adminSecret = rotated;
     });

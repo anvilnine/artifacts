@@ -225,8 +225,7 @@ jobs:
           # replica case belongs. Replica B boots before the admin exists, which is the state
           # that used to do the damage: it held the whole auth record from boot and wrote all
           # of it back on any change of its own.
-          node server.js & # replica B, same database
-          echo $! > b.pid
+          node server.js & # replica B, same database, left running for the next step
           for i in $(seq 1 20); do curl -sf http://localhost:3001/healthz && break; sleep 0.5; done
         env:
           PORT: 3001
@@ -255,7 +254,7 @@ jobs:
           [ "$new" = "200" ] || { echo "FAIL: new password -> $new (the change was reverted)"; exit 1; }
           [ "$old" = "401" ] || { echo "FAIL: old password -> $old (the change was reverted)"; exit 1; }
           echo "ok: the password change on A survived the write on B"
-          curl -s -H "$AUTH" http://localhost:3002/api/keys | grep -q minted-on-b \
+          curl -sf -H "$AUTH" http://localhost:3002/api/keys | grep -q minted-on-b \
             || { echo "FAIL: the key minted on B is gone"; exit 1; }
           echo "ok: the key minted on B survived too"
 
