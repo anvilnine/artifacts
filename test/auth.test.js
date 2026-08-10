@@ -193,6 +193,55 @@ test('disabled and expired keys are still rejected, a valid one is not', async (
   assert.equal(callGuard(store, 'publish', 'ak_live_valid').nexted, true);
 });
 
+// `expiresAt` is the one field on a key record that used to fail open. Date.parse returns NaN
+// for anything it cannot read and `NaN <= now` is false, so a hand-edited or restored auth.json
+// with junk in that field minted a key that authenticated forever. Same shape as the capability
+// token bug in T1.2.12.
+test('a key whose expiresAt does not parse is rejected, not treated as never expiring', async () => {
+  const junk = [
+    ['garbage', 'ak_live_junkstr'],
+    [{}, 'ak_live_junkobj'],
+    [true, 'ak_live_junkbool'],
+    [[], 'ak_live_junkarr'],
+  ];
+  const keys = junk.map(([expiresAt, token], i) => ({
+    ...goodKey(),
+    id: `k_junk${i}`,
+    hash: hashKey(token),
+    expiresAt,
+  }));
+  const store = await createAuthStore(stubStorage({ version: 1, keys }), {
+    apiKey: 'bootstrap',
+    baseUrl: 'http://localhost:3000',
+  });
+
+  for (const [expiresAt, token] of junk) {
+    assert.equal(
+      callGuard(store, 'publish', token).code,
+      401,
+      `expiresAt ${JSON.stringify(expiresAt)} should not authenticate`,
+    );
+  }
+});
+
+// The absent cases have to keep working, or the fix turns every key without an expiry into an
+// expired one. `null` is what parseKeyInput stores when the operator leaves the field empty.
+test('a key with no expiresAt still authenticates', async () => {
+  const keys = [
+    { ...goodKey(), id: 'k_null', hash: hashKey('ak_live_nullexp'), expiresAt: null },
+    { ...goodKey(), id: 'k_empty', hash: hashKey('ak_live_emptyexp'), expiresAt: '' },
+    { ...goodKey(), id: 'k_absent', hash: hashKey('ak_live_absentexp') },
+  ];
+  const store = await createAuthStore(stubStorage({ version: 1, keys }), {
+    apiKey: 'bootstrap',
+    baseUrl: 'http://localhost:3000',
+  });
+
+  for (const token of ['ak_live_nullexp', 'ak_live_emptyexp', 'ak_live_absentexp']) {
+    assert.equal(callGuard(store, 'publish', token).nexted, true, `${token} should authenticate`);
+  }
+});
+
 // The bearer path skips a broken record; the key screen has to render it instead, since the
 // boot warning tells the operator to go there and revoke it. publicKey used to read k.scopes
 // straight through, so GET /api/keys answered 500 and the dashboard threw on scopes.join().
