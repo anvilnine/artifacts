@@ -526,7 +526,8 @@ done
 # checks above compare the instance against package.json. Catches a tool that was added to
 # server.js but never reached the client. A tool going missing is caught by the hard-coded
 # list above, not by this count.
-# grep -c counts lines and the whole SSE frame is one line, so count occurrences instead.
+# grep -c counts lines and every tool name sits on the same `data:` line, so count
+# occurrences instead.
 listed_tools=$(printf '%s' "$mcp_tools" | grep -o '"name":"' | wc -l | tr -d ' ' || true)
 registered_tools=$(grep -c '^  server.registerTool(' "$REPO_DIR/server.js" || true)
 [ "$registered_tools" != 0 ] \
@@ -538,8 +539,11 @@ echo "ok: MCP tools/list serves all $registered_tools registered tools"
 mcp_pub=$(mcp_call 3 tools/call \
   '{"name":"publish_artifact","arguments":{"content":"<h1>mcp</h1>","type":"html","slug":"ci-mcp","visibility":"public"}}')
 mcp_url=$(printf '%s' "$mcp_pub" | mcp_text)
-[ "$mcp_url" = "$BASE/a/ci-mcp" ] || fail "MCP publish_artifact returned '$mcp_url' (got: $mcp_pub)"
-curl -s "$BASE/a/ci-mcp?raw=1" | grep -q '<h1>mcp</h1>' || fail "MCP-published artifact serves no body"
+# The response is a three-line SSE frame, so flatten it before it goes into a FAIL line
+# that someone will read through `grep FAIL` on a CI log.
+[ "$mcp_url" = "$BASE/a/ci-mcp" ] \
+  || fail "MCP publish_artifact returned '$mcp_url' (got: $(printf '%s' "$mcp_pub" | tr '\n' ' '))"
+curl -s "$BASE/a/ci-mcp?raw=1" | grep -q '<h1>mcp</h1>' || fail "MCP publish_artifact served no body"
 echo "ok: MCP publish_artifact round-trip"
 
 mcp_list=$(mcp_call 4 tools/call '{"name":"list_artifacts","arguments":{}}')
