@@ -1478,7 +1478,12 @@ app.post('/api/auth/password', requireSession, async (req, res, next) => {
 
 // Managed API keys — admin session or bootstrap admin bearer only.
 app.get('/api/keys', requireAdmin, (req, res) => {
-  res.json(auth.keys.map(publicKey));
+  // An entry with no id (a null or a bare string left by a hand edit) cannot be addressed by
+  // PATCH or DELETE, so listing it would draw a row whose buttons do nothing. Those are named
+  // by position in the boot warning instead. Everything else lists, broken records included,
+  // because this is the screen the operator revokes them from.
+  const rows = auth.keys.filter((k) => k && typeof k === 'object' && typeof k.id === 'string');
+  res.json(rows.map(publicKey));
 });
 
 app.post('/api/keys', requireAdmin, async (req, res, next) => {
@@ -1508,7 +1513,9 @@ app.post('/api/keys', requireAdmin, async (req, res, next) => {
 
 app.patch('/api/keys/:id', requireAdmin, async (req, res, next) => {
   try {
-    const key = auth.keys.find((k) => k.id === req.params.id);
+    // k?.id, not k.id: a null or string entry in the array throws on property access and takes
+    // the whole route down with a 500, whichever key is being patched.
+    const key = auth.keys.find((k) => k?.id === req.params.id);
     if (!key) throw new ApiError(404, 'key not found');
     if (typeof req.body?.disabled === 'boolean') key.disabled = req.body.disabled;
     await saveAuth();
@@ -1520,7 +1527,7 @@ app.patch('/api/keys/:id', requireAdmin, async (req, res, next) => {
 
 app.delete('/api/keys/:id', requireAdmin, async (req, res, next) => {
   try {
-    const idx = auth.keys.findIndex((k) => k.id === req.params.id);
+    const idx = auth.keys.findIndex((k) => k?.id === req.params.id);
     if (idx === -1) throw new ApiError(404, 'key not found');
     auth.keys.splice(idx, 1);
     await saveAuth();
