@@ -297,3 +297,152 @@ test('a freshly minted capability token still verifies', async () => {
   );
   assert.equal(store.verifyCapToken(lapsed, 'cap-one', 0), false);
 });
+
+// Two stores over one storage stub are two replicas over one auth.json: each holds the record
+// it read at boot. saveAuth used to write that whole snapshot back, so the second replica to
+// write reverted the first replica's change.
+async function twoReplicas() {
+  const storage = stubStorage({
+    version: 1,
+    admin: { username: 'admin', salt: 'salt0', passwordHash: 'hash0' },
+    sessionSecret: 'session0',
+    adminSecret: 'admin0',
+    keys: [],
+  });
+  const opts = { apiKey: 'bootstrap', baseUrl: 'http://localhost:3000' };
+  const a = await createAuthStore(storage, opts);
+  const b = await createAuthStore(storage, opts);
+  const stored = () => JSON.parse(storage.files.get(AUTH_KEY).toString());
+  return { a, b, stored };
+}
+
+test("one replica's write does not revert another replica's password change", async () => {
+  const { a, b, stored } = await twoReplicas();
+
+  await a.update((rec) => {
+    rec.admin = { username: 'admin', salt: 'salt1', passwordHash: 'hash1' };
+    rec.adminSecret = 'admin1';
+  });
+  // The trigger in production is not an admin action: touchKey refreshes lastUsedAt through
+  // this same path, so one ordinary bearer read on the other replica was enough.
+  await b.update((rec) => {
+    rec.keys.push({ ...goodKey(), id: 'k_from_b' });
+  });
+
+  assert.equal(stored().admin.passwordHash, 'hash1');
+  assert.equal(stored().adminSecret, 'admin1');
+  assert.equal(stored().keys.length, 1);
+});
+
+test('a key minted on one replica survives a write on the other', async () => {
+  const { a, b, stored } = await twoReplicas();
+
+  await a.update((rec) => {
+    rec.keys.push({ ...goodKey(), id: 'k_from_a' });
+  });
+  await b.update((rec) => {
+    rec.keys.push({ ...goodKey(), id: 'k_from_b' });
+  });
+  // And a revoke on one replica is not undone by the other.
+  await a.update((rec) => {
+    rec.keys.splice(
+      rec.keys.findIndex((k) => k.id === 'k_from_b'),
+      1,
+    );
+  });
+  await b.update((rec) => {
+    rec.keys[0].lastUsedAt = new Date(0).toISOString();
+  });
+
+  assert.deepEqual(
+    stored().keys.map((k) => k.id),
+    ['k_from_a'],
+  );
+});
+
+test('two writes issued at once on one replica both land', async () => {
+  const { a, stored } = await twoReplicas();
+
+  await Promise.all([
+    a.update((rec) => {
+      rec.keys.push({ ...goodKey(), id: 'k_one' });
+    }),
+    a.update((rec) => {
+      rec.keys.push({ ...goodKey(), id: 'k_two' });
+    }),
+  ]);
+
+  assert.deepEqual(
+    stored().keys.map((k) => k.id).sort(),
+    ['k_one', 'k_two'],
+  );
+});
+
+// A route that rejects the change (a 404 on an unknown key id, a 409 on a claimed admin)
+// throws inside the mutate. That must not write, and must not wedge the write chain.
+test('a mutate that throws writes nothing and leaves the next write working', async () => {
+  const { a, stored } = await twoReplicas();
+
+  await assert.rejects(() =>
+    a.update((rec) => {
+      rec.keys.push({ ...goodKey(), id: 'k_never' });
+      throw new Error('rejected');
+    }),
+  );
+  assert.deepEqual(stored().keys, []);
+
+  await a.update((rec) => {
+    rec.keys.push({ ...goodKey(), id: 'k_after' });
+  });
+  assert.deepEqual(
+    stored().keys.map((k) => k.id),
+    ['k_after'],
+  );
+});
+
+// A replica booting against a backend that already has an admin must not overwrite it: that
+// would change the password hash under a live session.
+test('the env admin seed leaves an admin another replica already wrote alone', async () => {
+  const storage = stubStorage({
+    version: 1,
+    admin: { username: 'first', salt: 'salt0', passwordHash: 'hash0' },
+    sessionSecret: null,
+    adminSecret: null,
+    keys: [],
+  });
+  process.env.ARTIFACTS_ADMIN_USERNAME = 'second';
+  process.env.ARTIFACTS_ADMIN_PASSWORD = 'second-password';
+  try {
+    const store = await createAuthStore(storage, {
+      apiKey: 'bootstrap',
+      baseUrl: 'http://localhost:3000',
+    });
+    assert.equal(store.auth.admin.username, 'first');
+    assert.equal(store.auth.admin.passwordHash, 'hash0');
+  } finally {
+    delete process.env.ARTIFACTS_ADMIN_USERNAME;
+    delete process.env.ARTIFACTS_ADMIN_PASSWORD;
+  }
+});
+
+// Both secrets are HMAC keys every replica has to agree on. A replica that generated its own
+// would reject every share link and admin cookie the others issued.
+test('a replica adopts a secret another replica generated', async () => {
+  const storage = stubStorage({
+    version: 1,
+    admin: { username: 'admin', salt: 'salt0', passwordHash: 'hash0' },
+    sessionSecret: null,
+    adminSecret: null,
+    keys: [],
+  });
+  const opts = { apiKey: 'bootstrap', baseUrl: 'http://localhost:3000' };
+  const a = await createAuthStore(storage, opts);
+  const b = await createAuthStore(storage, opts);
+
+  const fromA = await a.ensureSessionSecret();
+  const fromB = await b.ensureSessionSecret();
+
+  assert.equal(typeof fromA, 'string');
+  assert.equal(fromB, fromA);
+  assert.equal(JSON.parse(storage.files.get(AUTH_KEY).toString()).sessionSecret, fromA);
+});

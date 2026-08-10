@@ -64,7 +64,7 @@ const config = await createConfigStore(storage);
 const {
   auth,
   DECOY_ADMIN,
-  saveAuth,
+  update,
   ensureSessionSecret,
   issueSession,
   sessionPrincipal,
@@ -1413,9 +1413,14 @@ app.post('/api/auth/setup', async (req, res, next) => {
     if (auth.admin) throw new ApiError(409, 'admin account already exists');
     const { username, password } = req.body || {};
     validateCredentials(username, password);
-    auth.admin = { username, ...(await hashPassword(password)) };
+    const admin = { username, ...(await hashPassword(password)) };
+    await update((a) => {
+      // Checked again against the stored record: hashing takes ~100ms, and on a fleet another
+      // replica can be claimed inside that window.
+      if (a.admin) throw new ApiError(409, 'admin account already exists');
+      a.admin = admin;
+    });
     await ensureSessionSecret();
-    await saveAuth();
     await issueSession(res, username);
     // Whoever reaches an instance with no admin yet claims it. Log it so a takeover during
     // that window is visible in the same stream as the login and unlock events.
@@ -1464,13 +1469,17 @@ app.post('/api/auth/password', requireSession, async (req, res, next) => {
       throw new ApiError(401, 'current password incorrect');
     }
     validatePassword(newPassword);
-    auth.admin = { username: auth.admin.username, ...(await hashPassword(newPassword)) };
+    const hashed = await hashPassword(newPassword);
     // Changing the password is how an admin responds to a suspected stolen cookie, so it
     // has to actually evict one. Rotating adminSecret invalidates every admin session,
     // then the caller gets a fresh cookie so the browser they are sitting at stays signed
     // in. Capability links keep working — those are signed with sessionSecret.
-    auth.adminSecret = crypto.randomBytes(32).toString('hex');
-    await saveAuth();
+    const rotated = crypto.randomBytes(32).toString('hex');
+    await update((a) => {
+      if (!a.admin) throw new ApiError(409, 'no admin account');
+      a.admin = { username: a.admin.username, ...hashed };
+      a.adminSecret = rotated;
+    });
     await issueSession(res, auth.admin.username);
     res.json({ ok: true });
   } catch (err) {
@@ -1504,8 +1513,9 @@ app.post('/api/keys', requireAdmin, async (req, res, next) => {
       lastUsedAt: null,
       disabled: false,
     };
-    auth.keys.push(record);
-    await saveAuth();
+    await update((a) => {
+      a.keys.push(record);
+    });
     // The full token is shown once, here, and never stored in the clear.
     res.status(201).json({ ...publicKey(record), key: token });
   } catch (err) {
@@ -1517,11 +1527,13 @@ app.patch('/api/keys/:id', requireAdmin, async (req, res, next) => {
   try {
     // k?.id, not k.id: a null or string entry in the array throws on property access and takes
     // the whole route down with a 500, whichever key is being patched.
-    const key = auth.keys.find((k) => k?.id === req.params.id);
-    if (!key) throw new ApiError(404, 'key not found');
-    if (typeof req.body?.disabled === 'boolean') key.disabled = req.body.disabled;
-    await saveAuth();
-    res.json(publicKey(key));
+    const updated = await update((a) => {
+      const key = a.keys.find((k) => k?.id === req.params.id);
+      if (!key) throw new ApiError(404, 'key not found');
+      if (typeof req.body?.disabled === 'boolean') key.disabled = req.body.disabled;
+      return publicKey(key);
+    });
+    res.json(updated);
   } catch (err) {
     next(err);
   }
@@ -1529,10 +1541,11 @@ app.patch('/api/keys/:id', requireAdmin, async (req, res, next) => {
 
 app.delete('/api/keys/:id', requireAdmin, async (req, res, next) => {
   try {
-    const idx = auth.keys.findIndex((k) => k?.id === req.params.id);
-    if (idx === -1) throw new ApiError(404, 'key not found');
-    auth.keys.splice(idx, 1);
-    await saveAuth();
+    await update((a) => {
+      const idx = a.keys.findIndex((k) => k?.id === req.params.id);
+      if (idx === -1) throw new ApiError(404, 'key not found');
+      a.keys.splice(idx, 1);
+    });
     res.json({ deleted: req.params.id });
   } catch (err) {
     next(err);

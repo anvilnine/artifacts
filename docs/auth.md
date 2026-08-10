@@ -87,8 +87,8 @@ To recover, pick one:
   you re-mint every API key. Every capability share link already handed out stops working, since
   the secret that signed them is gone.
 
-Either way, do it on a stopped instance. Editing the file under a running replica gets it
-overwritten from that replica's memory.
+Either way, do it on a stopped instance. A running server answers from the copy of the record
+it read at boot, so it would keep using the old admin and the old keys until it restarts.
 
 ## Auth endpoints (dashboard)
 
