@@ -446,7 +446,10 @@ async function seedWith(username, password, record) {
 test('the env admin seed refuses a password the setup screen would reject', async () => {
   await assert.rejects(
     () => seedWith('admin', 'short'),
-    (err) => err instanceof AdminSeedError && /at least 8 characters/.test(err.message),
+    (err) =>
+      err instanceof AdminSeedError &&
+      /at least 8 characters/.test(err.message) &&
+      err.message.startsWith('ARTIFACTS_ADMIN_PASSWORD rejected'),
   );
 });
 
@@ -454,7 +457,10 @@ test('the env admin seed refuses a username the setup screen would reject', asyn
   for (const username of ['ab', 'has space', 'a'.repeat(33), 'semi;colon']) {
     await assert.rejects(
       () => seedWith(username, 'long-enough-password'),
-      (err) => err instanceof AdminSeedError && /3-32 chars/.test(err.message),
+      (err) =>
+        err instanceof AdminSeedError &&
+        /3-32 chars/.test(err.message) &&
+        err.message.startsWith('ARTIFACTS_ADMIN_USERNAME rejected'),
       `username ${JSON.stringify(username)} should be refused`,
     );
   }
