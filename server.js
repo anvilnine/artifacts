@@ -15,6 +15,7 @@ import { createStorage, UnsafeKeyError } from './storage/index.js';
 import { createRateLimiter } from './ratelimit.js';
 import {
   createAuthStore,
+  AdminSeedError,
   AuthFileError,
   SCOPES,
   SESSION_COOKIE,
@@ -75,9 +76,10 @@ const {
   signCapToken,
   verifyCapToken,
 } = await createAuthStore(storage, { apiKey: API_KEY, baseUrl: BASE_URL }).catch((err) => {
-  // An unreadable auth.json is an operator problem with a recovery path, so print the line
-  // and stop. Everything else (a storage backend that is down, a bug) keeps its stack.
-  if (!(err instanceof AuthFileError)) throw err;
+  // An unreadable auth.json or a rejected admin seed is an operator problem with a recovery
+  // path, so print the line and stop. Everything else (a storage backend that is down, a bug)
+  // keeps its stack.
+  if (!(err instanceof AuthFileError) && !(err instanceof AdminSeedError)) throw err;
   console.error(err.message);
   process.exit(1);
 });
