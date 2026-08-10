@@ -2,14 +2,16 @@
 // storage object, so a plain in-memory stub is enough to drive a whole auth record.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { createAuthStore, hashKey } from '../lib/auth.js';
+import { createAuthStore, AuthFileError, hashKey } from '../lib/auth.js';
 
 const AUTH_KEY = 'auth.json';
 
 // Minimal stand-in for storage/*.js: getBuffer + put + flush is all the auth store calls.
+// A string argument is written as-is, so a test can hand over bytes that are not an auth record.
 function stubStorage(record) {
   const files = new Map();
-  if (record) files.set(AUTH_KEY, Buffer.from(JSON.stringify(record)));
+  if (typeof record === 'string') files.set(AUTH_KEY, Buffer.from(record));
+  else if (record) files.set(AUTH_KEY, Buffer.from(JSON.stringify(record)));
   return {
     files,
     async getBuffer(key) {
@@ -65,6 +67,43 @@ function goodKey() {
     createdAt: new Date(0).toISOString(),
   };
 }
+
+// A truncated auth.json (what a crash during saveAuth leaves behind) used to load as a blank
+// record: admin gone, both secrets gone, every key gone, and POST /api/auth/setup claimable by
+// the next caller, since that route is unauthenticated and gated only on `auth.admin`.
+test('a corrupt auth.json fails the boot and is left on disk untouched', async () => {
+  const truncated = '{"version":1,"admin":{"username":"real","salt":"aa","passwordHash":"bb"';
+  const storage = stubStorage(truncated);
+
+  await assert.rejects(
+    () => createAuthStore(storage, { apiKey: 'bootstrap', baseUrl: 'http://localhost:3000' }),
+    (err) => err instanceof AuthFileError && /not valid JSON/.test(err.message),
+  );
+  assert.equal(storage.files.get(AUTH_KEY).toString(), truncated);
+});
+
+// Valid JSON of the wrong shape reads every field as undefined, which is the same blank record
+// by another route.
+test('an auth.json that is not a JSON object fails the boot', async () => {
+  for (const body of ['[]', '"admin"', 'null', '42']) {
+    await assert.rejects(
+      () => createAuthStore(stubStorage(body), { apiKey: 'bootstrap', baseUrl: 'http://localhost:3000' }),
+      (err) => err instanceof AuthFileError && /expected a JSON object/.test(err.message),
+      `expected ${body} to be rejected`,
+    );
+  }
+});
+
+// The other half of the rule: no file at all is a new instance and still boots blank.
+test('an absent auth.json still boots as a fresh instance', async () => {
+  const store = await createAuthStore(stubStorage(null), {
+    apiKey: 'bootstrap',
+    baseUrl: 'http://localhost:3000',
+  });
+
+  assert.equal(store.auth.admin, null);
+  assert.deepEqual(store.auth.keys, []);
+});
 
 // A record missing `hash` used to reach Buffer.from(undefined) inside resolveApiKey and
 // throw ERR_INVALID_ARG_TYPE, which 500s every bearer request on the instance, not just

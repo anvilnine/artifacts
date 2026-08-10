@@ -61,6 +61,35 @@ scopes and names it at boot:
 auth.json: ignoring 1 key record(s) with no hash or no scopes (k_7fa2c1). Those keys return 401 until you delete or re-create them.
 ```
 
+## A corrupt auth.json
+
+A single broken record is skipped. A file that does not parse at all is different: the server
+refuses to start and prints one line.
+
+```
+auth.json failed to load: not valid JSON (Unexpected end of JSON input). Refusing to start. ...
+```
+
+It stops because the alternative is worse. Loading a blank record on a parse failure would drop
+the admin account, both signing secrets and every managed key, and the next write would overwrite
+the file for good. `POST /api/auth/setup` is unauthenticated and allowed whenever no admin exists,
+so a blank record also lets the next visitor claim the instance. A truncated file is exactly what
+a crash partway through a write leaves behind, so this is a real state, not a hypothetical.
+
+The server does not touch the file, so the bytes on disk are whatever the failed write left.
+To recover, pick one:
+
+- **Restore from backup.** `auth.json` sits next to your artifacts on whichever backend you run
+  (`DATA_DIR/auth.json` on local, the same prefix on S3, a row on Postgres/SQLite, a committed
+  file on git). The git backend keeps history, so `git log` on the data repo has the last good
+  copy.
+- **Start over.** Move the file aside, then boot. You get the first-run setup screen again, and
+  you re-mint every API key. Every capability share link already handed out stops working, since
+  the secret that signed them is gone.
+
+Either way, do it on a stopped instance. Editing the file under a running replica gets it
+overwritten from that replica's memory.
+
 ## Auth endpoints (dashboard)
 
 | Method | Path | Purpose |
