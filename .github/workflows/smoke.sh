@@ -501,6 +501,55 @@ mcp_version=$(printf '%s' "$mcp_init" | sed -n 's/.*"serverInfo":{[^}]*"version"
 [ "$mcp_version" = "$pkg_version" ] || fail "MCP serverInfo version '$mcp_version' != package.json '$pkg_version'"
 echo "ok: MCP serverInfo version matches package.json"
 
+# --- MCP tools: the list matches what server.js registers, and publish/list/delete round-trip ---
+# The transport is stateless (sessionIdGenerator: undefined), so each POST stands on its own
+# and tools/list needs no initialize before it. Until now the suite only called initialize,
+# so a tool that threw on every call still shipped green.
+# Not covered here: the per-tool scope gate, which needs a scoped managed key to test.
+mcp_call() { # mcp_call <id> <method> <params-json>
+  curl -s -X POST "$BASE/mcp" -H "$AUTH" -H "$JSON" -H 'Accept: application/json, text/event-stream' \
+    -d "{\"jsonrpc\":\"2.0\",\"id\":$1,\"method\":\"$2\",\"params\":$3}"
+}
+# The SSE frame wraps one JSON object on a `data:` line; the assertions below read the raw
+# body, which is enough for presence checks and one field extraction.
+mcp_text() { # stdin: an MCP tool result -> stdout: its text content
+  sed -n 's/.*"text":"\([^"]*\)".*/\1/p'
+}
+
+mcp_tools=$(mcp_call 2 tools/list '{}')
+for tool in publish_artifact update_artifact rename_artifact set_artifact_expiry \
+  set_artifact_tags set_artifact_project set_artifact_visibility disable_artifact \
+  enable_artifact set_artifact_frame list_artifacts delete_artifact; do
+  printf '%s' "$mcp_tools" | grep -q "\"name\":\"$tool\"" || fail "MCP tools/list is missing $tool"
+done
+# Compare the served list against what the checkout registers, the same way the version
+# checks above compare the instance against package.json. Catches a tool that was added to
+# server.js but never reached the client. A tool going missing is caught by the hard-coded
+# list above, not by this count.
+# grep -c counts lines and the whole SSE frame is one line, so count occurrences instead.
+listed_tools=$(printf '%s' "$mcp_tools" | grep -o '"name":"' | wc -l | tr -d ' ' || true)
+registered_tools=$(grep -c '^  server.registerTool(' "$REPO_DIR/server.js" || true)
+[ "$registered_tools" != 0 ] \
+  || fail "no '  server.registerTool(' lines in server.js (did the indentation change?)"
+[ "$listed_tools" = "$registered_tools" ] \
+  || fail "MCP tools/list served $listed_tools tools, server.js registers $registered_tools"
+echo "ok: MCP tools/list serves all $registered_tools registered tools"
+
+mcp_pub=$(mcp_call 3 tools/call \
+  '{"name":"publish_artifact","arguments":{"content":"<h1>mcp</h1>","type":"html","slug":"ci-mcp","visibility":"public"}}')
+mcp_url=$(printf '%s' "$mcp_pub" | mcp_text)
+[ "$mcp_url" = "$BASE/a/ci-mcp" ] || fail "MCP publish_artifact returned '$mcp_url' (got: $mcp_pub)"
+curl -s "$BASE/a/ci-mcp?raw=1" | grep -q '<h1>mcp</h1>' || fail "MCP-published artifact serves no body"
+echo "ok: MCP publish_artifact round-trip"
+
+mcp_list=$(mcp_call 4 tools/call '{"name":"list_artifacts","arguments":{}}')
+printf '%s' "$mcp_list" | grep -q 'ci-mcp' || fail "MCP list_artifacts omits the artifact it just published"
+echo "ok: MCP list_artifacts"
+
+mcp_call 5 tools/call '{"name":"delete_artifact","arguments":{"slug":"ci-mcp"}}' > /dev/null
+code=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/a/ci-mcp")
+expect_code 404 "$code" "MCP delete_artifact"
+
 # --- dashboard: the served shell parses and still lines up with its own markup ---
 # Nothing else in CI loads `/`, so a broken inline script in public/index.html used to
 # ship green. No browser here; see the header of dashboard-check.mjs for what that
