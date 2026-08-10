@@ -2,7 +2,14 @@
 // storage object, so a plain in-memory stub is enough to drive a whole auth record.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { createAuthStore, AuthFileError, hashKey, publicKey } from '../lib/auth.js';
+import {
+  createAuthStore,
+  AuthFileError,
+  capTtlDays,
+  hashKey,
+  publicKey,
+  signSession,
+} from '../lib/auth.js';
 
 const AUTH_KEY = 'auth.json';
 
@@ -232,4 +239,61 @@ test('publicKey does not carry the hash out', () => {
 
   assert.equal(row.hash, undefined);
   assert.equal(JSON.stringify(row).includes(hashKey(GOOD_TOKEN)), false);
+});
+
+// CAP_TOKEN_TTL_DAYS used to go through Number(raw || 30). A typo produced NaN days, which
+// minted share links that never lapsed; 0 or a negative produced links dead on arrival.
+test('capTtlDays falls back to 30 for junk, zero and negatives', () => {
+  assert.equal(capTtlDays(undefined), 30);
+  assert.equal(capTtlDays(''), 30);
+  assert.equal(capTtlDays('thirty'), 30);
+  assert.equal(capTtlDays('30d'), 30);
+  assert.equal(capTtlDays('0'), 30);
+  assert.equal(capTtlDays('-7'), 30);
+  assert.equal(capTtlDays('Infinity'), 30);
+});
+
+test('capTtlDays keeps a real value', () => {
+  assert.equal(capTtlDays('7'), 7);
+  assert.equal(capTtlDays('0.5'), 0.5);
+  assert.equal(capTtlDays('365'), 365);
+});
+
+async function capStore() {
+  const store = await createAuthStore(stubStorage({ version: 1, keys: [] }), {
+    apiKey: 'bootstrap',
+    baseUrl: 'http://localhost:3000',
+  });
+  const secret = await store.ensureSessionSecret();
+  return { store, secret };
+}
+
+// The mint-side fix cannot reach a link already handed out. A token minted while the env var
+// held junk carries exp: null (NaN survives JSON.stringify as null), and verifyCapToken read
+// a missing exp as "no expiry set", so it stayed valid forever.
+test('a capability token with no numeric exp is refused', async () => {
+  const { store, secret } = await capStore();
+
+  const immortal = signSession({ typ: 'cap', slug: 'cap-one', epoch: 0, exp: null }, secret);
+  assert.equal(store.verifyCapToken(immortal, 'cap-one', 0), false);
+
+  const noExp = signSession({ typ: 'cap', slug: 'cap-one', epoch: 0 }, secret);
+  assert.equal(store.verifyCapToken(noExp, 'cap-one', 0), false);
+});
+
+// The refusal has to leave the normal path alone: a freshly minted token is valid, one past
+// its exp is not, and the slug and epoch bindings still hold.
+test('a freshly minted capability token still verifies', async () => {
+  const { store, secret } = await capStore();
+
+  const fresh = store.signCapToken('cap-one', 0);
+  assert.equal(store.verifyCapToken(fresh, 'cap-one', 0), true);
+  assert.equal(store.verifyCapToken(fresh, 'cap-two', 0), false);
+  assert.equal(store.verifyCapToken(fresh, 'cap-one', 1), false);
+
+  const lapsed = signSession(
+    { typ: 'cap', slug: 'cap-one', epoch: 0, exp: Date.now() - 1000 },
+    secret,
+  );
+  assert.equal(store.verifyCapToken(lapsed, 'cap-one', 0), false);
 });

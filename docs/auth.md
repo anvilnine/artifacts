@@ -124,3 +124,5 @@ Separate from admin/keys, each artifact can be `public`, `private` (the **defaul
 - **`password`** validates the artifact's own shared password at `POST /a/:slug/unlock`, which sets the same kind of unlock cookie. Rate-limited to 10 failures per hour per client IP + slug.
 
 Both the capability token and the unlock cookie bind the artifact's epoch, so `PATCH {"rotateToken": true}` (bump the epoch) revokes every issued link **and** every live cookie for that slug on the next request. Absent a rotate, tokens lapse at `CAP_TOKEN_TTL_DAYS` (default 30) and cookies at their 7-day TTL.
+
+A token has to carry an expiry to be accepted. Instances that ran with a non-numeric `CAP_TOKEN_TTL_DAYS` minted links with no usable expiry, and those links used to work forever; they are refused now. Re-share the artifact to hand out a fresh link.
