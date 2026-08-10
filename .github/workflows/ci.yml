@@ -29,6 +29,13 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci
+      - name: Unit tests
+        # The job seeds ARTIFACTS_ADMIN_* for the server boot below. createAuthStore reads
+        # those from the environment, so clear them here and let each test set its own.
+        env:
+          ARTIFACTS_ADMIN_USERNAME: ''
+          ARTIFACTS_ADMIN_PASSWORD: ''
+        run: npm test
       - name: Boot server
         run: |
           node server.js &

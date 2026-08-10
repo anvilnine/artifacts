@@ -53,6 +53,14 @@ artifacts keys revoke <id>
 | `PATCH` | `/api/keys/:id` | `{ disabled: true\|false }` |
 | `DELETE` | `/api/keys/:id` | revoke |
 
+A key that answers `401` for no obvious reason may have a broken record in `auth.json`, which a
+hand edit or a crash mid-write can leave behind. The server skips a record with no hash or no
+scopes and names it at boot:
+
+```
+auth.json: ignoring 1 key record(s) with no hash or no scopes (k_7fa2c1). Those keys return 401 until you delete or re-create them.
+```
+
 ## Auth endpoints (dashboard)
 
 | Method | Path | Purpose |

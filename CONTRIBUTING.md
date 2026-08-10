@@ -24,6 +24,16 @@ bash .github/workflows/smoke.sh http://localhost:3000 test
 
 If you add or change API behavior, extend `smoke.sh` to cover it.
 
+Unit tests live in `test/` and run on node's built-in runner, no server and no extra dependencies:
+
+```bash
+npm test
+```
+
+Use one when the case cannot be reached over HTTP, such as a malformed `auth.json` record. The
+`create*Store` functions in `lib/` take their storage and env as arguments, so a stub object is
+enough to drive them. The `test` script names its files, so add yours to it.
+
 ## Releasing
 
 Use npm to bump the version:

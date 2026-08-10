@@ -110,10 +110,17 @@ npm run dev
 # UI at http://localhost:3000
 ```
 
-The whole test suite is one shell script:
+The end-to-end suite is one shell script:
 
 ```bash
 bash .github/workflows/smoke.sh http://localhost:3000 <your-key>
+```
+
+A few cases cannot be reached over HTTP, such as a hand-edited `auth.json`. Those run as unit
+tests on node's built-in runner, no server needed:
+
+```bash
+npm test
 ```
 
 That covers the dashboard too. `dashboard-check.mjs` fetches `/`, parses the inline script in

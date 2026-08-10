@@ -3,7 +3,8 @@
 Self-hosted, Claude-style artifact publishing. POST HTML / a React component / Markdown / a zipped
 static site, get back an unguessable URL on your own domain. One container, single admin account, no
 database by default (plain files under `/data`); optional S3 / git / Postgres / SQLite backends. No
-build step, Node >= 22. The whole test suite is `bash .github/workflows/smoke.sh <url> <key>`.
+build step, Node >= 22. The end-to-end suite is `bash .github/workflows/smoke.sh <url> <key>`; unit
+tests run with `npm test`.
 
 Read the [README](README.md) and `docs/` before working on a feature.
 
