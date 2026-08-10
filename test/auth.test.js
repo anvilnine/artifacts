@@ -209,6 +209,17 @@ test('publicKey leaves a healthy record alone and marks it not broken', () => {
   assert.equal(row.disabled, false);
 });
 
+// Both callers slice the timestamps for display, so a non-string here throws in the browser
+// and in `artifacts keys list` instead of in a route, where nothing catches it.
+test('publicKey drops timestamps and an id that are not strings', () => {
+  const row = publicKey({ id: 7, name: 'ci', expiresAt: 12345, lastUsedAt: {}, createdAt: [] });
+
+  assert.equal(row.id, null);
+  assert.equal(row.expiresAt, null);
+  assert.equal(row.lastUsedAt, null);
+  assert.equal(row.createdAt, null);
+});
+
 // A name that is not a string reached the dashboard as "undefined · " in the row title.
 test('publicKey names an unnamed record rather than passing undefined through', () => {
   assert.equal(publicKey({ id: 'k_bad' }).name, '(unnamed)');
