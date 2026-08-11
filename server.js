@@ -634,6 +634,11 @@ async function saveArtifact({ content, type = 'html', slug, title, expiresAt, fr
     createdAt: existing?.createdAt || new Date().toISOString(),
     updatedAt: new Date().toISOString(),
   };
+  // The target lives in source.url, which the list API never reads, so a redirect also
+  // carries it in meta for the dashboard row. Cleared on any other type, or an artifact
+  // converted away from redirect would keep claiming a destination it no longer has.
+  if (type === 'redirect') meta.target = body;
+  else delete meta.target;
   if (expiresAt !== undefined) meta.expiresAt = expiry;
   if (frame !== undefined) meta.frame = frame;
   if (tagList !== undefined) meta.tags = tagList.length ? tagList : undefined;
@@ -723,6 +728,8 @@ async function duplicateArtifact(sourceSlug, body = {}) {
     updatedAt: new Date().toISOString(),
   };
   if (source.type === 'zip' && typeof source.files === 'number') meta.files = source.files;
+  // copySlug carries source.url over, so the copy points at the same target; meta follows it.
+  if (source.type === 'redirect' && typeof source.target === 'string') meta.target = source.target;
   if (expiry !== undefined) meta.expiresAt = expiry;
   if (tagList && tagList.length) meta.tags = tagList;
   if (projectName) meta.project = projectName;
@@ -758,7 +765,7 @@ function seedTokenEpoch(meta) {
 // what the dashboard/API legitimately need; secrets (password) and internal state
 // (tokenEpoch) are dropped, and hasPassword exposes state without the hash.
 const PUBLIC_META_FIELDS = [
-  'slug', 'type', 'title', 'files', 'createdAt', 'updatedAt',
+  'slug', 'type', 'title', 'files', 'target', 'createdAt', 'updatedAt',
   'expiresAt', 'frame', 'tags', 'project', 'visibility', 'disabled',
 ];
 function publicMeta(meta) {

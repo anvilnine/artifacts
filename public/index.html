@@ -205,6 +205,8 @@
   }
   .form label.f > input, .form label.f > select, .form label.f > textarea { width: 100%; }
   .form textarea { min-height: 150px; font-family: var(--f-mono); font-size: 13px; resize: vertical; }
+  /* A redirect target is one line, so the paste box shrinks instead of leaving 150px of void. */
+  .form textarea.oneline { min-height: 44px; }
   .form .browse { font-size: 12px; color: var(--taupe-dim); text-align: center; padding: 2px 0; }
   .form .foot { display: flex; justify-content: flex-end; align-items: center; gap: 12px; margin-top: 2px; }
 
@@ -341,6 +343,7 @@
   }
   .pill.pill-lock { color: var(--taupe); border-color: var(--rim); background: transparent; }
   .item-title { font-size: 13px; color: var(--taupe); margin-top: 4px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .item-target { font-family: var(--f-mono); font-size: 12px; color: var(--taupe-dim); margin-top: 4px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .item-meta { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin-top: 8px; }
   .time { font-size: 11px; color: var(--taupe-dim); font-family: var(--f-mono); font-variant-numeric: tabular-nums; }
 
@@ -547,9 +550,10 @@
                   <option value="jsx">jsx</option>
                   <option value="tsx">tsx</option>
                   <option value="md">md</option>
+                  <option value="redirect">redirect</option>
                 </select>
               </label>
-              <label class="f">Frame
+              <label class="f" id="frameField">Frame
                 <select id="frame" title="Top viewer frame">
                   <option value="default">Default</option>
                   <option value="on">On</option>
@@ -586,7 +590,7 @@
                 <datalist id="projectOptions"></datalist>
               </label>
             </div>
-            <label class="f" id="contentField">Content
+            <label class="f" id="contentField"><span id="contentLabel">Content</span>
               <textarea id="content" placeholder="Paste HTML, a React component with a default export, or Markdown…" spellcheck="false"></textarea>
             </label>
             <div class="browse" id="browseRow">or <a href="#" id="browseLink">browse files</a> to upload instead</div>
@@ -881,12 +885,27 @@
     $('passwordWrap').style.display = $('visibility').value === 'password' ? '' : 'none';
   });
 
+  // A redirect takes a URL, not a document: the content box asks for the target, the paste
+  // box shrinks to one line, and Frame goes away because the server answers a redirect with
+  // a Location header and never reaches the frame branch.
+  const CONTENT_PLACEHOLDER = $('content').placeholder;
+  function syncComposeType() {
+    const redirect = $('type').value === 'redirect';
+    $('contentLabel').textContent = redirect ? 'Target URL' : 'Content';
+    $('content').placeholder = redirect ? 'https://example.com/where-it-goes' : CONTENT_PLACEHOLDER;
+    $('content').classList.toggle('oneline', redirect);
+    $('frameField').style.display = redirect ? 'none' : '';
+    $('browseRow').style.display = redirect ? 'none' : '';
+  }
+  $('type').addEventListener('change', syncComposeType);
+
   $('publish').addEventListener('click', () => busy($('publish'), duplicateSource ? 'Copying…' : 'Publishing…', async () => {
     if (duplicateSource) return doDuplicate();
     const body = { content: $('content').value, type: $('type').value };
     if ($('slug').value) body.slug = $('slug').value;
     if ($('title').value) body.title = $('title').value;
-    if ($('frame').value !== 'default') body.frame = $('frame').value === 'on';
+    // Frame is hidden for a redirect, so never send a stale value the select still holds.
+    if (body.type !== 'redirect' && $('frame').value !== 'default') body.frame = $('frame').value === 'on';
     const tagList = composeTags.getTags();
     if (tagList.length) body.tags = tagList;
     if ($('project').value.trim()) body.project = $('project').value.trim();
@@ -921,6 +940,7 @@
       project: $('project').value.trim(),
       visibility: $('visibility').value,
     };
+    if (src.type === 'redirect') delete body.frame; // hidden for a redirect copy, so never sent
     if ($('slug').value) body.slug = $('slug').value;
     if ($('visibility').value === 'password') {
       if (!$('password').value) { toast('A view password is required.', true); return; }
@@ -979,6 +999,10 @@
     $('browseRow').style.display = on ? 'none' : '';
     $('publish').textContent = on ? 'Create copy' : 'Publish';
     $('composeTitle').textContent = on ? 'Duplicate artifact' : 'New artifact';
+    // A copy keeps its type, so a redirect copy hides Frame the same way composing one does.
+    // Leaving duplicate mode hands the form back to the type select.
+    if (on) $('frameField').style.display = duplicateSource?.type === 'redirect' ? 'none' : '';
+    else syncComposeType();
   }
 
   function exitDuplicateMode() {
@@ -1123,6 +1147,7 @@
   function openPaste() {
     exitDuplicateMode();
     $('type').value = 'html';
+    syncComposeType(); // setting the select in code fires no change event
     togglePop('compose', 'content');
   }
 
@@ -1395,6 +1420,17 @@
       if (a.title && a.title !== a.slug) {
         const t = document.createElement('div');
         t.className = 'item-title'; t.textContent = a.title;
+        body.appendChild(t);
+      }
+
+      // line 2b: where a redirect points, as plain text. The slug above already follows the
+      // redirect, so one third-party navigation per row is enough. A redirect published
+      // before meta carried the target has nothing to show here until its next update.
+      if (a.type === 'redirect' && a.target) {
+        const t = document.createElement('div');
+        t.className = 'item-target';
+        t.textContent = '→ ' + a.target;
+        t.title = a.target;
         body.appendChild(t);
       }
 

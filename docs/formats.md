@@ -114,6 +114,12 @@ curl -X POST https://artifacts.example.com/api/artifacts \
   -d '{"type":"redirect","content":"https://example.com/pricing","slug":"pricing"}'
 ```
 
+The dashboard publishes one too: pick `redirect` in the New artifact form and the content box
+becomes a single Target URL field. The Frame control disappears too, because a redirect answers
+with a `Location` header and never reaches the viewer frame.
+
+<img src="screenshot-redirect-compose.png" alt="The New artifact form with type redirect selected, showing a Target URL field and no Frame control" width="700">
+
 Rules:
 
 - The target must be an absolute `http://` or `https://` URL. Anything else is a 400 at publish time, so a `javascript:` or `data:` target can never reach a viewer's browser.
@@ -124,7 +130,11 @@ Rules:
 - Visibility works the same as every other type. A private redirect with no capability link answers 404 on every path and never sends `Location`.
 - Search engines do not follow these. Every response from the server carries `X-Robots-Tag: noindex, nofollow`, which is the same rule that keeps artifacts out of search results.
 
-<img src="screenshot-redirect-list.png" alt="Two redirect artifacts in the dashboard list, each with a redirect badge" width="700">
+Each redirect row in the list shows where it points, under the slug. The target is carried in the
+list payload as `target`, alongside `type` and `slug`. A redirect published before that field
+existed shows no target until its next `PUT` writes one.
+
+<img src="screenshot-redirect-rows.png" alt="Two redirect artifacts in the dashboard list, each with a redirect badge and the URL it points at" width="700">
 
 ### What a redirect artifact costs you
 
