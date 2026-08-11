@@ -36,6 +36,32 @@ jobs:
           ARTIFACTS_ADMIN_USERNAME: ''
           ARTIFACTS_ADMIN_PASSWORD: ''
         run: npm test
+      - name: A rejected admin seed fails the boot
+        # npm test drives createAuthStore directly, so it never proves server.js turns the
+        # thrown AdminSeedError into an exit instead of an unhandled-rejection stack.
+        env:
+          ARTIFACTS_ADMIN_USERNAME: ci-admin
+          ARTIFACTS_ADMIN_PASSWORD: short
+          DATA_DIR: /tmp/artifacts-seed-check
+        run: |
+          rm -rf /tmp/artifacts-seed-check
+          set +e
+          # A regression here boots and listens instead of exiting, so bound the wait.
+          # timeout answers 124 on that, which fails the step in seconds, not at the job cap.
+          out=$(timeout 30 node server.js 2>&1)
+          code=$?
+          set -e
+          echo "$out"
+          [ "$code" = 1 ] || { echo "expected exit 1, got $code"; exit 1; }
+          case "$out" in
+            ARTIFACTS_ADMIN_PASSWORD\ rejected*) ;;
+            *) echo "expected the AdminSeedError line, got the above"; exit 1 ;;
+          esac
+          case "$out" in
+            *"at createAuthStore"*) echo "printed a stack trace"; exit 1 ;;
+          esac
+          [ ! -e /tmp/artifacts-seed-check/artifacts/auth.json ] \
+            || { echo "auth.json was written on the refused path"; exit 1; }
       - name: Boot server
         run: |
           node server.js &

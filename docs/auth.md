@@ -21,6 +21,25 @@ ARTIFACTS_ADMIN_USERNAME=admin
 ARTIFACTS_ADMIN_PASSWORD=<a strong password>
 ```
 
+### Seeding the admin from env
+
+Both routes enforce the same two rules:
+
+- Username: 3 to 32 characters from `a-z`, `A-Z`, `0-9`, `.`, `_` and `-`.
+- Password: at least 8 characters.
+
+The setup screen answers 400 on a value that breaks either rule. The env seed refuses to start
+and prints which rule failed:
+
+```
+ARTIFACTS_ADMIN_USERNAME / ARTIFACTS_ADMIN_PASSWORD rejected: password must be at least 8
+characters. Refusing to start. ...
+```
+
+Nothing is written on that path, so fix the two variables and boot again. The seed only runs
+when there is no admin yet, so a stale value in the environment cannot lock you out of an
+instance that already has one.
+
 ## Scopes
 
 | Scope | Grants |

@@ -4,6 +4,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   createAuthStore,
+  AdminSeedError,
   AuthFileError,
   capTtlDays,
   hashKey,
@@ -476,6 +477,81 @@ test('the env admin seed leaves an admin another replica already wrote alone', a
     delete process.env.ARTIFACTS_ADMIN_USERNAME;
     delete process.env.ARTIFACTS_ADMIN_PASSWORD;
   }
+});
+
+// The setup screen enforces an 8-character password and a 3-32 char [a-zA-Z0-9._-] username.
+// The env seed went straight to hashPassword, so a 3-character password seeded a real admin
+// that the dashboard would have refused to create.
+async function seedWith(username, password, record) {
+  process.env.ARTIFACTS_ADMIN_USERNAME = username;
+  process.env.ARTIFACTS_ADMIN_PASSWORD = password;
+  try {
+    return await createAuthStore(stubStorage(record || { version: 1, keys: [] }), {
+      apiKey: 'bootstrap',
+      baseUrl: 'http://localhost:3000',
+    });
+  } finally {
+    delete process.env.ARTIFACTS_ADMIN_USERNAME;
+    delete process.env.ARTIFACTS_ADMIN_PASSWORD;
+  }
+}
+
+test('the env admin seed refuses a password the setup screen would reject', async () => {
+  await assert.rejects(
+    () => seedWith('admin', 'short'),
+    (err) =>
+      err instanceof AdminSeedError &&
+      /at least 8 characters/.test(err.message) &&
+      err.message.startsWith('ARTIFACTS_ADMIN_PASSWORD rejected'),
+  );
+});
+
+test('the env admin seed refuses a username the setup screen would reject', async () => {
+  for (const username of ['ab', 'has space', 'a'.repeat(33), 'semi;colon']) {
+    await assert.rejects(
+      () => seedWith(username, 'long-enough-password'),
+      (err) =>
+        err instanceof AdminSeedError &&
+        /3-32 chars/.test(err.message) &&
+        err.message.startsWith('ARTIFACTS_ADMIN_USERNAME rejected'),
+      `username ${JSON.stringify(username)} should be refused`,
+    );
+  }
+});
+
+test('the env admin seed writes nothing when it refuses', async () => {
+  const storage = stubStorage({ version: 1, keys: [] });
+  process.env.ARTIFACTS_ADMIN_USERNAME = 'admin';
+  process.env.ARTIFACTS_ADMIN_PASSWORD = 'short';
+  try {
+    await assert.rejects(() =>
+      createAuthStore(storage, { apiKey: 'bootstrap', baseUrl: 'http://localhost:3000' }),
+    );
+  } finally {
+    delete process.env.ARTIFACTS_ADMIN_USERNAME;
+    delete process.env.ARTIFACTS_ADMIN_PASSWORD;
+  }
+  assert.equal(storage.files.has(AUTH_KEY), true);
+  assert.equal(JSON.parse(storage.files.get(AUTH_KEY).toString()).admin, undefined);
+});
+
+test('the env admin seed still creates an admin that passes both rules', async () => {
+  const store = await seedWith('ci-admin', 'ci-admin-password');
+
+  assert.equal(store.auth.admin.username, 'ci-admin');
+  assert.equal(typeof store.auth.admin.passwordHash, 'string');
+});
+
+// An instance that already has an admin never reads the two variables, so a stale or wrong
+// value in the environment must not lock the operator out of a running deployment.
+test('a bad env seed does not fail the boot when an admin already exists', async () => {
+  const store = await seedWith('ab', 'short', {
+    version: 1,
+    admin: { username: 'first', salt: 'salt0', passwordHash: 'hash0' },
+    keys: [],
+  });
+
+  assert.equal(store.auth.admin.username, 'first');
 });
 
 // Both secrets are HMAC keys every replica has to agree on. A replica that generated its own
