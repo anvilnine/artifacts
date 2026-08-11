@@ -132,6 +132,169 @@ echo "ok: md navbar theme toggle"
 
 curl -sf -X DELETE "$BASE/api/artifacts/ci-md" -H "$AUTH" > /dev/null
 
+# --- link previews: description + og:image in the heads the server renders ---
+# Two pages carry them, both built per request: the viewer frame (every type) and the md render.
+# A raw html view carries nothing, because those bytes are the author's document.
+curl -s -X DELETE "$BASE/api/artifacts/ci-preview" -H "$AUTH" > /dev/null
+curl -s -X DELETE "$BASE/api/artifacts/ci-preview-md" -H "$AUTH" > /dev/null
+
+code=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/api/artifacts" -H "$AUTH" -H "$JSON" \
+  -d '{"content":"<h1>preview</h1>","type":"html","slug":"ci-preview","visibility":"public","description":"what this page is","ogImage":"https://example.com/preview.png"}')
+expect_code 201 "$code" "publish with a description and an image"
+
+framed=$(curl -s "$BASE/a/ci-preview")
+printf '%s' "$framed" | grep -qF '<meta name="description" content="what this page is">' \
+  || fail "framed view is missing the plain description tag"
+printf '%s' "$framed" | grep -qF '<meta property="og:description" content="what this page is">' \
+  || fail "framed view is missing og:description"
+printf '%s' "$framed" | grep -qF '<meta property="og:image" content="https://example.com/preview.png">' \
+  || fail "framed view is missing og:image"
+printf '%s' "$framed" | grep -qF '<meta property="og:title" content="ci-preview">' \
+  || fail "framed view is missing og:title"
+# The canonical link, never the capability link: an unfurl outlives the paste it came from.
+printf '%s' "$framed" | grep -qF "<meta property=\"og:url\" content=\"$BASE/a/ci-preview\">" \
+  || fail "framed view og:url is not the canonical link"
+printf '%s' "$framed" | grep -qF 'content="summary_large_image"' \
+  || fail "an artifact with an image did not ask for the large card"
+echo "ok: framed view carries the link preview"
+
+# The author's own bytes stay the author's own bytes.
+raw=$(curl -s "$BASE/a/ci-preview?raw=1")
+if printf '%s' "$raw" | grep -q 'og:'; then fail "raw html view had preview tags spliced into it"; fi
+printf '%s' "$raw" | grep -qF '<h1>preview</h1>' || fail "raw html view lost its body"
+echo "ok: a raw html view is left alone"
+
+# md renders its own head, so it carries the tags with the frame off, where no frame runs.
+curl -sf -X POST "$BASE/api/artifacts" -H "$AUTH" -H "$JSON" \
+  -d '{"content":"# preview md","type":"md","slug":"ci-preview-md","visibility":"public","description":"a markdown page","frame":false}' > /dev/null \
+  || fail "could not publish the md artifact the preview check reads"
+mdpreview=$(curl -s "$BASE/a/ci-preview-md")
+if printf '%s' "$mdpreview" | grep -q '<iframe'; then fail "the md preview case ran through the frame"; fi
+printf '%s' "$mdpreview" | grep -qF '<meta property="og:description" content="a markdown page">' \
+  || fail "md render is missing og:description"
+printf '%s' "$mdpreview" | grep -qF 'content="summary"' \
+  || fail "an artifact with no image did not ask for the plain card"
+if printf '%s' "$mdpreview" | grep -q 'og:image'; then fail "md render invented an og:image"; fi
+echo "ok: md render carries the link preview"
+
+# A stored value naming a shell slot must not become the target of a later substitution. Before
+# the shells were filled in one pass, a description of {{CONTENT}} put the whole rendered markdown
+# body, unescaped, inside this attribute, and left the real body slot in the page as literal text.
+curl -sf -X PATCH "$BASE/api/artifacts/ci-preview-md" -H "$AUTH" -H "$JSON" \
+  -d '{"description":"{{CONTENT}}"}' > /dev/null || fail "could not set the placeholder description"
+hijack=$(curl -s "$BASE/a/ci-preview-md")
+printf '%s' "$hijack" | grep -qF '<meta name="description" content="{{CONTENT}}">' \
+  || fail "a description naming a shell slot was not rendered as itself"
+printf '%s' "$hijack" | grep -qF '<h1>preview md</h1>' \
+  || fail "a description naming a shell slot ate the page body"
+if printf '%s' "$hijack" | grep -q '^{{CONTENT}}$'; then fail "the content slot was left unfilled"; fi
+curl -sf -X PATCH "$BASE/api/artifacts/ci-preview-md" -H "$AUTH" -H "$JSON" \
+  -d '{"description":"a markdown page"}' > /dev/null
+echo "ok: a description naming a shell slot cannot steal it"
+
+# The tags follow the frame, so they reach every type, not only the two published above. A zip
+# site also pins the trailing slash in the canonical URL, which no other case here covers.
+curl -s -X DELETE "$BASE/api/artifacts/ci-preview-zip" -H "$AUTH" > /dev/null
+zip_preview=$(mktemp -d)
+printf '<h1>zip preview</h1>' > "$zip_preview/index.html"
+(cd "$zip_preview" && zip -q -r site.zip index.html)
+code=$(curl -s -o /dev/null -w '%{http_code}' -X POST \
+  "$BASE/api/artifacts/zip?slug=ci-preview-zip&visibility=public&description=a%20whole%20site&ogImage=https%3A%2F%2Fexample.com%2Fsite.png" \
+  -H "$AUTH" -H 'Content-Type: application/zip' --data-binary @"$zip_preview/site.zip")
+expect_code 201 "$code" "zip publish with preview fields on the query string"
+zipframed=$(curl -s "$BASE/a/ci-preview-zip/")
+printf '%s' "$zipframed" | grep -qF '<meta property="og:description" content="a whole site">' \
+  || fail "a zip site's framed view is missing og:description"
+printf '%s' "$zipframed" | grep -qF "<meta property=\"og:url\" content=\"$BASE/a/ci-preview-zip/\">" \
+  || fail "a zip site's og:url is missing the trailing slash"
+# And the query string answers to the same rules the JSON body does.
+code=$(curl -s -o /dev/null -w '%{http_code}' -X POST \
+  "$BASE/api/artifacts/zip?slug=ci-preview-zip-2&ogImage=%2Frelative.png" \
+  -H "$AUTH" -H 'Content-Type: application/zip' --data-binary @"$zip_preview/site.zip")
+expect_code 400 "$code" "zip publish with a relative ogImage"
+rm -r "$zip_preview"
+curl -sf -X DELETE "$BASE/api/artifacts/ci-preview-zip" -H "$AUTH" > /dev/null
+echo "ok: a zip site carries the preview, query string included"
+
+# A title reaches og:title. Every other case here has no title, so dropping the title from the
+# tag would leave them all green.
+curl -sf -X PUT "$BASE/api/artifacts/ci-preview" -H "$AUTH" -H "$JSON" \
+  -d '{"content":"<h1>preview</h1>","type":"html","title":"A Real Title"}' > /dev/null \
+  || fail "could not set a title on ci-preview"
+curl -s "$BASE/a/ci-preview" | grep -qF '<meta property="og:title" content="A Real Title">' \
+  || fail "og:title does not carry the stored title"
+# Every response stays out of a search index, which is what keeps these tags a preview feature
+# rather than an SEO one. The docs say so; nothing asserted it before.
+curl -s -D - -o /dev/null "$BASE/a/ci-preview" | grep -qi '^X-Robots-Tag: noindex, nofollow' \
+  || fail "a framed page with a preview lost its noindex header"
+echo "ok: og:title carries the title, and the page is still noindex"
+
+# A private artifact's og:url is the permanent link, not the capability link it was reached
+# through. On a public artifact the two strings are identical, so no case above can tell them
+# apart, and pasting a live token into every unfurl is the failure that matters most here.
+priv_url=$(curl -s -X POST "$BASE/api/artifacts" -H "$AUTH" -H "$JSON" \
+  -d '{"content":"# private preview","type":"md","slug":"ci-preview-priv","visibility":"private","description":"a private page"}' \
+  | sed -n 's/.*"url":"\([^"]*\)".*/\1/p')
+case "$priv_url" in
+  *'?k='*) ;;
+  *) fail "publishing a private artifact returned no capability link ($priv_url)" ;;
+esac
+# The capability link 302s and sets the per-slug unlock cookie, so the page needs a jar: without
+# one the followed request arrives with no cookie and answers 404, the same as a stranger's.
+priv_jar=$(mktemp)
+curl -s -c "$priv_jar" -o /dev/null "$priv_url"
+privpage=$(curl -s -b "$priv_jar" "$BASE/a/ci-preview-priv")
+rm "$priv_jar"
+printf '%s' "$privpage" | grep -qF "<meta property=\"og:url\" content=\"$BASE/a/ci-preview-priv\">" \
+  || fail "a private artifact's og:url is not the bare canonical link"
+if printf '%s' "$privpage" | grep -q 'og:url[^>]*k='; then fail "og:url carried a capability token"; fi
+curl -sf -X DELETE "$BASE/api/artifacts/ci-preview-priv" -H "$AUTH" > /dev/null
+echo "ok: og:url is the permanent link, never the capability link"
+
+# Both fields ride the list, so the dashboard can show what is set without fetching each page.
+preview_row=$(curl -s -H "$AUTH" "$BASE/api/artifacts" | tr '{' '\n' | grep '"slug":"ci-preview"' || true)
+printf '%s' "$preview_row" | grep -qF '"description":"what this page is"' \
+  || fail "list is missing description (row: $preview_row)"
+printf '%s' "$preview_row" | grep -qF '"ogImage":"https://example.com/preview.png"' \
+  || fail "list is missing ogImage (row: $preview_row)"
+echo "ok: the list carries both preview fields"
+
+# A content-only PUT keeps them, the way it keeps tags and project.
+curl -sf -X PUT "$BASE/api/artifacts/ci-preview" -H "$AUTH" -H "$JSON" \
+  -d '{"content":"<h1>preview 2</h1>","type":"html"}' > /dev/null \
+  || fail "could not overwrite ci-preview"
+curl -s "$BASE/a/ci-preview" | grep -qF 'content="what this page is"' \
+  || fail "a content-only PUT dropped the description"
+echo "ok: a content-only PUT keeps the preview"
+
+# '' clears one field and leaves the other alone.
+curl -sf -X PATCH "$BASE/api/artifacts/ci-preview" -H "$AUTH" -H "$JSON" -d '{"description":""}' > /dev/null
+cleared=$(curl -s "$BASE/a/ci-preview")
+if printf '%s' "$cleared" | grep -q 'og:description'; then fail "an empty description did not clear"; fi
+printf '%s' "$cleared" | grep -qF 'og:image' || fail "clearing the description also cleared the image"
+echo "ok: an empty description clears just that field"
+
+# Refusals. Each one is a 400 rather than a silent drop, so a typo is visible at publish time.
+for bad in '{"ogImage":"/preview.png"}' '{"ogImage":"//example.com/p.png"}' \
+  '{"ogImage":"javascript:alert(1)"}' '{"ogImage":"data:image/png;base64,AAAA"}' \
+  '{"ogImage":"https://alice:s3cret@example.com/p.png"}' '{"ogImage":5}' '{"description":5}'; do
+  code=$(curl -s -o /dev/null -w '%{http_code}' -X PATCH "$BASE/api/artifacts/ci-preview" \
+    -H "$AUTH" -H "$JSON" -d "$bad")
+  expect_code 400 "$code" "refused preview field $bad"
+done
+# 301 chars: one over the cap, checked after whitespace collapses.
+long_desc=$(printf 'x%.0s' $(seq 301))
+code=$(curl -s -o /dev/null -w '%{http_code}' -X PATCH "$BASE/api/artifacts/ci-preview" \
+  -H "$AUTH" -H "$JSON" -d "{\"description\":\"$long_desc\"}")
+expect_code 400 "$code" "over-long description"
+# And the refusals stored nothing: the image from the publish above is still the one served.
+curl -s "$BASE/a/ci-preview" | grep -qF '<meta property="og:image" content="https://example.com/preview.png">' \
+  || fail "a refused preview field overwrote the stored one"
+echo "ok: preview field validation"
+
+curl -sf -X DELETE "$BASE/api/artifacts/ci-preview" -H "$AUTH" > /dev/null
+curl -sf -X DELETE "$BASE/api/artifacts/ci-preview-md" -H "$AUTH" > /dev/null
+
 # --- redirects: a real 301 to the stored target, not a JS bounce ---
 # %{redirect_url} is curl's parsed Location, so these compare the whole value instead of
 # grepping a header line where an unanchored pattern would match a longer target.

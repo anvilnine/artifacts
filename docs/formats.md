@@ -152,6 +152,58 @@ Publishing one turns your domain into an open redirector for that slug. Anyone w
 
 The server never fetches the target. A target on `localhost`, a private range, or `169.254.169.254` only reaches whoever clicks the link, so there is no server-side request forgery here. A target pointing back at its own slug loops until the visitor's browser gives up, which is a nuisance for that visitor and nothing more.
 
+## Link previews
+
+Two optional fields decide what a chat app shows when someone pastes an artifact link:
+`description` (one line, max 300 chars) and `ogImage` (an absolute `http(s)` URL, another
+artifact's URL included). Set them on `POST` / `PUT` / `PATCH`, on the zip endpoint's query
+string, from the row menu in the dashboard ("Description…" and "Preview image…"), or with the
+`description` and `ogImage` arguments on the `publish_artifact` and `update_artifact` MCP tools.
+
+The tags land in the two pages the server builds per request:
+
+- The **viewer frame**, which is what a top-level visit to `/a/<slug>` gets while frames are on.
+  This covers every type, html included.
+- The **markdown render**, so an md artifact carries them with the frame off too.
+
+They do not land anywhere else, and that is deliberate. An `html` artifact is served as-is, and a
+`jsx` artifact's page is baked at publish time, so writing tags into either means editing bytes the
+author wrote and re-editing them on the next metadata change. `?raw=1` on an html, jsx or zip
+artifact returns what was uploaded, tags included in neither. An md artifact is the exception: it
+renders through the same shell either way, so `?raw=1` carries the tags too. What always returns the
+bytes as uploaded is `GET /a/:slug/source`.
+
+Two consequences worth knowing before you set the fields:
+
+- **An html, jsx or zip artifact needs the frame.** With `frame:false` on the artifact, or
+  `FRAME_ENABLED=false` on the server, nothing wraps those types and no preview tag renders
+  anywhere. The fields still store and still list. Only md carries them with no frame.
+- **A redirect stores them and renders nothing**, because it answers `301` with no page at all.
+  Same shape as the `frame` field on a redirect, which is also stored and never used. The dashboard
+  hides both items on a redirect row; the API and the MCP tools take them without complaint.
+
+Rendered per request, so an edit shows up on the next view with nothing to rebuild. What gets
+written:
+
+```html
+<meta name="description" content="...">          <!-- only with a description -->
+<meta property="og:title" content="...">          <!-- the title, or the slug -->
+<meta property="og:url" content="...">            <!-- the permanent /a/<slug> link -->
+<meta property="og:type" content="website">
+<meta property="og:description" content="...">    <!-- only with a description -->
+<meta property="og:image" content="...">          <!-- only with an image -->
+<meta name="twitter:card" content="summary">      <!-- summary_large_image with an image -->
+```
+
+`og:url` is the permanent link, never a `?k=` capability link: an unfurl outlives the message it
+appeared in, and a capability token expires and can be revoked. A locked artifact leaks nothing
+either way, because the visibility gate runs before any page is built, so an unfurler holding no
+token gets the same `404` a stranger gets.
+
+None of this makes an artifact searchable. Every response still carries
+`X-Robots-Tag: noindex, nofollow`, and both shells still carry `<meta name="robots" content="noindex, nofollow">`.
+The fields are for the preview card in a chat window, not for a search result.
+
 ## Viewer frame
 
 Every type above except redirects can render inside a slim top **frame** — a toolbar with the title, a copy-link button, and a hide toggle — with the artifact itself isolated in an iframe. Toggle it globally from the web UI's **Settings** panel (or `artifacts config`), and override it per artifact (`artifacts frame <slug> on|off|default`). Append `?raw=1` to any URL to view the artifact with no frame. Full behavior in [docs/api.md](api.md#viewer-frame).

@@ -35,6 +35,10 @@ import { createConfigStore } from './lib/config.js';
 import { ApiError } from './lib/errors.js';
 import { qrPng, qrSvg } from './lib/qr.js';
 import { parseRedirectTarget, resolveRedirectTarget } from './lib/redirect.js';
+import { fillShell } from './lib/shells.js';
+import {
+  dropIfRefused, escapeHtml, parseDescription, parseOgImage, socialTags,
+} from './lib/social.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -241,12 +245,14 @@ function buildJsxHtml(source, title) {
     .replace(/export\s+default\s+/, 'const __ArtifactDefault = ')
     .replaceAll('</script', '<\\/script');
 
-  // Function replacements avoid `$`-substitution ($&, $`, $$, …) in the injected values —
-  // a title or source containing those must be spliced verbatim, not interpreted.
-  return JSX_SHELL
-    .replace('{{TITLE}}', () => escapeHtml(title))
-    .replace('{{IMPORT_MAP}}', () => JSON.stringify({ imports }, null, 2))
-    .replace('{{SOURCE}}', () => rewritten);
+  // One pass, so no value can land in the text a later substitution searches: a title of
+  // "{{SOURCE}}" used to steal the source slot. fillShell also keeps `$`-substitution out
+  // ($&, $`, $$, …), which a title or a source must carry verbatim.
+  return fillShell(JSX_SHELL, {
+    TITLE: escapeHtml(title),
+    IMPORT_MAP: JSON.stringify({ imports }, null, 2),
+    SOURCE: rewritten,
+  });
 }
 
 const MD_FONT_STACKS = {
@@ -257,14 +263,16 @@ const MD_FONT_STACKS = {
 const MD_WIDTH_PX = { narrow: '640px', normal: '760px', wide: '900px' };
 const MD_SIZE_PX  = { small: '15px', normal: '16px', large: '18px' };
 
-function buildMdHtml(source, title, mdCfg = config.current.md) {
-  return MD_SHELL
-    .replaceAll('{{TITLE}}', () => escapeHtml(title))
-    .replace('{{FONT}}', () => MD_FONT_STACKS[mdCfg.font])
-    .replace('{{MAXWIDTH}}', () => MD_WIDTH_PX[mdCfg.width])
-    .replace('{{FONTSIZE}}', () => MD_SIZE_PX[mdCfg.size])
-    .replaceAll('{{THEME}}', () => mdCfg.theme)
-    .replace('{{CONTENT}}', () => marked.parse(source));
+function buildMdHtml(source, meta, mdCfg = config.current.md) {
+  return fillShell(MD_SHELL, {
+    TITLE: escapeHtml(meta.title || meta.slug),
+    SOCIAL: socialTags(meta, canonicalUrl(meta)),
+    FONT: MD_FONT_STACKS[mdCfg.font],
+    MAXWIDTH: MD_WIDTH_PX[mdCfg.width],
+    FONTSIZE: MD_SIZE_PX[mdCfg.size],
+    THEME: mdCfg.theme,
+    CONTENT: marked.parse(source),
+  });
 }
 
 // md artifacts render at serve time so a config change shows up on the next view. That
@@ -293,7 +301,7 @@ function renderMd(slug, meta, source, mdCfg = config.current.md) {
     mdRenderCache.set(key, hit);
     return hit;
   }
-  const html = buildMdHtml(source, meta.title || slug, mdCfg);
+  const html = buildMdHtml(source, meta, mdCfg);
   mdRenderCache.set(key, html);
   mdCacheBytes += html.length;
   while (mdCacheBytes > MD_CACHE_MAX_BYTES && mdRenderCache.size > 1) {
@@ -315,36 +323,25 @@ function dropMdRender(slug) {
 }
 
 // Parent "frame" page: a slim toolbar with the artifact loaded in an iframe.
-// Function replacements avoid `$`-substitution in the escaped values.
 function buildFrameHtml(meta, rawUrl) {
-  const title = escapeHtml(meta.title || meta.slug);
-  const url = escapeHtml(rawUrl);
-  const themeBtn = meta.type === 'md'
-    ? '<button id="theme" type="button" title="Cycle theme (auto, light, dark)">Auto</button>'
-    : '';
-  return FRAME_SHELL
-    .replaceAll('{{TITLE}}', () => title)
-    .replaceAll('{{RAW_URL}}', () => url)
-    .replace('{{THEME_BTN}}', () => themeBtn);
+  return fillShell(FRAME_SHELL, {
+    TITLE: escapeHtml(meta.title || meta.slug),
+    SOCIAL: socialTags(meta, canonicalUrl(meta)),
+    RAW_URL: escapeHtml(rawUrl),
+    THEME_BTN: meta.type === 'md'
+      ? '<button id="theme" type="button" title="Cycle theme (auto, light, dark)">Auto</button>'
+      : '',
+  });
 }
 
 // Unlock prompt for password-mode artifacts. Renders no title and no mode label so it
 // discloses nothing about the artifact to someone who only holds the URL.
 function buildPromptHtml(meta) {
-  return PASSWORD_SHELL.replaceAll('{{SLUG}}', () => escapeHtml(meta.slug));
+  return fillShell(PASSWORD_SHELL, { SLUG: escapeHtml(meta.slug) });
 }
 
 function buildNotFoundHtml() {
   return NOT_FOUND_SHELL;
-}
-
-function escapeHtml(s) {
-  return s
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&#39;');
 }
 
 async function readMeta(slug) {
@@ -447,13 +444,15 @@ function extractSiteFiles(zip) {
   return files;
 }
 
-async function saveZipArtifact(buffer, { slug, title, expiresAt, tags, project, visibility, password }) {
+async function saveZipArtifact(buffer, { slug, title, description, ogImage, expiresAt, tags, project, visibility, password }) {
   if (slug !== undefined && !SLUG_RE.test(slug)) {
     throw new ApiError(400, 'slug must match [a-z0-9][a-z0-9-]{2,63}');
   }
   const expiry = expiresAt !== undefined ? parseExpiresAt(expiresAt) : undefined;
   const tagList = tags !== undefined ? parseTags(tags) : undefined;
   const projectName = project !== undefined ? parseProject(project) : undefined;
+  const summary = description !== undefined ? parseDescription(description) : undefined;
+  const previewImage = ogImage !== undefined ? parseOgImage(ogImage) : undefined;
   // Zip artifacts are always new (no inline-replace path), so resolve the default here.
   const vis = visibility !== undefined ? visibility : DEFAULT_VISIBILITY;
   if (!VISIBILITIES.includes(vis)) {
@@ -490,6 +489,8 @@ async function saveZipArtifact(buffer, { slug, title, expiresAt, tags, project, 
   if (expiry !== undefined) meta.expiresAt = expiry;
   if (tagList?.length) meta.tags = tagList;
   if (projectName) meta.project = projectName;
+  if (summary) meta.description = summary;
+  if (previewImage) meta.ogImage = previewImage;
   if (vis === 'password') {
     meta.visibility = 'password';
     meta.password = await hashPassword(password);
@@ -569,7 +570,7 @@ function isExpired(meta) {
   return Boolean(meta.expiresAt && Date.parse(meta.expiresAt) <= Date.now());
 }
 
-async function saveArtifact({ content, type = 'html', slug, title, expiresAt, frame, tags, project, visibility, password }, { replace = false } = {}) {
+async function saveArtifact({ content, type = 'html', slug, title, description, ogImage, expiresAt, frame, tags, project, visibility, password }, { replace = false } = {}) {
   if (typeof content !== 'string' || !content.trim()) {
     throw new ApiError(400, 'content (non-empty string) is required');
   }
@@ -585,6 +586,8 @@ async function saveArtifact({ content, type = 'html', slug, title, expiresAt, fr
   const expiry = expiresAt !== undefined ? parseExpiresAt(expiresAt) : undefined;
   const tagList = tags !== undefined ? parseTags(tags) : undefined;
   const projectName = project !== undefined ? parseProject(project) : undefined;
+  const summary = description !== undefined ? parseDescription(description) : undefined;
+  const previewImage = ogImage !== undefined ? parseOgImage(ogImage) : undefined;
   if (!TYPES.includes(type)) {
     throw new ApiError(400, `type must be one of: ${TYPES.join(', ')}`);
   }
@@ -638,6 +641,10 @@ async function saveArtifact({ content, type = 'html', slug, title, expiresAt, fr
   if (frame !== undefined) meta.frame = frame;
   if (tagList !== undefined) meta.tags = tagList.length ? tagList : undefined;
   if (projectName !== undefined) meta.project = projectName || undefined;
+  // Both keep their stored value when the field is absent, the way tags and project do, so a
+  // content-only PUT does not wipe a preview someone set from the dashboard.
+  if (summary !== undefined) meta.description = summary || undefined;
+  if (previewImage !== undefined) meta.ogImage = previewImage || undefined;
   // New artifacts with no explicit visibility take DEFAULT_VISIBILITY. Replacing an
   // existing artifact with no visibility arg preserves whatever it had (carried by the
   // `...existing` spread), so an overwrite never silently flips access.
@@ -698,6 +705,17 @@ async function duplicateArtifact(sourceSlug, body = {}) {
   const tagList = body.tags !== undefined ? parseTags(body.tags) : source.tags;
   const projectName = body.project !== undefined ? parseProject(body.project) : source.project;
   const expiry = body.expiresAt !== undefined ? parseExpiresAt(body.expiresAt) : source.expiresAt;
+  // Inherited values go through the same parsers, for the reason the redirect block below gives:
+  // a copy is a publish, and meta written by an older build (or by hand) has met no rule. A stored
+  // value this build refuses is left off the copy rather than carried into it, and unlike a
+  // refused redirect target it does not take the copy down: a preview that does not survive is
+  // cosmetic, while a redirect that loses its target points nowhere.
+  const summary = body.description !== undefined
+    ? parseDescription(body.description)
+    : dropIfRefused(parseDescription, source.description);
+  const previewImage = body.ogImage !== undefined
+    ? parseOgImage(body.ogImage)
+    : dropIfRefused(parseOgImage, source.ogImage);
 
   let frame;
   if (body.frame !== undefined) {
@@ -751,6 +769,8 @@ async function duplicateArtifact(sourceSlug, body = {}) {
   if (expiry !== undefined) meta.expiresAt = expiry;
   if (tagList && tagList.length) meta.tags = tagList;
   if (projectName) meta.project = projectName;
+  if (summary) meta.description = summary;
+  if (previewImage) meta.ogImage = previewImage;
   if (frame !== undefined) meta.frame = frame;
   if (visibility === 'password') {
     meta.visibility = 'password';
@@ -783,7 +803,7 @@ function seedTokenEpoch(meta) {
 // what the dashboard/API legitimately need; secrets (password) and internal state
 // (tokenEpoch) are dropped, and hasPassword exposes state without the hash.
 const PUBLIC_META_FIELDS = [
-  'slug', 'type', 'title', 'files', 'target', 'createdAt', 'updatedAt',
+  'slug', 'type', 'title', 'files', 'target', 'description', 'ogImage', 'createdAt', 'updatedAt',
   'expiresAt', 'frame', 'tags', 'project', 'visibility', 'disabled',
 ];
 function publicMeta(meta) {
@@ -822,6 +842,13 @@ async function patchArtifact(slug, patch) {
   if (!meta) {
     throw new ApiError(404, `slug "${slug}" not found`);
   }
+
+  // Parsed before the rename below, because the rename moves storage: a patch carrying both a new
+  // slug and a value this refuses would otherwise move the artifact and then throw, leaving a list
+  // row whose link is dead and a live URL that appears in no row. The other fields in this
+  // function still validate after the move, which is the same shape and is filed as its own item.
+  const summary = patch.description !== undefined ? parseDescription(patch.description) : undefined;
+  const previewImage = patch.ogImage !== undefined ? parseOgImage(patch.ogImage) : undefined;
 
   let activeSlug = slug;
   if (patch.slug !== undefined && patch.slug !== slug) {
@@ -866,6 +893,9 @@ async function patchArtifact(slug, patch) {
     const project = parseProject(patch.project);
     meta.project = project || undefined; // '' clears it
   }
+
+  if (summary !== undefined) meta.description = summary || undefined; // '' clears it
+  if (previewImage !== undefined) meta.ogImage = previewImage || undefined; // '' clears it
 
   if (patch.visibility !== undefined || patch.password !== undefined) {
     if (patch.visibility !== undefined && !VISIBILITIES.includes(patch.visibility)) {
@@ -1346,8 +1376,8 @@ app.post('/api/artifacts/zip', requireAuth('publish'), zipBody, async (req, res,
     if (!Buffer.isBuffer(req.body) || !req.body.length) {
       throw new ApiError(400, 'raw zip body required (Content-Type: application/zip)');
     }
-    const { slug, title, expiresAt, tags, project, visibility, password } = req.query;
-    res.status(201).json(await saveZipArtifact(req.body, { slug, title, expiresAt, tags, project, visibility, password }));
+    const { slug, title, description, ogImage, expiresAt, tags, project, visibility, password } = req.query;
+    res.status(201).json(await saveZipArtifact(req.body, { slug, title, description, ogImage, expiresAt, tags, project, visibility, password }));
   } catch (err) {
     next(err);
   }
@@ -1663,6 +1693,14 @@ function createMcpServer(scopes = SCOPES) {
           .optional()
           .describe('Custom URL slug: 3-64 chars of [a-z0-9-], starting with a letter or digit'),
         title: z.string().optional(),
+        description: z
+          .string()
+          .optional()
+          .describe('One-line summary for a link preview (max 300 chars). Rendered into the head of the viewer frame and of a md artifact, never into the author\'s own HTML'),
+        ogImage: z
+          .string()
+          .optional()
+          .describe('Absolute http(s) URL of the preview image (og:image). Another artifact URL works; a relative path does not, because the unfurler fetches it on its own'),
         expiresAt: z
           .string()
           .optional()
@@ -1707,6 +1745,14 @@ function createMcpServer(scopes = SCOPES) {
         content: z.string(),
         type: z.enum(['html', 'jsx', 'tsx', 'md', 'redirect']).default('html'),
         title: z.string().optional(),
+        description: z
+          .string()
+          .optional()
+          .describe('Link-preview summary (max 300 chars); omit to keep the current one, pass "" to clear it'),
+        ogImage: z
+          .string()
+          .optional()
+          .describe('Absolute http(s) URL of the preview image; omit to keep the current one, pass "" to clear it'),
         frame: z
           .boolean()
           .optional()

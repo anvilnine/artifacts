@@ -12,8 +12,8 @@ Every tool the server registers. `?` marks an optional argument.
 
 | Tool | Args | Returns |
 |---|---|---|
-| `publish_artifact` | `content`, `type?`, `slug?`, `title?`, `expiresAt?`, `frame?`, `tags?`, `project?`, `visibility?`, `password?` | share URL (tokened for private/password) |
-| `update_artifact` | `slug`, `content`, `type?`, `title?`, `frame?`, `tags?`, `project?`, `visibility?`, `password?` | share URL (tokened for private/password) |
+| `publish_artifact` | `content`, `type?`, `slug?`, `title?`, `description?`, `ogImage?`, `expiresAt?`, `frame?`, `tags?`, `project?`, `visibility?`, `password?` | share URL (tokened for private/password) |
+| `update_artifact` | `slug`, `content`, `type?`, `title?`, `description?`, `ogImage?`, `frame?`, `tags?`, `project?`, `visibility?`, `password?` | share URL (tokened for private/password) |
 | `rename_artifact` | `slug`, `newSlug` | new share URL (tokened for private/password) |
 | `set_artifact_expiry` | `slug`, `expiresAt` (ISO 8601, or `null` to clear) | confirmation |
 | `set_artifact_tags` | `slug`, `tags` (full list; empty array clears) | confirmation |
@@ -26,6 +26,11 @@ Every tool the server registers. `?` marks an optional argument.
 | `delete_artifact` | `slug` | confirmation |
 
 `type` is `html` (the default), `jsx`, `tsx`, `md`, or `redirect`.
+
+`description` and `ogImage` are the link-preview fields: the line and the image a chat app shows
+when someone pastes the URL. `ogImage` needs a full `http(s)` URL, because the chat app fetches it
+from its own base. Both render into the viewer frame and into a markdown page, never into an
+author's own HTML. Details in [Link previews](formats.md#link-previews).
 
 `frame` on a single artifact only decides anything while the server has frames switched on. With
 `FRAME_ENABLED=false` nothing is framed and `frame: true` changes nothing, so a client that gets no

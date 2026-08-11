@@ -1342,6 +1342,9 @@
           input.setAttribute('autocorrect', 'off');
         }
         if (opts.placeholder) input.placeholder = opts.placeholder;
+        // Stop at the server's cap in the browser, the way the tag input caps a tag at 32, so a
+        // refusal a user cannot see coming never happens.
+        if (opts.maxlength) input.maxLength = opts.maxlength;
         if (opts.list) { input.setAttribute('list', opts.list); input.autocomplete = 'off'; }
         input.addEventListener('keydown', (e) => { if (e.key === 'Enter') finish(input.value); });
         box.appendChild(input);
@@ -1430,6 +1433,29 @@
     }
     if (u.username || u.password) {
       return 'Remove the username and password before the host. A redirect is a public hop, so anyone who follows it gets them.';
+    }
+    if (u.href.length > 2048) {
+      return 'Too long once encoded (' + u.href.length + ' characters, limit 2048).';
+    }
+    return null;
+  }
+
+  // Same job for a preview image, and the same reason. Not badTarget: these rules are the ones in
+  // lib/social.js, and the reasons differ. A redirect is a hop a visitor follows, while this URL is
+  // fetched by whichever chat app renders the card.
+  function badPreviewImage(url) {
+    let u;
+    try {
+      u = new URL(url);
+    } catch {
+      return 'Needs a whole URL, starting with http:// or https://.';
+    }
+    if (u.protocol !== 'http:' && u.protocol !== 'https:') {
+      return 'Only http:// and https:// work. A chat app fetches this URL itself and cannot read '
+        + u.protocol + ' from your machine.';
+    }
+    if (u.username || u.password) {
+      return 'Remove the username and password before the host. Every chat app that renders the card gets them.';
     }
     if (u.href.length > 2048) {
       return 'Too long once encoded (' + u.href.length + ' characters, limit 2048).';
@@ -1763,6 +1789,59 @@
           if (v === null) return;
           patchItem(a, { project: v.trim() }, { project: v.trim() || undefined });
         });
+
+        // Link preview: the text and image a chat app shows when someone pastes the URL. A
+        // redirect answers 301 with no page, so there is nowhere to render them and both items
+        // stay off that row, unless a value is already stored, in which case hiding the item
+        // would leave something set that nothing here can show or clear.
+        //
+        // Where the preview shows up depends on the frame for every type except md, and Frame
+        // sits two items above this one, so each dialog says so rather than leaving a user to
+        // set a description that renders nowhere.
+        const previewNote = a.type === 'md' ? ''
+          : ' Shows while this artifact has the top frame on, which is where the tags live.';
+        if (a.type !== 'redirect' || a.description || a.ogImage) {
+          menuItem(menu, 'Description…', a.description ? 'on' : '', async () => {
+            const v = await dialog({
+              title: 'Description for “' + a.slug + '”',
+              body: 'One line a chat app shows under the title when someone pastes this link.'
+                + previewNote + ' Empty clears it.',
+              input: true, value: a.description || '', maxlength: 300,
+              placeholder: 'what this page is',
+            });
+            if (v === null) return;
+            // Collapse runs of whitespace the way the server does, so the row and the next open
+            // of this dialog show what is actually stored.
+            const text = v.replace(/\s+/g, ' ').trim();
+            patchItem(a, { description: text }, { description: text || undefined });
+          });
+
+          // Checked before sending, the way Target… is: a refused value reopens the box holding
+          // what was typed, with the reason above it. A long URL with one typo in it should not
+          // have to be typed twice, and the toast from a server refusal names the API's field.
+          menuItem(menu, 'Preview image…', a.ogImage ? 'on' : '', async () => {
+            const explain = 'Image a chat app shows with this link. Needs a whole URL starting'
+              + ' with http:// or https://, another artifact\'s URL included, because the chat app'
+              + ' fetches the image itself.' + previewNote + ' Empty clears it.';
+            let value = a.ogImage || '';
+            let why = '';
+            for (;;) {
+              const v = await dialog({
+                title: 'Preview image for “' + a.slug + '”',
+                body: why ? why + ' ' + explain : explain,
+                input: true, url: true, value,
+                placeholder: 'https://example.com/preview.png',
+              });
+              if (v === null) return;
+              const url = v.trim();
+              if (!url) return patchItem(a, { ogImage: '' }, { ogImage: undefined });
+              if (url === (a.ogImage || '')) return;
+              why = badPreviewImage(url);
+              if (!why) return patchItem(a, { ogImage: url }, { ogImage: url });
+              value = url;
+            }
+          });
+        }
 
         menuItem(menu, 'Rename…', '', async () => {
           const v = await dialog({
