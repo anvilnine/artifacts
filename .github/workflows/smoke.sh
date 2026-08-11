@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 # End-to-end smoke test against a running artifacts-host instance.
 # Usage: smoke.sh <base-url> <api-key>
+#
+# The key has to be the bootstrap key (ARTIFACTS_API_KEY) or an admin session. The MCP scope
+# block mints a managed key, and POST /api/keys is admin-only: a managed key cannot manage
+# keys, however many scopes it holds. Everything else in this file works with any full key.
 set -euo pipefail
 
 BASE=$1
@@ -501,7 +505,7 @@ mcp_version=$(printf '%s' "$mcp_init" | sed -n 's/.*"serverInfo":{[^}]*"version"
 [ "$mcp_version" = "$pkg_version" ] || fail "MCP serverInfo version '$mcp_version' != package.json '$pkg_version'"
 echo "ok: MCP serverInfo version matches package.json"
 
-# --- MCP tools: the list matches what server.js registers, and publish/list/delete round-trip ---
+# --- MCP tools: the list matches what server.js registers, and publish/list/tags/delete round-trip ---
 # The transport is stateless (sessionIdGenerator: undefined), so each POST stands on its own
 # and tools/list needs no initialize before it. Until now the suite only called initialize,
 # so a tool that threw on every call still shipped green.
@@ -539,6 +543,13 @@ registered_tools=$(grep -c '^  server.registerTool(' "$REPO_DIR/server.js" || tr
   || fail "MCP tools/list served $listed_tools tools, server.js registers $registered_tools"
 echo "ok: MCP tools/list serves all $registered_tools registered tools"
 
+# Clear both slugs this block uses before claiming them. An abort anywhere between here and
+# the delete at the end leaves ci-mcp published, and MCP publish 409s on a duplicate slug, so
+# without this one failed run makes every later run against the same instance fail at the
+# line below for an unrelated reason. Both DELETEs tolerate a 404.
+curl -s -X DELETE "$BASE/api/artifacts/ci-mcp" -H "$AUTH" > /dev/null
+curl -s -X DELETE "$BASE/api/artifacts/ci-mcp-denied" -H "$AUTH" > /dev/null
+
 mcp_pub=$(mcp_call 3 tools/call \
   '{"name":"publish_artifact","arguments":{"content":"<h1>mcp</h1>","type":"html","slug":"ci-mcp","visibility":"public"}}')
 mcp_url=$(printf '%s' "$mcp_pub" | mcp_text)
@@ -553,67 +564,76 @@ mcp_list=$(mcp_call 4 tools/call '{"name":"list_artifacts","arguments":{}}')
 printf '%s' "$mcp_list" | grep -q 'ci-mcp' || fail "MCP list_artifacts omits the artifact it just published"
 echo "ok: MCP list_artifacts"
 
-# A mutating tool past publish. Registering a tool and writing its handler are independent
-# (the metadata at server.js registerTool is what tools/list serves), so a handler that
-# throws on every call still passes every check above. The result text is not the proof
-# here: the tag is read back over the REST API, which is a different code path from the one
-# that claims to have set it.
+# A mutating tool past publish. tools/list serves only the metadata passed to
+# server.registerTool, so the count check above passes for a tool whose handler throws on
+# every call. Before this, publish_artifact and list_artifacts were the only handlers CI ran.
+# The tag is read back over the REST API, a different code path from the one that claims to
+# have set it, so the tool's own result text is not what the check rests on.
 mcp_tagged=$(mcp_call 5 tools/call \
   '{"name":"set_artifact_tags","arguments":{"slug":"ci-mcp","tags":["ci-mcp-tag"]}}')
 if printf '%s' "$mcp_tagged" | grep -q '"isError":true'; then
   fail "MCP set_artifact_tags errored ($(printf '%s' "$mcp_tagged" | tr '\n' ' '))"
 fi
-curl -s -H "$AUTH" "$BASE/api/artifacts?tag=ci-mcp-tag" | grep -q '"slug":"ci-mcp"' \
-  || fail "MCP set_artifact_tags reported success, but the tag filter does not return ci-mcp"
+mcp_tag_filter=$(curl -s -H "$AUTH" "$BASE/api/artifacts?tag=ci-mcp-tag")
+printf '%s' "$mcp_tag_filter" | grep -q '"slug":"ci-mcp"' \
+  || fail "MCP set_artifact_tags did not tag ci-mcp (call: $(printf '%s' "$mcp_tagged" | tr '\n' ' ') / filter: $mcp_tag_filter)"
 echo "ok: MCP set_artifact_tags round-trip"
 
-# --- the per-tool scope gate ---
-# Every call above carried the bootstrap key, which outranks every scope, so requireScope
-# (server.js) has never been exercised by CI. A refactor that deleted the gate outright
-# shipped green through both the unit tests and this suite.
+# --- MCP scopes: a read-scoped key drives a read tool and is refused by publish and delete ---
+# Every call above carries the bootstrap key, which outranks every scope, so nothing above
+# reaches requireScope (server.js). Delete that gate outright and the unit tests plus every
+# check above here stay green.
 mcp_key_resp=$(curl -s -X POST "$BASE/api/keys" -H "$AUTH" -H "$JSON" \
   -d '{"name":"ci-mcp-readonly","scopes":["read"]}')
-ro_key=$(printf '%s' "$mcp_key_resp" | sed -n 's/.*"key":"\([^"]*\)".*/\1/p')
-ro_id=$(printf '%s' "$mcp_key_resp" | sed -n 's/.*"id":"\([^"]*\)".*/\1/p')
-case "$ro_key" in
+mcp_read_key=$(printf '%s' "$mcp_key_resp" | sed -n 's/.*"key":"\([^"]*\)".*/\1/p')
+mcp_read_key_id=$(printf '%s' "$mcp_key_resp" | sed -n 's/.*"id":"\([^"]*\)".*/\1/p')
+# This is the one response on the instance that carries a token in the clear, so scrub it
+# before any of it reaches a CI log.
+mcp_key_redacted=$(printf '%s' "$mcp_key_resp" | tr '\n' ' ' | sed 's/"key":"[^"]*"/"key":"REDACTED"/')
+case "$mcp_read_key" in
   ah_*) ;;
-  *) fail "could not mint a read-only key (got: $(printf '%s' "$mcp_key_resp" | tr '\n' ' '))" ;;
+  *) fail "could not mint a read-only key, so the scope gate is untested. POST /api/keys is admin-only, so this needs the bootstrap key rather than a managed one (got: $mcp_key_redacted)" ;;
 esac
+[ -n "$mcp_read_key_id" ] || fail "minted key has no id, cannot revoke it (got: $mcp_key_redacted)"
 
 # The read key has to work for a read tool, or the two refusals below prove nothing: a key
 # that is broken outright would be "refused" by every tool for the wrong reason.
-mcp_ro_list=$(mcp_call_as "$ro_key" 6 tools/call '{"name":"list_artifacts","arguments":{}}')
+mcp_ro_list=$(mcp_call_as "$mcp_read_key" 6 tools/call '{"name":"list_artifacts","arguments":{}}')
 if printf '%s' "$mcp_ro_list" | grep -q '"isError":true'; then
   fail "MCP list_artifacts refused a read-scoped key ($(printf '%s' "$mcp_ro_list" | tr '\n' ' '))"
 fi
 printf '%s' "$mcp_ro_list" | grep -q 'ci-mcp' \
-  || fail "MCP list_artifacts returned no artifacts for a read-scoped key"
-echo "ok: MCP read-scoped key drives a read tool"
+  || fail "MCP list_artifacts returned no artifacts for a read-scoped key ($(printf '%s' "$mcp_ro_list" | tr '\n' ' '))"
+echo "ok: MCP list_artifacts accepts a read-scoped key"
 
 # publish sits one rank above read. The refusal arrives as a tool result carrying isError,
 # not as a JSON-RPC error, so a check for '"error"' would never match it.
-mcp_denied=$(mcp_call_as "$ro_key" 7 tools/call \
+mcp_denied=$(mcp_call_as "$mcp_read_key" 7 tools/call \
   '{"name":"publish_artifact","arguments":{"content":"<h1>denied</h1>","type":"html","slug":"ci-mcp-denied","visibility":"public"}}')
 printf '%s' "$mcp_denied" | grep -q '"isError":true' \
   || fail "MCP publish_artifact accepted a read-scoped key ($(printf '%s' "$mcp_denied" | tr '\n' ' '))"
 # The scope name arrives inside JSON, so its quotes are backslash-escaped in this body.
 printf '%s' "$mcp_denied" | grep -q 'lacks the .*publish.* scope' \
   || fail "MCP publish refusal did not name the missing scope ($(printf '%s' "$mcp_denied" | tr '\n' ' '))"
-# The message is one thing, whether the write happened is the thing that matters.
+# A refusal message does not prove the write was skipped, so check the slug too.
 code=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/a/ci-mcp-denied")
-expect_code 404 "$code" "MCP publish refused by scope wrote nothing"
+expect_code 404 "$code" "scope-refused publish"
 
-# delete needs `full`, two ranks above read, so this covers the rank comparison and not just
-# a single missing scope.
-mcp_denied_del=$(mcp_call_as "$ro_key" 8 tools/call \
+# delete needs `full`. A read key is refused by `publish` and by `full` alike, so the check
+# on the message is what separates them: name the wrong scope here and this goes red, which
+# is what stops delete_artifact's gate from being quietly downgraded to publish.
+mcp_denied_del=$(mcp_call_as "$mcp_read_key" 8 tools/call \
   '{"name":"delete_artifact","arguments":{"slug":"ci-mcp"}}')
 printf '%s' "$mcp_denied_del" | grep -q '"isError":true' \
   || fail "MCP delete_artifact accepted a read-scoped key ($(printf '%s' "$mcp_denied_del" | tr '\n' ' '))"
+printf '%s' "$mcp_denied_del" | grep -q 'lacks the .*full.* scope' \
+  || fail "MCP delete refusal did not name the full scope ($(printf '%s' "$mcp_denied_del" | tr '\n' ' '))"
 code=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/a/ci-mcp")
-expect_code 200 "$code" "MCP delete refused by scope deleted nothing"
+expect_code 200 "$code" "scope-refused delete"
 echo "ok: MCP scope gate refuses publish and delete from a read-scoped key"
 
-curl -sf -X DELETE "$BASE/api/keys/$ro_id" -H "$AUTH" > /dev/null
+curl -sf -X DELETE "$BASE/api/keys/$mcp_read_key_id" -H "$AUTH" > /dev/null \
+  || fail "could not revoke the read-only MCP key ($mcp_read_key_id)"
 
 mcp_call 9 tools/call '{"name":"delete_artifact","arguments":{"slug":"ci-mcp"}}' > /dev/null
 code=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/a/ci-mcp")
