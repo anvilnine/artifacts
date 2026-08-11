@@ -1114,6 +1114,8 @@
     return (a.slug && a.slug.toLowerCase().includes(q))
       || (a.title && a.title.toLowerCase().includes(q))
       || (a.type && a.type.toLowerCase().includes(q))
+      // a redirect row shows its target, so searching for a host has to find it
+      || (a.target && a.target.toLowerCase().includes(q))
       || (a.project && a.project.toLowerCase().includes(q))
       || (a.tags || []).some((t) => t.toLowerCase().includes(q));
   }

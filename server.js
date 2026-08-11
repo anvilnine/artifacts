@@ -728,8 +728,14 @@ async function duplicateArtifact(sourceSlug, body = {}) {
     updatedAt: new Date().toISOString(),
   };
   if (source.type === 'zip' && typeof source.files === 'number') meta.files = source.files;
-  // copySlug carries source.url over, so the copy points at the same target; meta follows it.
-  if (source.type === 'redirect' && typeof source.target === 'string') meta.target = source.target;
+  // The copy points wherever source.url points, so read the target back out of the bytes
+  // copySlug just carried rather than trusting the source's meta. That keeps a copy's row
+  // agreeing with its own 301 even when the source's meta had drifted, and it gives a
+  // redirect published before meta carried a target one on the way through.
+  if (source.type === 'redirect') {
+    const buf = await storage.getBuffer(`${targetSlug}/source.url`);
+    if (buf) meta.target = buf.toString('utf8');
+  }
   if (expiry !== undefined) meta.expiresAt = expiry;
   if (tagList && tagList.length) meta.tags = tagList;
   if (projectName) meta.project = projectName;
