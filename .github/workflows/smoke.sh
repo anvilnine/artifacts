@@ -18,6 +18,20 @@ expect_code() { # expect_code <expected> <actual> <label>
   echo "ok: $3 -> $1"
 }
 
+# One field of one artifact out of GET /api/artifacts, printed exactly. Empty when the slug is
+# not listed or the field is absent, so comparing the value also catches a row that vanished.
+# Parsed with node, not grep: a '{' inside a target or a title splits any text scan of the
+# payload, and a query string may legitimately carry one.
+list_field() { # list_field <slug> <field>
+  curl -s "$BASE/api/artifacts" -H "$AUTH" | node -e '
+    let s = "";
+    process.stdin.on("data", (d) => { s += d; }).on("end", () => {
+      const row = JSON.parse(s).find((a) => a.slug === process.argv[1]);
+      const v = row ? row[process.argv[2]] : undefined;
+      process.stdout.write(v === undefined ? "" : String(v));
+    });' "$1" "$2"
+}
+
 # unauthenticated write -> 401
 code=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/api/artifacts" -H "$JSON" -d '{"content":"<h1>x</h1>","type":"html"}')
 expect_code 401 "$code" "unauth publish"
@@ -139,6 +153,12 @@ curl -s "$BASE/api/artifacts" -H "$AUTH" | grep -qF '"slug":"ci-redir"' || fail 
 curl -s "$BASE/api/artifacts" -H "$AUTH" | grep -qF '"type":"redirect"' || fail "redirect type not listed"
 echo "ok: redirect listed"
 
+# the row carries its target, so the dashboard can show where a redirect points without
+# fetching /source for every row it renders
+[ "$(list_field ci-redir target)" = 'https://example.com/landing?a=1' ] \
+  || fail "redirect row is missing its target"
+echo "ok: redirect row carries the target"
+
 # the frame never wraps a redirect, and ?raw=1 does not bypass it
 code=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/a/ci-redir?raw=1")
 expect_code 301 "$code" "redirect raw"
@@ -162,6 +182,78 @@ loc=$(curl -s -o /dev/null -w '%{redirect_url}' "$BASE/a/ci-redir-norm")
 [ "$loc" = 'https://example.com/Landing?a=1' ] || fail "redirect target not normalized: $loc"
 curl -sf -X DELETE "$BASE/api/artifacts/ci-redir-norm" -H "$AUTH" > /dev/null
 echo "ok: redirect target normalized"
+
+# a target carrying JSON punctuation survives the round trip into the list row. Normalization
+# percent-encodes braces in the path but leaves them in the query, so this is a target a user
+# can really publish.
+curl -sf -X POST "$BASE/api/artifacts" -H "$AUTH" -H "$JSON" \
+  -d '{"content":"https://example.com/p?a={b}&c=\"d\"","type":"redirect","slug":"ci-redir-brace","visibility":"public"}' > /dev/null
+[ "$(list_field ci-redir-brace target)" = 'https://example.com/p?a={b}&c=%22d%22' ] \
+  || fail "braced redirect target came back wrong: $(list_field ci-redir-brace target)"
+curl -sf -X DELETE "$BASE/api/artifacts/ci-redir-brace" -H "$AUTH" > /dev/null
+echo "ok: redirect target with braces round-trips"
+
+# The Location header, the list row and /source all name the same place. The two stored copies of
+# the target agree in every state reachable through the API, so this pins the value across the
+# three readers rather than proving which copy each one read; the resolution rule itself is
+# unit-tested in test/redirect.test.js, where a disagreement can be constructed.
+curl -sf -X POST "$BASE/api/artifacts" -H "$AUTH" -H "$JSON" \
+  -d '{"content":"https://example.com/one-place","type":"redirect","slug":"ci-redir-agree","visibility":"public"}' > /dev/null
+loc=$(curl -s -o /dev/null -w '%{redirect_url}' "$BASE/a/ci-redir-agree")
+[ "$loc" = 'https://example.com/one-place' ] || fail "redirect Location wrong: $loc"
+[ "$(list_field ci-redir-agree target)" = 'https://example.com/one-place' ] || fail "row does not name the target"
+# publishing answers with the stored target, which is not always what was sent: the dashboard
+# shows the response rather than the box, so a normalized value never has to be guessed at
+resp=$(curl -s -X PUT "$BASE/api/artifacts/ci-redir-agree" -H "$AUTH" -H "$JSON" \
+  -d '{"content":"  HTTPS://EXAMPLE.COM/One-Place  ","type":"redirect"}')
+printf '%s' "$resp" | grep -qF '"target":"https://example.com/One-Place"' \
+  || fail "publish response does not carry the stored target: $resp"
+curl -sf -X PUT "$BASE/api/artifacts/ci-redir-agree" -H "$AUTH" -H "$JSON" \
+  -d '{"content":"https://example.com/one-place","type":"redirect"}' > /dev/null
+
+# The fallback to source.url for a redirect published before meta carried a target cannot be
+# set up through the API (every write now fills meta), so it is covered in test/redirect.test.js
+# instead of faked here.
+
+[ "$(curl -s "$BASE/a/ci-redir-agree/source")" = 'https://example.com/one-place' ] \
+  || fail "redirect /source disagrees with the Location header"
+# a PATCH rebuilds meta, so it has to carry the target forward. Losing it here would blank every
+# redirect row on the next rename while the 301 kept working off the body fallback: exactly the
+# silent disagreement this change removes.
+curl -sf -X PATCH "$BASE/api/artifacts/ci-redir-agree" -H "$AUTH" -H "$JSON" \
+  -d '{"slug":"ci-redir-agree-2","tags":["hop"]}' > /dev/null
+[ "$(list_field ci-redir-agree-2 target)" = 'https://example.com/one-place' ] || fail "a PATCH dropped the target"
+loc=$(curl -s -o /dev/null -w '%{redirect_url}' "$BASE/a/ci-redir-agree-2")
+[ "$loc" = 'https://example.com/one-place' ] || fail "renamed redirect Location wrong: $loc"
+curl -sf -X DELETE "$BASE/api/artifacts/ci-redir-agree-2" -H "$AUTH" > /dev/null
+echo "ok: the 301, the row and /source name one place, through a rename"
+
+# a content-only PUT keeps the title. The dashboard's repoint sends one, and so does the CLI's
+# `update` with no --title, so resetting it to the slug quietly deleted the label off the row.
+curl -sf -X POST "$BASE/api/artifacts" -H "$AUTH" -H "$JSON" \
+  -d '{"content":"https://example.com/one","type":"redirect","slug":"ci-redir-title","title":"Launch link","visibility":"public"}' > /dev/null
+curl -sf -X PUT "$BASE/api/artifacts/ci-redir-title" -H "$AUTH" -H "$JSON" \
+  -d '{"content":"https://example.com/two","type":"redirect"}' > /dev/null
+[ "$(list_field ci-redir-title title)" = 'Launch link' ] || fail "a content-only PUT reset the title"
+[ "$(list_field ci-redir-title target)" = 'https://example.com/two' ] || fail "the PUT did not repoint"
+# an explicit empty title still clears back to the slug, which is what it meant before
+curl -sf -X PUT "$BASE/api/artifacts/ci-redir-title" -H "$AUTH" -H "$JSON" \
+  -d '{"content":"https://example.com/three","type":"redirect","title":""}' > /dev/null
+[ "$(list_field ci-redir-title title)" = 'ci-redir-title' ] || fail "an explicit empty title did not clear"
+curl -sf -X DELETE "$BASE/api/artifacts/ci-redir-title" -H "$AUTH" > /dev/null
+echo "ok: a content-only PUT keeps the title"
+
+# credentials in a target are refused at publish: the row shows the target, the list API hands
+# it to every read-scoped key, and the target host gets them from anyone who scans the code
+for creds in 'https://alice:s3cret@example.com/x' 'https://alice@example.com/x'; do
+  code=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/api/artifacts" -H "$AUTH" -H "$JSON" \
+    -d "{\"content\":\"$creds\",\"type\":\"redirect\",\"slug\":\"ci-redir-creds\"}")
+  expect_code 400 "$code" "redirect target with credentials refused: $creds"
+done
+code=$(curl -s -o /dev/null -w '%{http_code}' -X PUT "$BASE/api/artifacts/ci-redir" -H "$AUTH" -H "$JSON" \
+  -d '{"content":"https://alice:s3cret@example.com/x","type":"redirect"}')
+expect_code 400 "$code" "repointing at credentials refused"
+echo "ok: redirect target credentials refused"
 
 # non-http targets are refused at publish time, so they can never reach a Location header
 for bad in 'javascript:alert(1)' 'JaVaScRiPt:alert(1)' 'data:text/html,<script>x</script>' '//evil.example' '/relative/path' 'not a url'; do
@@ -198,6 +290,9 @@ code=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/a/ci-redir")
 expect_code 301 "$code" "redirect serve after update"
 loc=$(curl -s -o /dev/null -w '%{redirect_url}' "$BASE/a/ci-redir")
 [ "$loc" = 'https://example.org/moved' ] || fail "redirect target not updated: $loc"
+# the row follows the update, so a dashboard row never shows the old destination
+[ "$(list_field ci-redir target)" = 'https://example.org/moved' ] \
+  || fail "redirect row still shows the old target"
 echo "ok: redirect target update"
 
 # an html artifact converted to a redirect serves the 301, not the index.html left behind
@@ -210,6 +305,13 @@ expect_code 301 "$code" "converted artifact serves the redirect"
 loc=$(curl -s -o /dev/null -w '%{redirect_url}' "$BASE/a/ci-redir-conv")
 [ "$loc" = 'https://example.com/converted' ] || fail "converted redirect Location wrong: $loc"
 if curl -s "$BASE/a/ci-redir-conv" | grep -q 'was html'; then fail "converted artifact still serves its old body"; fi
+# converting back to html drops the target, so the row cannot claim a destination the
+# artifact no longer has. The type check first, so an empty target cannot pass by way of a
+# row that is not there at all.
+curl -sf -X PUT "$BASE/api/artifacts/ci-redir-conv" -H "$AUTH" -H "$JSON" \
+  -d '{"content":"<h1>html again</h1>","type":"html"}' > /dev/null
+[ "$(list_field ci-redir-conv type)" = 'html' ] || fail "converted artifact is not listed as html"
+[ -z "$(list_field ci-redir-conv target)" ] || fail "an html artifact kept a redirect target"
 curl -sf -X DELETE "$BASE/api/artifacts/ci-redir-conv" -H "$AUTH" > /dev/null
 echo "ok: html converted to a redirect"
 
@@ -219,6 +321,8 @@ dupslug=$(curl -s -X POST "$BASE/api/artifacts/ci-redir/duplicate" -H "$AUTH" -H
 [ "$dupslug" = "ci-redir-copy" ] || fail "redirect duplicate did not return the new slug"
 loc=$(curl -s -o /dev/null -w '%{redirect_url}' "$BASE/a/ci-redir-copy")
 [ "$loc" = 'https://example.org/moved' ] || fail "duplicated redirect Location wrong: $loc"
+[ "$(list_field ci-redir-copy target)" = 'https://example.org/moved' ] \
+  || fail "duplicated redirect row is missing its target"
 curl -sf -X DELETE "$BASE/api/artifacts/ci-redir-copy" -H "$AUTH" > /dev/null
 echo "ok: redirect duplicate keeps the target"
 
@@ -552,6 +656,10 @@ echo "ok: MCP tools/list serves all $registered_tools registered tools"
 # line below for an unrelated reason. Both DELETEs tolerate a 404.
 curl -s -X DELETE "$BASE/api/artifacts/ci-mcp" -H "$AUTH" > /dev/null
 curl -s -X DELETE "$BASE/api/artifacts/ci-mcp-denied" -H "$AUTH" > /dev/null
+# Not ci-mcp-default: two assertions in this block grep a list for the bare string
+# `ci-mcp`, and a slug carrying it as a prefix satisfies them, so a stale artifact here
+# would hold those checks up after ci-mcp itself stopped being published.
+curl -s -X DELETE "$BASE/api/artifacts/ci-vis-default" -H "$AUTH" > /dev/null
 
 mcp_pub=$(mcp_call 3 tools/call \
   '{"name":"publish_artifact","arguments":{"content":"<h1>mcp</h1>","type":"html","slug":"ci-mcp","visibility":"public"}}')
@@ -582,6 +690,33 @@ printf '%s' "$mcp_tag_filter" | grep -q '"slug":"ci-mcp"' \
   || fail "MCP set_artifact_tags did not tag ci-mcp (call: $(printf '%s' "$mcp_tagged" | tr '\n' ' ') / filter: $mcp_tag_filter)"
 echo "ok: MCP set_artifact_tags round-trip"
 
+# publish_artifact's own description tells an agent what an omitted visibility does and what
+# kind of URL comes back. Every MCP publish above passes visibility explicitly, so both claims
+# were unchecked over this transport. Read the stored visibility back over REST rather than
+# trusting the tool's result text, the same way the tags check does. Assumes the shipped
+# DEFAULT_VISIBILITY, as the REST capability-link block already does, so both failures name it.
+mcp_default=$(mcp_call 6 tools/call \
+  '{"name":"publish_artifact","arguments":{"content":"<h1>mcp default</h1>","type":"html","slug":"ci-vis-default"}}')
+mcp_default_url=$(printf '%s' "$mcp_default" | mcp_text)
+case "$mcp_default_url" in
+  *'?k='*) ;;
+  *) fail "MCP publish with no visibility returned an untokened url '$mcp_default_url' (is DEFAULT_VISIBILITY=public on this instance?)" ;;
+esac
+# Pull the one row out before it can reach a FAIL line. The tags check above gets a single
+# artifact back because it filters on `?tag=`; there is no per-slug GET, so filter here instead
+# of pasting every slug, title and tag on the instance into a CI log.
+mcp_default_row=$(curl -s -H "$AUTH" "$BASE/api/artifacts" | tr '{' '\n' | grep '"slug":"ci-vis-default"' || true)
+printf '%s' "$mcp_default_row" | grep -q '"visibility":"private"' \
+  || fail "MCP publish with no visibility did not store private (row: $mcp_default_row) (is DEFAULT_VISIBILITY=public on this instance?)"
+echo "ok: MCP publish with no visibility is private and returns a tokened url"
+mcp_call 7 tools/call '{"name":"delete_artifact","arguments":{"slug":"ci-vis-default"}}' > /dev/null
+# Checked against the authenticated list, not against /a/ci-vis-default. A private artifact's
+# bare URL is 404 whether or not it still exists (that indistinguishability is the point of
+# the visibility gate), so a serve-path check here would pass on a delete that did nothing.
+curl -s -H "$AUTH" "$BASE/api/artifacts" | grep -q '"slug":"ci-vis-default"' \
+  && fail "MCP delete_artifact left ci-vis-default on the instance"
+echo "ok: MCP delete_artifact removes a private artifact"
+
 # --- MCP scopes: a read-scoped key drives a read tool and is refused by publish and delete ---
 # Every call above carries the bootstrap key, which outranks every scope, so nothing above
 # reaches requireScope (server.js). Delete that gate outright and the unit tests plus every
@@ -590,7 +725,7 @@ mcp_key_resp=$(curl -s -X POST "$BASE/api/keys" -H "$AUTH" -H "$JSON" \
   -d '{"name":"ci-mcp-readonly","scopes":["read"]}')
 mcp_read_key=$(printf '%s' "$mcp_key_resp" | sed -n 's/.*"key":"\([^"]*\)".*/\1/p')
 mcp_read_key_id=$(printf '%s' "$mcp_key_resp" | sed -n 's/.*"id":"\([^"]*\)".*/\1/p')
-# This is the one response on the instance that carries a token in the clear, so scrub it
+# This carries a bearer key in the clear, the one credential on the instance, so scrub it
 # before any of it reaches a CI log.
 mcp_key_redacted=$(printf '%s' "$mcp_key_resp" | tr '\n' ' ' | sed 's/"key":"[^"]*"/"key":"REDACTED"/')
 case "$mcp_read_key" in
@@ -601,7 +736,7 @@ esac
 
 # The read key has to work for a read tool, or the two refusals below prove nothing: a key
 # that is broken outright would be "refused" by every tool for the wrong reason.
-mcp_ro_list=$(mcp_call_as "$mcp_read_key" 6 tools/call '{"name":"list_artifacts","arguments":{}}')
+mcp_ro_list=$(mcp_call_as "$mcp_read_key" 8 tools/call '{"name":"list_artifacts","arguments":{}}')
 if printf '%s' "$mcp_ro_list" | grep -q '"isError":true'; then
   fail "MCP list_artifacts refused a read-scoped key ($(printf '%s' "$mcp_ro_list" | tr '\n' ' '))"
 fi
@@ -611,7 +746,7 @@ echo "ok: MCP list_artifacts accepts a read-scoped key"
 
 # publish sits one rank above read. The refusal arrives as a tool result carrying isError,
 # not as a JSON-RPC error, so a check for '"error"' would never match it.
-mcp_denied=$(mcp_call_as "$mcp_read_key" 7 tools/call \
+mcp_denied=$(mcp_call_as "$mcp_read_key" 9 tools/call \
   '{"name":"publish_artifact","arguments":{"content":"<h1>denied</h1>","type":"html","slug":"ci-mcp-denied","visibility":"public"}}')
 printf '%s' "$mcp_denied" | grep -q '"isError":true' \
   || fail "MCP publish_artifact accepted a read-scoped key ($(printf '%s' "$mcp_denied" | tr '\n' ' '))"
@@ -625,7 +760,7 @@ expect_code 404 "$code" "scope-refused publish"
 # delete needs `full`. A read key is refused by `publish` and by `full` alike, so the check
 # on the message is what separates them: name the wrong scope here and this goes red, which
 # is what stops delete_artifact's gate from being quietly downgraded to publish.
-mcp_denied_del=$(mcp_call_as "$mcp_read_key" 8 tools/call \
+mcp_denied_del=$(mcp_call_as "$mcp_read_key" 10 tools/call \
   '{"name":"delete_artifact","arguments":{"slug":"ci-mcp"}}')
 printf '%s' "$mcp_denied_del" | grep -q '"isError":true' \
   || fail "MCP delete_artifact accepted a read-scoped key ($(printf '%s' "$mcp_denied_del" | tr '\n' ' '))"
@@ -638,7 +773,7 @@ echo "ok: MCP scope gate refuses publish and delete from a read-scoped key"
 curl -sf -X DELETE "$BASE/api/keys/$mcp_read_key_id" -H "$AUTH" > /dev/null \
   || fail "could not revoke the read-only MCP key ($mcp_read_key_id)"
 
-mcp_call 9 tools/call '{"name":"delete_artifact","arguments":{"slug":"ci-mcp"}}' > /dev/null
+mcp_call 11 tools/call '{"name":"delete_artifact","arguments":{"slug":"ci-mcp"}}' > /dev/null
 code=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/a/ci-mcp")
 expect_code 404 "$code" "MCP delete_artifact"
 

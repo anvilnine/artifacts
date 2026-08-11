@@ -62,15 +62,159 @@ jobs:
           esac
           [ ! -e /tmp/artifacts-seed-check/artifacts/auth.json ] \
             || { echo "auth.json was written on the refused path"; exit 1; }
+      - name: The setup route claims an instance once and refuses the second
+        # The unauthenticated one-time POST /api/auth/setup hands the instance to whoever reaches
+        # it first (docs/deploy.md, lib/auth.js), and nothing drives it over HTTP. test/auth.test.js
+        # covers the env admin seed, which is a different function writing the same field. Every
+        # job seeds ARTIFACTS_ADMIN_* since T1.1.8, so this step runs its own server on its own
+        # port and data dir and leaves the seeded instance the rest of the job uses alone.
+        env:
+          ARTIFACTS_ADMIN_USERNAME: ''
+          ARTIFACTS_ADMIN_PASSWORD: ''
+          DATA_DIR: /tmp/artifacts-setup-check
+          # 3000 is the job's own server and the postgres job uses 3001 and 3002 for replicas.
+          PORT: 3010
+        run: |
+          BASE=http://localhost:$PORT
+          REPLICA=http://localhost:$((PORT + 1))
+          rm -rf /tmp/artifacts-setup-check
+          node server.js &
+          setup_pid=$!
+          # A second process on the same record, started before any admin exists so it caches an
+          # empty one. Both replicas of a fleet look like this on a shared backend.
+          PORT=$((PORT + 1)) node server.js &
+          replica_pid=$!
+          # Every assertion below exits on failure, so kill on the way out rather than at ten
+          # separate exits, which also covers an exit set -e takes out of our hands.
+          trap 'kill $setup_pid $replica_pid 2>/dev/null' EXIT
+          for i in $(seq 1 20); do curl -sf "$BASE/healthz" && break; sleep 0.5; done
+          # The loop above exits 0 whether or not anything answered. Check our own process, not
+          # just the port: a stranger already on $PORT would answer every assertion below while
+          # this step's server died on EADDRINUSE, and the step would pass having tested nothing.
+          kill -0 $setup_pid 2>/dev/null \
+            || { echo "FAIL: the server with no admin seeded died on boot (port :$PORT already taken?)"; exit 1; }
+          curl -sf "$BASE/healthz" > /dev/null \
+            || { echo "FAIL: the server with no admin seeded never answered on :$PORT"; exit 1; }
+          for i in $(seq 1 20); do curl -sf "$REPLICA/healthz" && break; sleep 0.5; done
+          kill -0 $replica_pid 2>/dev/null \
+            || { echo "FAIL: the replica died on boot (port :$((PORT + 1)) already taken?)"; exit 1; }
+          curl -sf "$REPLICA/healthz" > /dev/null \
+            || { echo "FAIL: the replica never answered on :$((PORT + 1))"; exit 1; }
+          # The flag the dashboard reads to choose between the first-run screen and the login
+          # screen. Nothing had loaded it against an unclaimed instance.
+          curl -s "$BASE/api/auth/session" | grep -q '"needsSetup":true' \
+            || { echo "FAIL: an unclaimed instance does not report needsSetup"; curl -s "$BASE/api/auth/session"; exit 1; }
+          echo "ok: an unclaimed instance reports needsSetup"
+          # docs/auth.md says the setup screen answers 400 on a value that breaks either rule.
+          # test/auth.test.js checks the same two validators on the env-seed path, never here.
+          code=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/api/auth/setup" \
+            -H 'Content-Type: application/json' -d '{"username":"ci-claimer","password":"short"}')
+          [ "$code" = "400" ] || { echo "FAIL: a claim with a rejected password answered $code, expected 400"; exit 1; }
+          curl -s "$BASE/api/auth/session" | grep -q '"needsSetup":true' \
+            || { echo "FAIL: a refused claim consumed the one-time setup"; exit 1; }
+          echo "ok: a claim that breaks the credential rules is refused and leaves the instance claimable"
+          code=$(curl -s -o /tmp/setup-1.json -D /tmp/setup-1.head -w '%{http_code}' -X POST "$BASE/api/auth/setup" \
+            -H 'Content-Type: application/json' -d '{"username":"ci-claimer","password":"ci-claimer-password"}')
+          [ "$code" = "201" ] || { echo "FAIL: the first claim answered $code, expected 201"; cat /tmp/setup-1.json; exit 1; }
+          # Whoever creates the admin is signed in as the admin (docs/auth.md). Without this the
+          # route can stop issuing the cookie and stay green here, while a real operator finishes
+          # the first-run screen and lands on a dashboard that 401s every call.
+          grep -qi '^set-cookie: artifacts_session=' /tmp/setup-1.head \
+            || { echo "FAIL: the claim did not sign the new admin in"; grep -i '^set-cookie' /tmp/setup-1.head || echo "(no set-cookie header at all)"; exit 1; }
+          # Both HMAC secrets are written by completing setup, and docs/deploy.md builds the
+          # multi-replica procedure on that. Read them off disk, which also proves the admin
+          # landed in the file the next boot reads rather than only in this process.
+          node -e '
+            const fs = require("fs");
+            const a = JSON.parse(fs.readFileSync(process.env.DATA_DIR + "/artifacts/auth.json", "utf8"));
+            const missing = ["admin", "sessionSecret", "adminSecret"].filter((k) => !a[k]);
+            if (missing.length) { console.error("FAIL: setup left " + missing.join(", ") + " unwritten"); process.exit(1); }
+            if (a.admin.username !== "ci-claimer") { console.error("FAIL: stored admin is " + a.admin.username); process.exit(1); }
+          '
+          echo "ok: an unclaimed instance is claimable, signs the claimer in, and writes both secrets"
+          # The second claim is the half that matters: this route is unauthenticated, so a 409 is
+          # the only thing standing between a booted instance and whoever reaches it next.
+          code=$(curl -s -o /tmp/setup-2.json -w '%{http_code}' -X POST "$BASE/api/auth/setup" \
+            -H 'Content-Type: application/json' -d '{"username":"ci-second-claimer","password":"ci-second-claimer-password"}')
+          [ "$code" = "409" ] || { echo "FAIL: a second claim answered $code, expected 409"; cat /tmp/setup-2.json; exit 1; }
+          # Same claim from the replica, which booted before the admin existed and still has an
+          # empty record cached. Its outer check passes, so this is the only assertion that
+          # reaches the re-check inside update(), the guard that exists for exactly this race.
+          # Without a second process the route is green with that guard deleted.
+          curl -s "$REPLICA/api/auth/session" | grep -q '"needsSetup":true' \
+            || { echo "FAIL: the replica already saw the admin, so its outer check would refuse first and this proves nothing"; exit 1; }
+          code=$(curl -s -o /tmp/setup-3.json -w '%{http_code}' -X POST "$REPLICA/api/auth/setup" \
+            -H 'Content-Type: application/json' -d '{"username":"ci-replica-claimer","password":"ci-replica-claimer-password"}')
+          [ "$code" = "409" ] || { echo "FAIL: a replica that never saw the admin claimed the instance, answering $code"; cat /tmp/setup-3.json; exit 1; }
+          echo "ok: a replica holding a stale empty record is refused by the stored-record check"
+          # A 409 does not prove the record was left alone, so check the first owner is still there.
+          curl -s "$BASE/api/auth/session" | grep -q '"needsSetup":false' \
+            || { echo "FAIL: the instance went back to needing setup"; curl -s "$BASE/api/auth/session"; exit 1; }
+          code=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/api/auth/login" \
+            -H 'Content-Type: application/json' -d '{"username":"ci-claimer","password":"ci-claimer-password"}')
+          [ "$code" = "200" ] || { echo "FAIL: the original admin stopped working after the refused claim (got $code)"; exit 1; }
+          echo "ok: a second claim is refused and the first admin survives it"
       - name: Boot server
         run: |
           node server.js &
+          echo $! > server.pid
           for i in $(seq 1 20); do
             curl -sf http://localhost:3000/healthz && break
             sleep 0.5
           done
       - name: Smoke test API
         run: bash .github/workflows/smoke.sh http://localhost:3000 ci-test-key
+      # Ahead of the malformed-auth.json step on purpose: that step replaces the whole keys
+      # array, so a key minted for a durability check would not survive it. This one asserts
+      # the record comes back; the one below asserts a broken record does not take the key
+      # screen down with it. Any step needing a real auth record goes above this comment.
+      # The malformed-auth.json step destroys the record and stays last in this job.
+      - name: Artifacts and API keys survive a fresh restart (new process, same data dir)
+        run: |
+          curl -sf -X POST http://localhost:3000/api/artifacts \
+            -H 'Authorization: Bearer ci-test-key' -H 'Content-Type: application/json' \
+            -d '{"content":"<h1>durable</h1>","slug":"restart-proof","visibility":"public"}'
+          # An artifact surviving proves the backend keeps objects; only a key proves auth.json
+          # came back, which is the separate promise docs/auth.md makes. The local backend is
+          # the one the README's quick start uses and it had no survival check before this: the
+          # restart in the step below exists to plant a malformed record and asserts nothing
+          # about durability. A key rather than an admin login, because the seed re-creates the
+          # admin with the same password whenever the record has no admin, so a login answers
+          # 200 even when auth.json is gone. A key cannot be re-seeded.
+          curl -sf -X POST http://localhost:3000/api/keys \
+            -H 'Authorization: Bearer ci-test-key' -H 'Content-Type: application/json' \
+            -d '{"name":"restart-proof","scopes":["read"]}' > /tmp/minted-key.json
+          key=$(node -e 'console.log(JSON.parse(require("fs").readFileSync("/tmp/minted-key.json","utf8")).key)')
+          # Without this a changed response shape leaves $key as the string "undefined", and the
+          # check below then blames durability for a 401 the mint caused. The dump is scrubbed on
+          # the token itself, not on the field name: this guard only ever fires when the field
+          # moved, so a name-based scrub (what smoke.sh uses, where the shape is known) would
+          # match nothing in exactly the case that reaches this line.
+          case "$key" in ah_*) ;; *) echo "FAIL: the mint returned no key"; sed 's/ah_[A-Za-z0-9]*/ah_REDACTED/g' /tmp/minted-key.json; exit 1 ;; esac
+          old_pid=$(cat server.pid)
+          kill "$old_pid"; sleep 1
+          # kill returns 0 once the signal is delivered, not once the process is gone. If a
+          # graceful-shutdown handler is ever added to server.js, the old process outlives this
+          # line, the new one dies on EADDRINUSE, healthz answers from the survivor, and the key
+          # check below passes out of its in-memory auth record with the backend empty. Assert
+          # the old process is gone rather than trusting the signal.
+          kill -0 "$old_pid" 2>/dev/null \
+            && { echo "FAIL: the old server outlived the kill, so nothing below would test a restart"; exit 1; }
+          node server.js &
+          echo $! > server.pid
+          for i in $(seq 1 20); do curl -sf http://localhost:3000/healthz && break; sleep 0.5; done
+          # The loop above exits 0 whether or not anything ever answered, so a server that died
+          # on the second boot would reach the checks below and be reported as lost data. Name
+          # the real cause instead. T1.1.14 covers the same hole in every other boot loop.
+          curl -sf http://localhost:3000/healthz > /dev/null \
+            || { echo "FAIL: the server did not come back up after the restart"; exit 1; }
+          code=$(curl -s -o /dev/null -w '%{http_code}' http://localhost:3000/a/restart-proof)
+          [ "$code" = "200" ] || { echo "FAIL: artifact did not survive a restart on the local backend (got $code)"; exit 1; }
+          echo "ok: artifact survived a restart on the local backend"
+          code=$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $key" \
+            http://localhost:3000/api/artifacts)
+          [ "$code" = "200" ] || { echo "FAIL: the key minted before the restart stopped working on the local backend (got $code)"; curl -s -H 'Authorization: Bearer ci-test-key' http://localhost:3000/api/keys; exit 1; }
+          echo "ok: the key minted before the restart still works"
       - name: Key routes survive a malformed auth.json
         run: |
           # A hand edit, or a crash partway through a write, leaves records the bearer path
@@ -154,7 +298,7 @@ jobs:
             -d '{"content":"<h1>durable</h1>","slug":"restart-proof","visibility":"public"}'
           # Mint a managed key on the way in. An artifact surviving proves the backend keeps
           # objects; only a key proves auth.json came back, which is the separate promise
-          # docs/auth.md makes and which nothing outside the local backend used to check.
+          # docs/auth.md makes and which nothing used to check.
           # The check uses a key instead of an admin login: the seed re-creates the admin with
           # the same password whenever the record has no admin, so logging in answers 200 even
           # when auth.json is gone. A key cannot be re-seeded, so it is the only half of the
@@ -368,9 +512,54 @@ jobs:
       - name: Boot server (sqlite backend)
         run: |
           node server.js &
+          echo $! > server.pid
           for i in $(seq 1 20); do curl -sf http://localhost:3000/healthz && break; sleep 0.5; done
       - name: Smoke test API against sqlite
         run: bash .github/workflows/smoke.sh http://localhost:3000 ci-test-key
+      - name: Artifacts and API keys survive a fresh restart (new process, same database file)
+        run: |
+          curl -sf -X POST http://localhost:3000/api/artifacts \
+            -H 'Authorization: Bearer ci-test-key' -H 'Content-Type: application/json' \
+            -d '{"content":"<h1>durable</h1>","slug":"restart-proof","visibility":"public"}'
+          # An artifact surviving proves the backend keeps objects; only a key proves auth.json
+          # came back, which is the separate promise docs/auth.md makes for all five backends
+          # and which this job never checked. A key rather than an admin login, because the seed
+          # re-creates the admin with the same password whenever the record has no admin, so a
+          # login answers 200 even when auth.json is gone. A key cannot be re-seeded.
+          curl -sf -X POST http://localhost:3000/api/keys \
+            -H 'Authorization: Bearer ci-test-key' -H 'Content-Type: application/json' \
+            -d '{"name":"restart-proof","scopes":["read"]}' > /tmp/minted-key.json
+          key=$(node -e 'console.log(JSON.parse(require("fs").readFileSync("/tmp/minted-key.json","utf8")).key)')
+          # Without this a changed response shape leaves $key as the string "undefined", and the
+          # check below then blames durability for a 401 the mint caused. The dump is scrubbed on
+          # the token itself, not on the field name: this guard only ever fires when the field
+          # moved, so a name-based scrub (what smoke.sh uses, where the shape is known) would
+          # match nothing in exactly the case that reaches this line.
+          case "$key" in ah_*) ;; *) echo "FAIL: the mint returned no key"; sed 's/ah_[A-Za-z0-9]*/ah_REDACTED/g' /tmp/minted-key.json; exit 1 ;; esac
+          old_pid=$(cat server.pid)
+          kill "$old_pid"; sleep 1
+          # kill returns 0 once the signal is delivered, not once the process is gone. If a
+          # graceful-shutdown handler is ever added to server.js, the old process outlives this
+          # line, the new one dies on EADDRINUSE, healthz answers from the survivor, and the key
+          # check below passes out of its in-memory auth record with the backend empty. Assert
+          # the old process is gone rather than trusting the signal.
+          kill -0 "$old_pid" 2>/dev/null \
+            && { echo "FAIL: the old server outlived the kill, so nothing below would test a restart"; exit 1; }
+          node server.js &
+          echo $! > server.pid
+          for i in $(seq 1 20); do curl -sf http://localhost:3000/healthz && break; sleep 0.5; done
+          # The loop above exits 0 whether or not anything ever answered, and a second process
+          # opening the same database file is exactly where a boot failure would show up, so
+          # name that instead of reporting it as lost data. T1.1.14 covers the other boot loops.
+          curl -sf http://localhost:3000/healthz > /dev/null \
+            || { echo "FAIL: the server did not come back up after the restart"; exit 1; }
+          code=$(curl -s -o /dev/null -w '%{http_code}' http://localhost:3000/a/restart-proof)
+          [ "$code" = "200" ] || { echo "FAIL: artifact did not survive a restart via sqlite (got $code)"; exit 1; }
+          echo "ok: artifact survived a restart via sqlite"
+          code=$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $key" \
+            http://localhost:3000/api/artifacts)
+          [ "$code" = "200" ] || { echo "FAIL: the key minted before the restart stopped working via sqlite (got $code)"; curl -s -H 'Authorization: Bearer ci-test-key' http://localhost:3000/api/keys; exit 1; }
+          echo "ok: the key minted before the restart still works"
 
   # Pull requests build the image and boot it, so a broken Dockerfile (or a change to what the
   # container reads at boot) fails before merge instead of after. No push, and no registry

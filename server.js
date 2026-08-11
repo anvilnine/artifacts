@@ -34,6 +34,7 @@ import {
 import { createConfigStore } from './lib/config.js';
 import { ApiError } from './lib/errors.js';
 import { qrPng, qrSvg } from './lib/qr.js';
+import { parseRedirectTarget, resolveRedirectTarget } from './lib/redirect.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -212,8 +213,6 @@ const MAX_TAGS = 10;
 // start with a letter or digit. Internal whitespace is collapsed on input.
 const PROJECT_RE = /^[\p{L}\p{N}][\p{L}\p{N}\p{M} ._-]{0,63}$/u;
 const SOURCE_EXT = { html: 'html', jsx: 'jsx', tsx: 'tsx', md: 'md', redirect: 'url' };
-// Longest target a redirect artifact may store, measured on the normalized URL.
-const MAX_REDIRECT_TARGET_LEN = 2048;
 
 // Pinned versions shared with the jsx shell. `external=react` keeps packages on
 // the shell's React instance — separate copies cause "Invalid hook call".
@@ -570,34 +569,6 @@ function isExpired(meta) {
   return Boolean(meta.expiresAt && Date.parse(meta.expiresAt) <= Date.now());
 }
 
-// The target of a redirect artifact, normalized. Checked again at serve time before it
-// reaches a Location header, so a target that got past this (hand-edited storage, a file
-// written by an older build) still cannot ship a non-http scheme to a viewer. That makes
-// the length check run twice on the same string, so it measures the normalized href and
-// not the input: percent-encoding can multiply a short input several times over, and a
-// value that passed here but failed there would publish 201 and then serve 404 forever.
-function parseRedirectTarget(value) {
-  const raw = typeof value === 'string' ? value.trim() : '';
-  let url;
-  try {
-    url = new URL(raw);
-  } catch {
-    throw new ApiError(400, 'content must be an absolute http:// or https:// URL for a redirect');
-  }
-  // The scheme allowlist is the point of this function: a stored `javascript:` or `data:`
-  // target would turn a Location header into script execution on the viewer's click.
-  if (url.protocol !== 'http:' && url.protocol !== 'https:') {
-    throw new ApiError(400, 'content must be an absolute http:// or https:// URL for a redirect');
-  }
-  if (url.href.length > MAX_REDIRECT_TARGET_LEN) {
-    throw new ApiError(
-      400,
-      `redirect target too long (${url.href.length} > ${MAX_REDIRECT_TARGET_LEN} characters once normalized)`,
-    );
-  }
-  return url.href;
-}
-
 async function saveArtifact({ content, type = 'html', slug, title, expiresAt, frame, tags, project, visibility, password }, { replace = false } = {}) {
   if (typeof content !== 'string' || !content.trim()) {
     throw new ApiError(400, 'content (non-empty string) is required');
@@ -632,13 +603,17 @@ async function saveArtifact({ content, type = 'html', slug, title, expiresAt, fr
     throw new ApiError(400, 'cannot replace a zip site with inline content; delete and re-upload');
   }
 
-  const finalTitle = title || finalSlug;
+  // A PUT that omits the title keeps the one already stored, the way it keeps tags and project.
+  // Falling back to the slug instead threw the title away on every content-only update: the CLI
+  // `update` with no --title, MCP `update_artifact`, and repointing a redirect from the
+  // dashboard all did it, and the row simply stopped showing the label.
+  const finalTitle = title !== undefined ? (title || finalSlug) : (existing?.title || finalSlug);
   let html;
   if (type === 'html') html = content;
   else if (type === 'jsx' || type === 'tsx') html = buildJsxHtml(content, finalTitle);
   // md renders at serve time from source.md; nothing baked here.
   // redirect stores the normalized target and nothing else; the serve path reads it back.
-  const body = type === 'redirect' ? parseRedirectTarget(content) : content;
+  const body = type === 'redirect' ? parseRedirectTarget(content, { publishing: true }) : content;
 
   if (html !== undefined) {
     await storage.put(`${finalSlug}/index.html`, html, { contentType: 'text/html; charset=utf-8' });
@@ -654,6 +629,11 @@ async function saveArtifact({ content, type = 'html', slug, title, expiresAt, fr
     createdAt: existing?.createdAt || new Date().toISOString(),
     updatedAt: new Date().toISOString(),
   };
+  // The target lives in source.url, which the list API never reads, so a redirect also
+  // carries it in meta for the dashboard row. Cleared on any other type, or an artifact
+  // converted away from redirect would keep claiming a destination it no longer has.
+  if (type === 'redirect') meta.target = body;
+  else delete meta.target;
   if (expiresAt !== undefined) meta.expiresAt = expiry;
   if (frame !== undefined) meta.frame = frame;
   if (tagList !== undefined) meta.tags = tagList.length ? tagList : undefined;
@@ -688,7 +668,12 @@ async function saveArtifact({ content, type = 'html', slug, title, expiresAt, fr
   // A non-public artifact needs the session secret resident to mint its capability token;
   // it is created lazily (first login otherwise), so force it here (tokenEpoch ⇒ non-public).
   if (meta.tokenEpoch !== undefined) await ensureSessionSecret();
-  return { slug: finalSlug, url: tokenedUrl(meta), visibility: meta.visibility || 'public' };
+  const out = { slug: finalSlug, url: tokenedUrl(meta), visibility: meta.visibility || 'public' };
+  // A redirect answers with the target it stored, which is not always the string that was sent:
+  // the host case-folds, a bare host gains a slash, and everything else percent-encodes. Without
+  // it a caller that wants to show the target has to guess or re-fetch the list.
+  if (meta.target !== undefined) out.target = meta.target;
+  return out;
 }
 
 // Copy an existing artifact into a new slug. Content bytes (source.* / index.html / site/*)
@@ -743,6 +728,26 @@ async function duplicateArtifact(sourceSlug, body = {}) {
     updatedAt: new Date().toISOString(),
   };
   if (source.type === 'zip' && typeof source.files === 'number') meta.files = source.files;
+  // A copy points where the original points, which is what the original's meta says, so this
+  // resolves the same way the serve path does rather than reading the copied bytes. Reading the
+  // bytes re-imported the drift the resolver exists to remove, and it promoted a value nothing
+  // had validated into meta, where the list API hands it to every read-scoped key: a target with
+  // credentials, published before that rule existed, would have leaked through a duplicate.
+  // Anything the parser refuses is left off the copy rather than written to it.
+  if (source.type === 'redirect') {
+    const copied = await resolveRedirectTarget({ meta: source, readSource: () => storage.getBuffer(`${targetSlug}/source.url`) });
+    // A copy is a publish, so it answers to the publish rules. Writing the target unvalidated
+    // was the one door where they did not apply. Refusing beats copying anyway with the target
+    // left off: that produced a brand-new artifact whose row said nothing while its 301 still
+    // handed credentials to the target host, which is the disagreement this whole change exists
+    // to remove. Repoint the original and the copy goes through.
+    try {
+      meta.target = parseRedirectTarget(copied, { publishing: true });
+    } catch (err) {
+      await storage.deleteSlug(targetSlug).catch(() => {}); // drop the bytes copySlug already wrote
+      throw new ApiError(400, `cannot copy "${sourceSlug}": ${err.message}`);
+    }
+  }
   if (expiry !== undefined) meta.expiresAt = expiry;
   if (tagList && tagList.length) meta.tags = tagList;
   if (projectName) meta.project = projectName;
@@ -778,7 +783,7 @@ function seedTokenEpoch(meta) {
 // what the dashboard/API legitimately need; secrets (password) and internal state
 // (tokenEpoch) are dropped, and hasPassword exposes state without the hash.
 const PUBLIC_META_FIELDS = [
-  'slug', 'type', 'title', 'files', 'createdAt', 'updatedAt',
+  'slug', 'type', 'title', 'files', 'target', 'createdAt', 'updatedAt',
   'expiresAt', 'frame', 'tags', 'project', 'visibility', 'disabled',
 ];
 function publicMeta(meta) {
@@ -1185,14 +1190,11 @@ app.get('/a/:slug', async (req, res) => {
   // after a PUT, so no-store is what keeps repointing the slug working. Crawlers do not
   // follow it either way: the whole domain answers X-Robots-Tag: noindex, nofollow.
   if (meta.type === 'redirect') {
-    const buf = await storage.getBuffer(`${slug}/source.url`);
-    if (!buf) return notFound(res);
-    let target;
-    try {
-      target = parseRedirectTarget(buf.toString('utf8'));
-    } catch {
-      return notFound(res);
-    }
+    // meta decides where this goes, with source.url as the fallback for a redirect published
+    // before meta carried a target. The value comes back parsed, so a scheme this build refuses
+    // never reaches a Location header whatever is on disk. See lib/redirect.js.
+    const target = await resolveRedirectTarget({ meta, readSource: () => storage.getBuffer(`${slug}/source.url`) });
+    if (target === null) return notFound(res);
     res.set({
       'Cache-Control': 'no-store',
       'X-Content-Type-Options': 'nosniff',
@@ -1249,6 +1251,14 @@ app.get('/a/:slug/source', async (req, res, next) => {
   if (isExpired(meta)) return res.status(410).type('text/plain').send('artifact expired');
   if (meta.type === 'zip') return next(); // zip sites serve /source as a site path
   res.set({ 'X-Content-Type-Options': 'nosniff', 'Referrer-Policy': 'no-referrer' });
+  // A redirect's "source" is its target, and the docs say so, so it answers with the same value
+  // the 301 uses rather than the stored bytes. Streaming the body here let /source name one
+  // destination while the Location header sent visitors to another.
+  if (meta.type === 'redirect') {
+    const target = await resolveRedirectTarget({ meta, readSource: () => storage.getBuffer(`${slug}/source.url`) });
+    if (target === null) return notFound(res);
+    return res.type('text/plain; charset=utf-8').send(target);
+  }
   // forceType keeps source inert: an HTML/JSX source is served as text/plain, never executed.
   serveObject(req, res, `${slug}/source.${SOURCE_EXT[meta.type]}`, {
     forceType: 'text/plain; charset=utf-8',
@@ -1644,11 +1654,14 @@ function createMcpServer(scopes = SCOPES) {
     {
       title: 'Publish artifact',
       description:
-        'Publish an HTML, JSX/TSX (single React component with default export), or Markdown artifact. Returns the public URL. Omit slug for a random unguessable one. type "redirect" instead publishes a short link: content is the absolute http(s) target and the URL answers 301.',
+        'Publish an HTML, JSX/TSX (single React component with default export), or Markdown artifact. Returns the share URL: bare for public, or a ?k= capability link for private and password, which opens the artifact on its own. Omit slug for a random unguessable one. type "redirect" instead publishes a short link: content is the absolute http(s) target, and the URL answers 301 once the visibility gate has let the request through.',
       inputSchema: {
         content: z.string().describe('Full source of the artifact, or the target URL when type is "redirect"'),
         type: z.enum(['html', 'jsx', 'tsx', 'md', 'redirect']).default('html'),
-        slug: z.string().optional().describe('Custom URL slug [a-z0-9-], 3-64 chars'),
+        slug: z
+          .string()
+          .optional()
+          .describe('Custom URL slug: 3-64 chars of [a-z0-9-], starting with a letter or digit'),
         title: z.string().optional(),
         expiresAt: z
           .string()
@@ -1657,19 +1670,19 @@ function createMcpServer(scopes = SCOPES) {
         frame: z
           .boolean()
           .optional()
-          .describe('Show the top viewer frame for this artifact, overriding the server default'),
+          .describe('Show the top viewer frame for this artifact, overriding the server default. Ignored while the server has frames switched off'),
         tags: z
           .array(z.string())
           .optional()
-          .describe('Tags for organizing artifacts: [a-z0-9-], 1-32 chars each, max 10'),
+          .describe('Tags for organizing artifacts: 1-32 chars each of [a-z0-9-], starting with a letter or digit, max 10. Stored lowercased and deduped'),
         project: z
           .string()
           .optional()
-          .describe('Project this artifact belongs to (single grouping label, max 64 chars)'),
+          .describe('Project this artifact belongs to (single grouping label): 1 to 64 chars of letters, digits, spaces, and - _ . (starting with a letter or digit)'),
         visibility: z
           .enum(['public', 'private', 'password'])
           .optional()
-          .describe('public (default: anyone with the link), private (operator only), or password (requires the shared password)'),
+          .describe('private (the default: opens through the returned ?k= link, for anyone holding it), public (anyone with the bare link), or password (the bare link prompts for the shared password, but the ?k= link returned here skips that prompt)'),
         password: z
           .string()
           .optional()
@@ -1687,7 +1700,8 @@ function createMcpServer(scopes = SCOPES) {
     'update_artifact',
     {
       title: 'Update artifact',
-      description: 'Replace the content of an existing artifact by slug. Returns the URL.',
+      description:
+        'Rewrite an existing artifact by slug. Only type and title reset when omitted: type becomes html and title becomes the slug, so pass both on every update. Every other field the artifact has keeps its current value. Returns the share URL, tokened for private and password artifacts.',
       inputSchema: {
         slug: z.string(),
         content: z.string(),
@@ -1696,7 +1710,7 @@ function createMcpServer(scopes = SCOPES) {
         frame: z
           .boolean()
           .optional()
-          .describe('Show the top viewer frame for this artifact, overriding the server default'),
+          .describe('Show the top viewer frame for this artifact, overriding the server default. Ignored while the server has frames switched off'),
         tags: z
           .array(z.string())
           .optional()
@@ -1726,10 +1740,13 @@ function createMcpServer(scopes = SCOPES) {
     'rename_artifact',
     {
       title: 'Rename artifact',
-      description: 'Change the URL slug of an existing artifact. Returns the new URL.',
+      description:
+        'Change the URL slug of an existing artifact. Returns the new share URL, tokened for private and password artifacts. The old slug stops serving, and any link already handed out with it dies with it.',
       inputSchema: {
         slug: z.string().describe('Current slug'),
-        newSlug: z.string().describe('New URL slug [a-z0-9-], 3-64 chars'),
+        newSlug: z
+          .string()
+          .describe('New URL slug: 3-64 chars of [a-z0-9-], starting with a letter or digit'),
       },
     },
     async ({ slug, newSlug }) => {
@@ -1766,7 +1783,7 @@ function createMcpServer(scopes = SCOPES) {
     {
       title: 'Set artifact tags',
       description:
-        'Replace the tags of an artifact. Tags are [a-z0-9-], 1-32 chars each, max 10. An empty array clears all tags.',
+        'Replace the tags of an artifact. Tags are 1-32 chars each of [a-z0-9-], starting with a letter or digit, max 10, stored lowercased and deduped. An empty array clears all tags.',
       inputSchema: {
         slug: z.string(),
         tags: z.array(z.string()).describe('Full tag list; empty array clears'),
@@ -1788,7 +1805,9 @@ function createMcpServer(scopes = SCOPES) {
         'Set or clear the project an artifact belongs to. Projects group artifacts in the web UI. An empty string clears it.',
       inputSchema: {
         slug: z.string(),
-        project: z.string().describe('Project name (max 64 chars); empty string clears it'),
+        project: z
+          .string()
+          .describe('Project name: 1 to 64 chars of letters, digits, spaces, and - _ . (starting with a letter or digit). Empty string clears it'),
       },
     },
     async ({ slug, project }) => {
@@ -1804,7 +1823,7 @@ function createMcpServer(scopes = SCOPES) {
     {
       title: 'Set artifact visibility',
       description:
-        'Set an artifact to public (anyone with the link), private (operator only), or password (requires a shared password). Provide password when setting "password".',
+        'Set an artifact to public (anyone with the bare link), private (opens through a ?k= link, for anyone holding it), or password (the bare link prompts for the shared password). Provide password when setting "password". Mint a ?k= link with GET /api/artifacts/<slug>/link; on a password artifact that link skips the prompt.',
       inputSchema: {
         slug: z.string(),
         visibility: z.enum(['public', 'private', 'password']),
@@ -1855,7 +1874,7 @@ function createMcpServer(scopes = SCOPES) {
     {
       title: 'Set artifact frame',
       description:
-        'Control the top viewer frame for an artifact: true = always framed, false = never framed, null = inherit the server default.',
+        'Control the top viewer frame for an artifact. Ignored while the server has frames switched off.',
       inputSchema: {
         slug: z.string(),
         frame: z
@@ -1878,7 +1897,7 @@ function createMcpServer(scopes = SCOPES) {
     {
       title: 'List artifacts',
       description:
-        'List all published artifacts (slug, type, title, tags, project, timestamps). Pass tag and/or project to filter.',
+        'List all published artifacts. Each entry carries slug, type, title, createdAt, updatedAt, tags, and whichever of project, expiresAt, frame, visibility, disabled, files and hasPassword the artifact has set. A public artifact has no visibility field at all. No passwords or tokens. Pass tag and/or project to filter.',
       inputSchema: {
         tag: z.string().optional().describe('Only return artifacts with this tag'),
         project: z.string().optional().describe('Only return artifacts in this project'),

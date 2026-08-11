@@ -205,6 +205,8 @@
   }
   .form label.f > input, .form label.f > select, .form label.f > textarea { width: 100%; }
   .form textarea { min-height: 150px; font-family: var(--f-mono); font-size: 13px; resize: vertical; }
+  /* A redirect target is one line, so the paste box shrinks instead of leaving 150px of void. */
+  .form textarea.oneline { min-height: 44px; }
   .form .browse { font-size: 12px; color: var(--taupe-dim); text-align: center; padding: 2px 0; }
   .form .foot { display: flex; justify-content: flex-end; align-items: center; gap: 12px; margin-top: 2px; }
 
@@ -341,6 +343,7 @@
   }
   .pill.pill-lock { color: var(--taupe); border-color: var(--rim); background: transparent; }
   .item-title { font-size: 13px; color: var(--taupe); margin-top: 4px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .item-target { font-family: var(--f-mono); font-size: 12px; color: var(--taupe-dim); margin-top: 4px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .item-meta { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin-top: 8px; }
   .time { font-size: 11px; color: var(--taupe-dim); font-family: var(--f-mono); font-variant-numeric: tabular-nums; }
 
@@ -556,9 +559,10 @@
                   <option value="jsx">jsx</option>
                   <option value="tsx">tsx</option>
                   <option value="md">md</option>
+                  <option value="redirect">redirect</option>
                 </select>
               </label>
-              <label class="f">Frame
+              <label class="f" id="frameField">Frame
                 <select id="frame" title="Top viewer frame">
                   <option value="default">Default</option>
                   <option value="on">On</option>
@@ -595,7 +599,7 @@
                 <datalist id="projectOptions"></datalist>
               </label>
             </div>
-            <label class="f" id="contentField">Content
+            <label class="f" id="contentField"><span id="contentLabel">Content</span>
               <textarea id="content" placeholder="Paste HTML, a React component with a default export, or Markdown…" spellcheck="false"></textarea>
             </label>
             <div class="browse" id="browseRow">or <a href="#" id="browseLink">browse files</a> to upload instead</div>
@@ -893,12 +897,27 @@
     $('passwordWrap').style.display = $('visibility').value === 'password' ? '' : 'none';
   });
 
+  // A redirect takes a URL, not a document: the content box asks for the target, the paste
+  // box shrinks to one line, and Frame goes away because the server answers a redirect with
+  // a Location header and never reaches the frame branch.
+  const CONTENT_PLACEHOLDER = $('content').placeholder;
+  function syncComposeType() {
+    const redirect = $('type').value === 'redirect';
+    $('contentLabel').textContent = redirect ? 'Target URL' : 'Content';
+    $('content').placeholder = redirect ? 'https://example.com/where-it-goes' : CONTENT_PLACEHOLDER;
+    $('content').classList.toggle('oneline', redirect);
+    $('frameField').style.display = redirect ? 'none' : '';
+    $('browseRow').style.display = redirect ? 'none' : '';
+  }
+  $('type').addEventListener('change', syncComposeType);
+
   $('publish').addEventListener('click', () => busy($('publish'), duplicateSource ? 'Copying…' : 'Publishing…', async () => {
     if (duplicateSource) return doDuplicate();
     const body = { content: $('content').value, type: $('type').value };
     if ($('slug').value) body.slug = $('slug').value;
     if ($('title').value) body.title = $('title').value;
-    if ($('frame').value !== 'default') body.frame = $('frame').value === 'on';
+    // Frame is hidden for a redirect, so never send a stale value the select still holds.
+    if (body.type !== 'redirect' && $('frame').value !== 'default') body.frame = $('frame').value === 'on';
     const tagList = composeTags.getTags();
     if (tagList.length) body.tags = tagList;
     if ($('project').value.trim()) body.project = $('project').value.trim();
@@ -933,6 +952,7 @@
       project: $('project').value.trim(),
       visibility: $('visibility').value,
     };
+    if (src.type === 'redirect') delete body.frame; // hidden for a redirect copy, so never sent
     if ($('slug').value) body.slug = $('slug').value;
     if ($('visibility').value === 'password') {
       if (!$('password').value) { toast('A view password is required.', true); return; }
@@ -991,6 +1011,10 @@
     $('browseRow').style.display = on ? 'none' : '';
     $('publish').textContent = on ? 'Create copy' : 'Publish';
     $('composeTitle').textContent = on ? 'Duplicate artifact' : 'New artifact';
+    // A copy keeps its type, so a redirect copy hides Frame the same way composing one does.
+    // Leaving duplicate mode hands the form back to the type select.
+    if (on) $('frameField').style.display = duplicateSource?.type === 'redirect' ? 'none' : '';
+    else syncComposeType();
   }
 
   function exitDuplicateMode() {
@@ -1169,6 +1193,9 @@
     return (a.slug && a.slug.toLowerCase().includes(q))
       || (a.title && a.title.toLowerCase().includes(q))
       || (a.type && a.type.toLowerCase().includes(q))
+      // a redirect row shows its target, so searching for a host has to find it. Typed check,
+      // not just truthy: a hand-edited numeric target would throw here and take the list with it.
+      || (typeof a.target === 'string' && a.target.toLowerCase().includes(q))
       || (a.project && a.project.toLowerCase().includes(q))
       || (a.tags || []).some((t) => t.toLowerCase().includes(q));
   }
@@ -1202,6 +1229,7 @@
   function openPaste() {
     exitDuplicateMode();
     $('type').value = 'html';
+    syncComposeType(); // setting the select in code fires no change event
     togglePop('compose', 'content');
   }
 
@@ -1307,6 +1335,12 @@
         input = document.createElement('input');
         input.type = opts.password ? 'password' : 'text';
         input.value = opts.value || '';
+        // A URL is not prose: spellcheck underlines it in red and a phone would capitalize it.
+        if (opts.url) {
+          input.spellcheck = false;
+          input.autocapitalize = 'off';
+          input.setAttribute('autocorrect', 'off');
+        }
         if (opts.placeholder) input.placeholder = opts.placeholder;
         if (opts.list) { input.setAttribute('list', opts.list); input.autocomplete = 'off'; }
         input.addEventListener('keydown', (e) => { if (e.key === 'Enter') finish(input.value); });
@@ -1338,7 +1372,15 @@
         || box.querySelector('.choices .act.on')
         || (opts.node && opts.node.querySelector('a, button'))
         || cancel;
-      setTimeout(() => target.focus(), 30);
+      setTimeout(() => {
+        target.focus();
+        // Focusing an input parks the caret at the end, which on a long value shows its tail and
+        // hides the host. Start at the front, where what matters is.
+        if (input && input.value) {
+          input.setSelectionRange(0, 0);
+          input.scrollLeft = 0;
+        }
+      }, 30);
     });
   }
   $('dlgScrim').addEventListener('click', (e) => {
@@ -1369,6 +1411,56 @@
       allItems[idx] = prev;
       refreshProjectOptions();
       renderList();
+      toast(err.message || 'update failed', true);
+    }
+  }
+
+  // What the server will refuse, checked here first so a rejection can be corrected in the
+  // dialog instead of costing the whole typed URL. Same rules as lib/redirect.js; the server
+  // still decides, this only saves the round trip.
+  function badTarget(url) {
+    let u;
+    try {
+      u = new URL(url);
+    } catch {
+      return 'Needs an absolute URL, starting with http:// or https://.';
+    }
+    if (u.protocol !== 'http:' && u.protocol !== 'https:') {
+      return 'Only http:// and https:// targets work. A scanner or a click cannot follow ' + u.protocol + ' safely.';
+    }
+    if (u.username || u.password) {
+      return 'Remove the username and password before the host. A redirect is a public hop, so anyone who follows it gets them.';
+    }
+    if (u.href.length > 2048) {
+      return 'Too long once encoded (' + u.href.length + ' characters, limit 2048).';
+    }
+    return null;
+  }
+
+  // Repoint a redirect. This is a PUT, not a PATCH: the target is the artifact's content, so it
+  // goes through the same path and the same validation a publish does.
+  //
+  // Not optimistic, unlike patchItem. The server normalizes what it stores (case-folded host,
+  // added trailing slash, percent-encoding, and a look-alike host punycoded), so the row takes
+  // the target from the response rather than from the box. Reloading the whole list instead
+  // would reorder it under the pointer and would leave the row asserting the old target if the
+  // reload failed. The title is not sent: the server keeps the stored one, and sending this
+  // tab's copy would overwrite a title changed elsewhere since the list loaded.
+  async function retarget(a, url) {
+    const idx = allItems.findIndex((x) => x.slug === a.slug);
+    try {
+      const res = await fetch('/api/artifacts/' + a.slug, {
+        method: 'PUT', headers: headers(), body: JSON.stringify({ content: url, type: 'redirect' }),
+      });
+      const d = await res.json().catch(() => ({}));
+      // The API calls the field content; this dialog calls it a target, so say target.
+      if (!res.ok) throw new Error((d.error || 'update failed').replace(/^content /, 'target '));
+      if (idx >= 0) {
+        allItems[idx] = { ...allItems[idx], target: d.target || url, updatedAt: new Date().toISOString() };
+        renderList();
+      }
+      toast('Repointed to ' + (d.target || url));
+    } catch (err) {
       toast(err.message || 'update failed', true);
     }
   }
@@ -1486,6 +1578,17 @@
         body.appendChild(t);
       }
 
+      // line 2b: where a redirect points, as plain text. The slug above already follows the
+      // redirect, so one third-party navigation per row is enough. A redirect published
+      // before meta carried the target has nothing to show here until its next update.
+      if (a.type === 'redirect' && a.target) {
+        const t = document.createElement('div');
+        t.className = 'item-target';
+        t.textContent = '→ ' + a.target;
+        t.title = a.target;
+        body.appendChild(t);
+      }
+
       // line 3 — project label (flat views only), tag chips, timestamp
       const meta = document.createElement('div');
       meta.className = 'item-meta';
@@ -1597,6 +1700,32 @@
 
       const fstate = a.frame === true ? 'on' : a.frame === false ? 'off' : 'auto';
       const more = dropdown('⋯', 'more-btn', (menu) => {
+        // The row shows where a redirect points, so it also offers the edit. Without this the
+        // only way to repoint a slug is the API, the CLI, or MCP.
+        if (a.type === 'redirect') menuItem(menu, 'Target…', '', async () => {
+          // The slug is what people already have, so say what does not change. A refused value
+          // reopens the box holding what was typed, with the reason above it: a long URL with one
+          // typo in it should not have to be typed twice.
+          const explain = 'Where this slug sends visitors. The slug does not change, so links already'
+            + ' shared, printed, or turned into a QR code keep working. Takes effect immediately.';
+          let value = a.target || '';
+          let why = '';
+          for (;;) {
+            const v = await dialog({
+              title: 'Target for “' + a.slug + '”',
+              body: why ? why + ' ' + explain : explain,
+              input: true, url: true, value, placeholder: 'https://example.com/where-it-goes',
+              confirmText: 'Repoint',
+            });
+            if (v === null) return;
+            const url = v.trim();
+            if (!url || url === (a.target || '')) return;
+            why = badTarget(url);
+            if (!why) return retarget(a, url);
+            value = url;
+          }
+        });
+
         // A redirect has no page to wrap, so the server never reaches the frame branch for
         // one. Offering the control here would take the choice and change nothing.
         if (a.type !== 'redirect') menuItem(menu, 'Frame: ' + fstate + '…', '', async () => {
