@@ -65,12 +65,40 @@ jobs:
       - name: Boot server
         run: |
           node server.js &
+          echo $! > server.pid
           for i in $(seq 1 20); do
             curl -sf http://localhost:3000/healthz && break
             sleep 0.5
           done
       - name: Smoke test API
         run: bash .github/workflows/smoke.sh http://localhost:3000 ci-test-key
+      # Ahead of the malformed-auth.json step on purpose: that step replaces the whole keys
+      # array, so a key minted for a durability check would not survive it. This one asserts
+      # the record comes back; the one below asserts a broken record does not take the key
+      # screen down with it.
+      - name: Artifacts and API keys survive a restart (local)
+        run: |
+          curl -sf -X POST http://localhost:3000/api/artifacts \
+            -H 'Authorization: Bearer ci-test-key' -H 'Content-Type: application/json' \
+            -d '{"content":"<h1>durable</h1>","slug":"restart-proof","visibility":"public"}'
+          # Same shape as the s3, git and postgres steps. The local backend is the one the
+          # README's quick start uses and the only one that never proved this, because the
+          # restart below exists to plant a malformed record, not to assert survival.
+          curl -sf -X POST http://localhost:3000/api/keys \
+            -H 'Authorization: Bearer ci-test-key' -H 'Content-Type: application/json' \
+            -d '{"name":"restart-proof","scopes":["read"]}' > /tmp/minted-key.json
+          key=$(node -e 'console.log(JSON.parse(require("fs").readFileSync("/tmp/minted-key.json","utf8")).key)')
+          case "$key" in ah_*) ;; *) echo "FAIL: the mint returned no key"; cat /tmp/minted-key.json; exit 1 ;; esac
+          kill "$(cat server.pid)"; sleep 1
+          node server.js &
+          for i in $(seq 1 20); do curl -sf http://localhost:3000/healthz && break; sleep 0.5; done
+          code=$(curl -s -o /dev/null -w '%{http_code}' http://localhost:3000/a/restart-proof)
+          [ "$code" = "200" ] || { echo "FAIL: artifact did not survive restart (got $code)"; exit 1; }
+          echo "ok: artifact survived a restart on the local backend"
+          code=$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $key" \
+            http://localhost:3000/api/artifacts)
+          [ "$code" = "200" ] || { echo "FAIL: the key minted before the restart stopped working (got $code)"; curl -s -H 'Authorization: Bearer ci-test-key' http://localhost:3000/api/keys; exit 1; }
+          echo "ok: the key minted before the restart still works"
       - name: Key routes survive a malformed auth.json
         run: |
           # A hand edit, or a crash partway through a write, leaves records the bearer path
@@ -368,9 +396,36 @@ jobs:
       - name: Boot server (sqlite backend)
         run: |
           node server.js &
+          echo $! > server.pid
           for i in $(seq 1 20); do curl -sf http://localhost:3000/healthz && break; sleep 0.5; done
       - name: Smoke test API against sqlite
         run: bash .github/workflows/smoke.sh http://localhost:3000 ci-test-key
+      - name: Artifacts and API keys survive a restart (sqlite)
+        run: |
+          curl -sf -X POST http://localhost:3000/api/artifacts \
+            -H 'Authorization: Bearer ci-test-key' -H 'Content-Type: application/json' \
+            -d '{"content":"<h1>durable</h1>","slug":"restart-proof","visibility":"public"}'
+          # Same shape as the s3, git and postgres steps. An artifact surviving proves the
+          # backend keeps objects; only a key proves auth.json came back, which is the separate
+          # promise docs/auth.md makes for all five backends and which sqlite proved on none.
+          # A key rather than an admin login, because the seed re-creates the admin with the
+          # same password whenever the record has no admin, so a login answers 200 even when
+          # auth.json is gone.
+          curl -sf -X POST http://localhost:3000/api/keys \
+            -H 'Authorization: Bearer ci-test-key' -H 'Content-Type: application/json' \
+            -d '{"name":"restart-proof","scopes":["read"]}' > /tmp/minted-key.json
+          key=$(node -e 'console.log(JSON.parse(require("fs").readFileSync("/tmp/minted-key.json","utf8")).key)')
+          case "$key" in ah_*) ;; *) echo "FAIL: the mint returned no key"; cat /tmp/minted-key.json; exit 1 ;; esac
+          kill "$(cat server.pid)"; sleep 1
+          node server.js &
+          for i in $(seq 1 20); do curl -sf http://localhost:3000/healthz && break; sleep 0.5; done
+          code=$(curl -s -o /dev/null -w '%{http_code}' http://localhost:3000/a/restart-proof)
+          [ "$code" = "200" ] || { echo "FAIL: artifact did not survive restart (got $code)"; exit 1; }
+          echo "ok: artifact survived a restart via sqlite"
+          code=$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $key" \
+            http://localhost:3000/api/artifacts)
+          [ "$code" = "200" ] || { echo "FAIL: the key minted before the restart stopped working (got $code)"; curl -s -H 'Authorization: Bearer ci-test-key' http://localhost:3000/api/keys; exit 1; }
+          echo "ok: the key minted before the restart still works"
 
   # Pull requests build the image and boot it, so a broken Dockerfile (or a change to what the
   # container reads at boot) fails before merge instead of after. No push, and no registry
