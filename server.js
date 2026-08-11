@@ -583,7 +583,11 @@ async function saveArtifact({ content, type = 'html', slug, title, expiresAt, fr
     throw new ApiError(400, 'cannot replace a zip site with inline content; delete and re-upload');
   }
 
-  const finalTitle = title || finalSlug;
+  // A PUT that omits the title keeps the one already stored, the way it keeps tags and project.
+  // Falling back to the slug instead threw the title away on every content-only update: the CLI
+  // `update` with no --title, MCP `update_artifact`, and repointing a redirect from the
+  // dashboard all did it, and the row simply stopped showing the label.
+  const finalTitle = title !== undefined ? (title || finalSlug) : (existing?.title || finalSlug);
   let html;
   if (type === 'html') html = content;
   else if (type === 'jsx' || type === 'tsx') html = buildJsxHtml(content, finalTitle);
@@ -699,13 +703,21 @@ async function duplicateArtifact(sourceSlug, body = {}) {
     updatedAt: new Date().toISOString(),
   };
   if (source.type === 'zip' && typeof source.files === 'number') meta.files = source.files;
-  // The copy points wherever source.url points, so read the target back out of the bytes
-  // copySlug just carried rather than trusting the source's meta. That keeps a copy's row
-  // agreeing with its own 301 even when the source's meta had drifted, and it gives a
-  // redirect published before meta carried a target one on the way through.
+  // A copy points where the original points, which is what the original's meta says, so this
+  // resolves the same way the serve path does rather than reading the copied bytes. Reading the
+  // bytes re-imported the drift the resolver exists to remove, and it promoted a value nothing
+  // had validated into meta, where the list API hands it to every read-scoped key: a target with
+  // credentials, published before that rule existed, would have leaked through a duplicate.
+  // Anything the parser refuses is left off the copy rather than written to it.
   if (source.type === 'redirect') {
-    const buf = await storage.getBuffer(`${targetSlug}/source.url`);
-    if (buf) meta.target = buf.toString('utf8');
+    const copied = await resolveRedirectTarget(source, () => storage.getBuffer(`${targetSlug}/source.url`));
+    if (copied !== null) {
+      try {
+        meta.target = parseRedirectTarget(copied, { publishing: true });
+      } catch {
+        // a legacy target this build would refuse: the copy keeps the bytes and shows no target
+      }
+    }
   }
   if (expiry !== undefined) meta.expiresAt = expiry;
   if (tagList && tagList.length) meta.tags = tagList;
@@ -1150,15 +1162,10 @@ app.get('/a/:slug', async (req, res) => {
   // follow it either way: the whole domain answers X-Robots-Tag: noindex, nofollow.
   if (meta.type === 'redirect') {
     // meta decides where this goes, with source.url as the fallback for a redirect published
-    // before meta carried a target. See lib/redirect.js for why the two could disagree.
-    const raw = await resolveRedirectTarget(meta, () => storage.getBuffer(`${slug}/source.url`));
-    if (raw === null) return notFound(res);
-    let target;
-    try {
-      target = parseRedirectTarget(raw);
-    } catch {
-      return notFound(res);
-    }
+    // before meta carried a target. The value comes back parsed, so a scheme this build refuses
+    // never reaches a Location header whatever is on disk. See lib/redirect.js.
+    const target = await resolveRedirectTarget(meta, () => storage.getBuffer(`${slug}/source.url`));
+    if (target === null) return notFound(res);
     res.set({
       'Cache-Control': 'no-store',
       'X-Content-Type-Options': 'nosniff',
@@ -1215,6 +1222,14 @@ app.get('/a/:slug/source', async (req, res, next) => {
   if (isExpired(meta)) return res.status(410).type('text/plain').send('artifact expired');
   if (meta.type === 'zip') return next(); // zip sites serve /source as a site path
   res.set({ 'X-Content-Type-Options': 'nosniff', 'Referrer-Policy': 'no-referrer' });
+  // A redirect's "source" is its target, and the docs say so, so it answers with the same value
+  // the 301 uses rather than the stored bytes. Streaming the body here let /source name one
+  // destination while the Location header sent visitors to another.
+  if (meta.type === 'redirect') {
+    const target = await resolveRedirectTarget(meta, () => storage.getBuffer(`${slug}/source.url`));
+    if (target === null) return notFound(res);
+    return res.type('text/plain; charset=utf-8').send(target);
+  }
   // forceType keeps source inert: an HTML/JSX source is served as text/plain, never executed.
   serveObject(req, res, `${slug}/source.${SOURCE_EXT[meta.type]}`, {
     forceType: 'text/plain; charset=utf-8',

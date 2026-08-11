@@ -27,6 +27,7 @@ Semantics:
 
 - Body limits: 10 MB JSON, 50 MB zip.
 - `type: "redirect"` publishes a short link instead of a page: `content` is the target, and `GET /a/:slug` answers `301` with `Location: <target>`, `Cache-Control: no-store` and `Referrer-Policy: no-referrer`. The target must be an absolute `http://` or `https://` URL and cannot carry a username or password; anything else is a `400`. What gets stored is the normalized URL, capped at 2048 characters, in `meta.target` (which the 301 follows) and in the artifact body. Redirects are never framed and ignore `?raw=1`, and `GET /a/:slug/source` returns the stored target as `text/plain`. Full behavior, including what an open redirector costs you, in [Redirects](formats.md#redirects).
+- `PUT` without `title` keeps the title already stored, the way it keeps `tags` and `project`. Send `"title": ""` to clear it back to the slug.
 - `POST` with an existing slug → `409` (use `PUT` to update).
 - Disabled artifacts return `404`; expired ones (`expiresAt` in the past) return `410`. Both keep their content — re-enable or clear/extend the expiry to serve again.
 - Tags: an array of strings, or one comma-separated string (the only form the zip endpoint's `?tags=` accepts). Each tag must match `[a-z0-9][a-z0-9-]{0,31}`; max 10 per artifact. Input is lowercased and deduplicated. `PATCH` replaces the whole list; an empty list clears it. `PUT` without `tags` keeps the existing ones. Artifacts published before tags existed list as `"tags": []`. In the web UI, tags render as chips — click one to filter the list.

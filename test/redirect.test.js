@@ -83,4 +83,30 @@ test('meta decides the target, and the body is only the fallback', async () => {
 test('neither copy present is null, which the caller answers as a 404', async () => {
   assert.equal(await resolveRedirectTarget({}, async () => null), null);
   assert.equal(await resolveRedirectTarget(undefined, async () => null), null);
+  // Buffer.alloc(0) is truthy, so a zero-byte body needs its length checked or it comes back
+  // as an empty target instead of nothing.
+  assert.equal(await resolveRedirectTarget({}, async () => Buffer.alloc(0)), null);
+});
+
+test('a meta.target this build refuses falls through to the body', async () => {
+  const readSource = async () => Buffer.from('https://example.com/still-good');
+  for (const junk of ['javascript:alert(1)', '/relative', '   ', 'not a url', 'https://example.com/' + 'a'.repeat(MAX_REDIRECT_TARGET_LEN)]) {
+    assert.equal(
+      await resolveRedirectTarget({ target: junk }, readSource),
+      'https://example.com/still-good',
+      `meta.target ${JSON.stringify(junk.slice(0, 24))} should fall through, not 404 the slug`,
+    );
+  }
+  // Both unusable is a 404, not a throw.
+  assert.equal(await resolveRedirectTarget({ target: 'javascript:alert(1)' }, async () => Buffer.from('data:text/html,x')), null);
+});
+
+test('the resolver returns a parsed target, so a caller cannot ship a raw stored value', async () => {
+  assert.equal(
+    await resolveRedirectTarget({ target: '  HTTPS://EXAMPLE.COM/X  ' }, async () => null),
+    'https://example.com/X',
+  );
+  // CRLF cannot survive: new URL strips it, so no caller can split a header with a stored value.
+  const target = await resolveRedirectTarget({ target: 'https://example.com/x\r\nX-Injected: 1' }, async () => null);
+  assert.doesNotMatch(target, /[\r\n]/);
 });
