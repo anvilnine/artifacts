@@ -106,6 +106,11 @@ jobs:
     runs-on: ubuntu-latest
     env:
       ARTIFACTS_API_KEY: ci-test-key
+      # Every backend seeds the admin, not just the local one. The seed is the only boot-time
+      # write the server makes, so a backend that cannot store auth.json at boot shows up here
+      # rather than on someone's server.
+      ARTIFACTS_ADMIN_USERNAME: ci-admin
+      ARTIFACTS_ADMIN_PASSWORD: ci-admin-password
       PORT: 3000
       STORAGE_BACKEND: s3
       S3_ENDPOINT: http://127.0.0.1:9000
@@ -140,11 +145,21 @@ jobs:
           for i in $(seq 1 20); do curl -sf http://localhost:3000/healthz && break; sleep 0.5; done
       - name: Smoke test API against S3
         run: bash .github/workflows/smoke.sh http://localhost:3000 ci-test-key
-      - name: Artifacts survive a fresh restart (no local disk)
+      - name: Artifacts and auth survive a fresh restart (no local disk)
         run: |
           curl -sf -X POST http://localhost:3000/api/artifacts \
             -H 'Authorization: Bearer ci-test-key' -H 'Content-Type: application/json' \
             -d '{"content":"<h1>durable</h1>","slug":"restart-proof","visibility":"public"}'
+          # Mint a managed key on the way in. An artifact surviving proves the backend keeps
+          # objects; only a key proves auth.json came back, which is the separate promise
+          # docs/auth.md makes and which nothing outside the local backend used to check.
+          # A key and not an admin login on purpose: the seed re-creates the admin with the
+          # same password on any boot, so logging in answers 200 even when auth.json is gone.
+          # A key cannot be re-seeded, so it is the only half of the record that can fail here.
+          curl -sf -X POST http://localhost:3000/api/keys \
+            -H 'Authorization: Bearer ci-test-key' -H 'Content-Type: application/json' \
+            -d '{"name":"restart-proof","scopes":["read"]}' > /tmp/minted-key.json
+          key=$(node -e 'console.log(JSON.parse(require("fs").readFileSync("/tmp/minted-key.json","utf8")).key)')
           # kill the server and start a brand-new process against the same bucket, with
           # nothing on local disk — proves durability across a container reprovision.
           kill "$(cat server.pid)"; sleep 1
@@ -153,11 +168,17 @@ jobs:
           code=$(curl -s -o /dev/null -w '%{http_code}' http://localhost:3000/a/restart-proof)
           [ "$code" = "200" ] || { echo "FAIL: artifact did not survive restart (got $code)"; exit 1; }
           echo "ok: artifact survived a fresh restart via S3"
+          code=$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $key" \
+            http://localhost:3000/api/artifacts)
+          [ "$code" = "200" ] || { echo "FAIL: key minted before the restart -> $code"; exit 1; }
+          echo "ok: the managed key survived it too"
 
   smoke-git:
     runs-on: ubuntu-latest
     env:
       ARTIFACTS_API_KEY: ci-test-key
+      ARTIFACTS_ADMIN_USERNAME: ci-admin
+      ARTIFACTS_ADMIN_PASSWORD: ci-admin-password
       PORT: 3000
       STORAGE_BACKEND: git
       GIT_REMOTE_URL: http://127.0.0.1:4600/artifacts.git
@@ -189,11 +210,17 @@ jobs:
           for i in $(seq 1 20); do curl -sf http://localhost:3000/healthz && break; sleep 0.5; done
       - name: Smoke test API against git
         run: bash .github/workflows/smoke.sh http://localhost:3000 ci-test-key
-      - name: Artifacts survive a fresh restart (new work dir, rehydrate from remote)
+      - name: Artifacts and auth survive a fresh restart (new work dir, rehydrate from remote)
         run: |
           curl -sf -X POST http://localhost:3000/api/artifacts \
             -H 'Authorization: Bearer ci-test-key' -H 'Content-Type: application/json' \
             -d '{"content":"<h1>durable</h1>","slug":"restart-proof","visibility":"public"}'
+          # auth.json has to reach the remote like any other object, or the fresh work dir
+          # below clones back an instance with no admin and no keys.
+          curl -sf -X POST http://localhost:3000/api/keys \
+            -H 'Authorization: Bearer ci-test-key' -H 'Content-Type: application/json' \
+            -d '{"name":"restart-proof","scopes":["read"]}' > /tmp/minted-key.json
+          key=$(node -e 'console.log(JSON.parse(require("fs").readFileSync("/tmp/minted-key.json","utf8")).key)')
           kill "$(cat server.pid)"; sleep 1
           # brand-new working copy -> the server must clone it back from the git remote
           GIT_WORK_DIR=/tmp/git-work-fresh node server.js &
@@ -201,6 +228,10 @@ jobs:
           code=$(curl -s -o /dev/null -w '%{http_code}' http://localhost:3000/a/restart-proof)
           [ "$code" = "200" ] || { echo "FAIL: artifact did not survive restart (got $code)"; exit 1; }
           echo "ok: artifact rehydrated from the git remote after a fresh restart"
+          code=$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $key" \
+            http://localhost:3000/api/artifacts)
+          [ "$code" = "200" ] || { echo "FAIL: key minted before the restart -> $code"; exit 1; }
+          echo "ok: the managed key rehydrated too"
 
   smoke-postgres:
     runs-on: ubuntu-latest
@@ -216,6 +247,8 @@ jobs:
           --health-cmd pg_isready --health-interval 5s --health-timeout 5s --health-retries 10
     env:
       ARTIFACTS_API_KEY: ci-test-key
+      ARTIFACTS_ADMIN_USERNAME: ci-admin
+      ARTIFACTS_ADMIN_PASSWORD: ci-admin-password
       PORT: 3000
       STORAGE_BACKEND: postgres
       DATABASE_URL: postgres://postgres:pw@127.0.0.1:5432/artifacts
@@ -234,23 +267,31 @@ jobs:
           for i in $(seq 1 20); do curl -sf http://localhost:3000/healthz && break; sleep 0.5; done
       - name: Smoke test API against postgres
         run: bash .github/workflows/smoke.sh http://localhost:3000 ci-test-key
-      - name: Artifacts survive a fresh restart (external DB)
+      - name: Artifacts and auth survive a fresh restart (external DB)
         run: |
           curl -sf -X POST http://localhost:3000/api/artifacts \
             -H 'Authorization: Bearer ci-test-key' -H 'Content-Type: application/json' \
             -d '{"content":"<h1>durable</h1>","slug":"restart-proof","visibility":"public"}'
+          curl -sf -X POST http://localhost:3000/api/keys \
+            -H 'Authorization: Bearer ci-test-key' -H 'Content-Type: application/json' \
+            -d '{"name":"restart-proof","scopes":["read"]}' > /tmp/minted-key.json
+          key=$(node -e 'console.log(JSON.parse(require("fs").readFileSync("/tmp/minted-key.json","utf8")).key)')
           kill "$(cat server.pid)"; sleep 1
           node server.js &
           for i in $(seq 1 20); do curl -sf http://localhost:3000/healthz && break; sleep 0.5; done
           code=$(curl -s -o /dev/null -w '%{http_code}' http://localhost:3000/a/restart-proof)
           [ "$code" = "200" ] || { echo "FAIL: artifact did not survive restart (got $code)"; exit 1; }
           echo "ok: artifact survived a fresh restart via postgres"
+          code=$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $key" \
+            http://localhost:3000/api/artifacts)
+          [ "$code" = "200" ] || { echo "FAIL: key minted before the restart -> $code"; exit 1; }
+          echo "ok: the managed key survived it too"
       - name: Two replicas do not clobber each other's auth writes
         run: |
           # postgres is one of the two backends that can host a fleet, so this is where the
-          # replica case belongs. Replica B boots before the admin exists, which is the state
-          # that used to do the damage: it held the whole auth record from boot and wrote all
-          # of it back on any change of its own.
+          # replica case belongs. Replica A has been up since the restart step above, so it
+          # holds the whole auth record as it looked then. That stale snapshot is what used
+          # to do the damage: any change of A's own wrote all of it back.
           node server.js & # replica B, same database, left running for the next step
           for i in $(seq 1 20); do curl -sf http://localhost:3001/healthz && break; sleep 0.5; done
         env:
@@ -259,35 +300,46 @@ jobs:
         run: |
           AUTH='Authorization: Bearer ci-test-key'
           JSON='Content-Type: application/json'
-          # Claim the admin on replica A and change the password there.
-          curl -sf -X POST http://localhost:3000/api/auth/setup -H "$JSON" -c /tmp/jar \
-            -d '{"username":"fleet-admin","password":"first-password"}' > /dev/null
-          curl -sf -X POST http://localhost:3000/api/auth/password -H "$JSON" -b /tmp/jar \
-            -d '{"currentPassword":"first-password","newPassword":"second-password"}' > /dev/null
-          # Any write on replica B is enough. In production the usual one is not an admin
+          # Change the seeded admin's password on replica B. The job seeds the account from
+          # env, so there is no unclaimed setup route to go through here.
+          curl -sf -X POST http://localhost:3001/api/auth/login -H "$JSON" -c /tmp/jar \
+            -d '{"username":"ci-admin","password":"ci-admin-password"}' > /dev/null
+          curl -sf -X POST http://localhost:3001/api/auth/password -H "$JSON" -b /tmp/jar \
+            -d '{"currentPassword":"ci-admin-password","newPassword":"second-password"}' > /dev/null
+          # Any write on replica A is enough. In production the usual one is not an admin
           # action at all: a key's lastUsedAt is refreshed through the same path, so an
           # ordinary bearer read does it.
+          curl -sf -X POST http://localhost:3000/api/keys -H "$AUTH" -H "$JSON" \
+            -d '{"name":"minted-on-a","scopes":["read"]}' > /dev/null
+          # Then one back on B, which has not seen A's key. Without this the key assertion
+          # below cannot fail: the replica doing the clobbering always keeps its own write.
+          # Each replica has to hold a key the other one minted for the check to mean anything.
           curl -sf -X POST http://localhost:3001/api/keys -H "$AUTH" -H "$JSON" \
             -d '{"name":"minted-on-b","scopes":["read"]}' > /dev/null
-          # A third replica reads the file fresh. It is the only honest way to ask what the
+          # A third replica reads the record fresh. It is the only honest way to ask what the
           # backend actually holds now.
           PORT=3002 node server.js &
           for i in $(seq 1 20); do curl -sf http://localhost:3002/healthz && break; sleep 0.5; done
           new=$(curl -s -o /dev/null -w '%{http_code}' -X POST http://localhost:3002/api/auth/login \
-            -H "$JSON" -d '{"username":"fleet-admin","password":"second-password"}')
+            -H "$JSON" -d '{"username":"ci-admin","password":"second-password"}')
           old=$(curl -s -o /dev/null -w '%{http_code}' -X POST http://localhost:3002/api/auth/login \
-            -H "$JSON" -d '{"username":"fleet-admin","password":"first-password"}')
+            -H "$JSON" -d '{"username":"ci-admin","password":"ci-admin-password"}')
           [ "$new" = "200" ] || { echo "FAIL: new password -> $new (the change was reverted)"; exit 1; }
           [ "$old" = "401" ] || { echo "FAIL: old password -> $old (the change was reverted)"; exit 1; }
-          echo "ok: the password change on A survived the write on B"
-          curl -sf -H "$AUTH" http://localhost:3002/api/keys | grep -q minted-on-b \
-            || { echo "FAIL: the key minted on B is gone"; exit 1; }
-          echo "ok: the key minted on B survived too"
+          echo "ok: the password change on B survived the write on A"
+          curl -sf -H "$AUTH" http://localhost:3002/api/keys > /tmp/fleet-keys.json
+          grep -q minted-on-a /tmp/fleet-keys.json \
+            || { echo "FAIL: the key minted on A is gone"; cat /tmp/fleet-keys.json; exit 1; }
+          grep -q minted-on-b /tmp/fleet-keys.json \
+            || { echo "FAIL: the key minted on B is gone"; cat /tmp/fleet-keys.json; exit 1; }
+          echo "ok: both replicas' keys survived each other's writes"
 
   smoke-sqlite:
     runs-on: ubuntu-latest
     env:
       ARTIFACTS_API_KEY: ci-test-key
+      ARTIFACTS_ADMIN_USERNAME: ci-admin
+      ARTIFACTS_ADMIN_PASSWORD: ci-admin-password
       PORT: 3000
       STORAGE_BACKEND: sqlite
       SQLITE_PATH: /tmp/artifacts.db
@@ -324,7 +376,9 @@ jobs:
       - name: Smoke test container
         run: |
           docker run -d --name "$CONTAINER" -p 3000:3000 \
-            -e ARTIFACTS_API_KEY=ci-test-key "$IMAGE"
+            -e ARTIFACTS_API_KEY=ci-test-key \
+            -e ARTIFACTS_ADMIN_USERNAME=ci-admin -e ARTIFACTS_ADMIN_PASSWORD=ci-admin-password \
+            "$IMAGE"
           for i in $(seq 1 20); do
             curl -sf http://localhost:3000/healthz && break
             sleep 0.5
@@ -353,7 +407,9 @@ jobs:
       - name: Smoke test container
         run: |
           docker run -d --name artifacts -p 3000:3000 \
-            -e ARTIFACTS_API_KEY=ci-test-key artifacts-host
+            -e ARTIFACTS_API_KEY=ci-test-key \
+            -e ARTIFACTS_ADMIN_USERNAME=ci-admin -e ARTIFACTS_ADMIN_PASSWORD=ci-admin-password \
+            artifacts-host
           for i in $(seq 1 20); do
             curl -sf http://localhost:3000/healthz && break
             sleep 0.5
