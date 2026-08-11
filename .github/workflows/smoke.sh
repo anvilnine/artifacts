@@ -505,11 +505,14 @@ echo "ok: MCP serverInfo version matches package.json"
 # The transport is stateless (sessionIdGenerator: undefined), so each POST stands on its own
 # and tools/list needs no initialize before it. Until now the suite only called initialize,
 # so a tool that threw on every call still shipped green.
-# Not covered here: the per-tool scope gate, which needs a scoped managed key to test.
-mcp_call() { # mcp_call <id> <method> <params-json>
-  curl -s -X POST "$BASE/mcp" -H "$AUTH" -H "$JSON" -H 'Accept: application/json, text/event-stream' \
-    -d "{\"jsonrpc\":\"2.0\",\"id\":$1,\"method\":\"$2\",\"params\":$3}"
+mcp_call_as() { # mcp_call_as <bearer> <id> <method> <params-json>
+  curl -s -X POST "$BASE/mcp" -H "Authorization: Bearer $1" -H "$JSON" \
+    -H 'Accept: application/json, text/event-stream' \
+    -d "{\"jsonrpc\":\"2.0\",\"id\":$2,\"method\":\"$3\",\"params\":$4}"
 }
+# The bootstrap key holds every scope, so it can drive any tool. The scope gate is exercised
+# further down with a managed key that holds only `read`.
+mcp_call() { mcp_call_as "$KEY" "$@"; }
 # The SSE frame wraps one JSON object on a `data:` line; the assertions below read the raw
 # body, which is enough for presence checks and one field extraction.
 mcp_text() { # stdin: an MCP tool result -> stdout: its text content
@@ -550,7 +553,69 @@ mcp_list=$(mcp_call 4 tools/call '{"name":"list_artifacts","arguments":{}}')
 printf '%s' "$mcp_list" | grep -q 'ci-mcp' || fail "MCP list_artifacts omits the artifact it just published"
 echo "ok: MCP list_artifacts"
 
-mcp_call 5 tools/call '{"name":"delete_artifact","arguments":{"slug":"ci-mcp"}}' > /dev/null
+# A mutating tool past publish. Registering a tool and writing its handler are independent
+# (the metadata at server.js registerTool is what tools/list serves), so a handler that
+# throws on every call still passes every check above. The result text is not the proof
+# here: the tag is read back over the REST API, which is a different code path from the one
+# that claims to have set it.
+mcp_tagged=$(mcp_call 5 tools/call \
+  '{"name":"set_artifact_tags","arguments":{"slug":"ci-mcp","tags":["ci-mcp-tag"]}}')
+if printf '%s' "$mcp_tagged" | grep -q '"isError":true'; then
+  fail "MCP set_artifact_tags errored ($(printf '%s' "$mcp_tagged" | tr '\n' ' '))"
+fi
+curl -s -H "$AUTH" "$BASE/api/artifacts?tag=ci-mcp-tag" | grep -q '"slug":"ci-mcp"' \
+  || fail "MCP set_artifact_tags reported success, but the tag filter does not return ci-mcp"
+echo "ok: MCP set_artifact_tags round-trip"
+
+# --- the per-tool scope gate ---
+# Every call above carried the bootstrap key, which outranks every scope, so requireScope
+# (server.js) has never been exercised by CI. A refactor that deleted the gate outright
+# shipped green through both the unit tests and this suite.
+mcp_key_resp=$(curl -s -X POST "$BASE/api/keys" -H "$AUTH" -H "$JSON" \
+  -d '{"name":"ci-mcp-readonly","scopes":["read"]}')
+ro_key=$(printf '%s' "$mcp_key_resp" | sed -n 's/.*"key":"\([^"]*\)".*/\1/p')
+ro_id=$(printf '%s' "$mcp_key_resp" | sed -n 's/.*"id":"\([^"]*\)".*/\1/p')
+case "$ro_key" in
+  ah_*) ;;
+  *) fail "could not mint a read-only key (got: $(printf '%s' "$mcp_key_resp" | tr '\n' ' '))" ;;
+esac
+
+# The read key has to work for a read tool, or the two refusals below prove nothing: a key
+# that is broken outright would be "refused" by every tool for the wrong reason.
+mcp_ro_list=$(mcp_call_as "$ro_key" 6 tools/call '{"name":"list_artifacts","arguments":{}}')
+if printf '%s' "$mcp_ro_list" | grep -q '"isError":true'; then
+  fail "MCP list_artifacts refused a read-scoped key ($(printf '%s' "$mcp_ro_list" | tr '\n' ' '))"
+fi
+printf '%s' "$mcp_ro_list" | grep -q 'ci-mcp' \
+  || fail "MCP list_artifacts returned no artifacts for a read-scoped key"
+echo "ok: MCP read-scoped key drives a read tool"
+
+# publish sits one rank above read. The refusal arrives as a tool result carrying isError,
+# not as a JSON-RPC error, so a check for '"error"' would never match it.
+mcp_denied=$(mcp_call_as "$ro_key" 7 tools/call \
+  '{"name":"publish_artifact","arguments":{"content":"<h1>denied</h1>","type":"html","slug":"ci-mcp-denied","visibility":"public"}}')
+printf '%s' "$mcp_denied" | grep -q '"isError":true' \
+  || fail "MCP publish_artifact accepted a read-scoped key ($(printf '%s' "$mcp_denied" | tr '\n' ' '))"
+# The scope name arrives inside JSON, so its quotes are backslash-escaped in this body.
+printf '%s' "$mcp_denied" | grep -q 'lacks the .*publish.* scope' \
+  || fail "MCP publish refusal did not name the missing scope ($(printf '%s' "$mcp_denied" | tr '\n' ' '))"
+# The message is one thing, whether the write happened is the thing that matters.
+code=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/a/ci-mcp-denied")
+expect_code 404 "$code" "MCP publish refused by scope wrote nothing"
+
+# delete needs `full`, two ranks above read, so this covers the rank comparison and not just
+# a single missing scope.
+mcp_denied_del=$(mcp_call_as "$ro_key" 8 tools/call \
+  '{"name":"delete_artifact","arguments":{"slug":"ci-mcp"}}')
+printf '%s' "$mcp_denied_del" | grep -q '"isError":true' \
+  || fail "MCP delete_artifact accepted a read-scoped key ($(printf '%s' "$mcp_denied_del" | tr '\n' ' '))"
+code=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/a/ci-mcp")
+expect_code 200 "$code" "MCP delete refused by scope deleted nothing"
+echo "ok: MCP scope gate refuses publish and delete from a read-scoped key"
+
+curl -sf -X DELETE "$BASE/api/keys/$ro_id" -H "$AUTH" > /dev/null
+
+mcp_call 9 tools/call '{"name":"delete_artifact","arguments":{"slug":"ci-mcp"}}' > /dev/null
 code=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/a/ci-mcp")
 expect_code 404 "$code" "MCP delete_artifact"
 
