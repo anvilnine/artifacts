@@ -549,6 +549,7 @@ echo "ok: MCP tools/list serves all $registered_tools registered tools"
 # line below for an unrelated reason. Both DELETEs tolerate a 404.
 curl -s -X DELETE "$BASE/api/artifacts/ci-mcp" -H "$AUTH" > /dev/null
 curl -s -X DELETE "$BASE/api/artifacts/ci-mcp-denied" -H "$AUTH" > /dev/null
+curl -s -X DELETE "$BASE/api/artifacts/ci-mcp-default" -H "$AUTH" > /dev/null
 
 mcp_pub=$(mcp_call 3 tools/call \
   '{"name":"publish_artifact","arguments":{"content":"<h1>mcp</h1>","type":"html","slug":"ci-mcp","visibility":"public"}}')
@@ -579,6 +580,24 @@ printf '%s' "$mcp_tag_filter" | grep -q '"slug":"ci-mcp"' \
   || fail "MCP set_artifact_tags did not tag ci-mcp (call: $(printf '%s' "$mcp_tagged" | tr '\n' ' ') / filter: $mcp_tag_filter)"
 echo "ok: MCP set_artifact_tags round-trip"
 
+# publish_artifact's own description tells an agent what an omitted visibility does and what
+# kind of URL comes back. Every MCP publish above passes visibility explicitly, so both claims
+# were unchecked over this transport. Read the stored visibility back over REST rather than
+# trusting the tool's result text, the same way the tags check does. Assumes the shipped
+# DEFAULT_VISIBILITY, as the REST capability-link block already does.
+mcp_default=$(mcp_call 6 tools/call \
+  '{"name":"publish_artifact","arguments":{"content":"<h1>mcp default</h1>","type":"html","slug":"ci-mcp-default"}}')
+mcp_default_url=$(printf '%s' "$mcp_default" | mcp_text)
+case "$mcp_default_url" in
+  *'?k='*) ;;
+  *) fail "MCP publish with no visibility returned an untokened url '$mcp_default_url' (got: $(printf '%s' "$mcp_default" | tr '\n' ' '))" ;;
+esac
+mcp_default_meta=$(curl -s -H "$AUTH" "$BASE/api/artifacts")
+printf '%s' "$mcp_default_meta" | tr '{' '\n' | grep '"slug":"ci-mcp-default"' | grep -q '"visibility":"private"' \
+  || fail "MCP publish with no visibility did not store private (list: $mcp_default_meta)"
+echo "ok: MCP publish with no visibility is private and returns a tokened url"
+mcp_call 7 tools/call '{"name":"delete_artifact","arguments":{"slug":"ci-mcp-default"}}' > /dev/null
+
 # --- MCP scopes: a read-scoped key drives a read tool and is refused by publish and delete ---
 # Every call above carries the bootstrap key, which outranks every scope, so nothing above
 # reaches requireScope (server.js). Delete that gate outright and the unit tests plus every
@@ -598,7 +617,7 @@ esac
 
 # The read key has to work for a read tool, or the two refusals below prove nothing: a key
 # that is broken outright would be "refused" by every tool for the wrong reason.
-mcp_ro_list=$(mcp_call_as "$mcp_read_key" 6 tools/call '{"name":"list_artifacts","arguments":{}}')
+mcp_ro_list=$(mcp_call_as "$mcp_read_key" 8 tools/call '{"name":"list_artifacts","arguments":{}}')
 if printf '%s' "$mcp_ro_list" | grep -q '"isError":true'; then
   fail "MCP list_artifacts refused a read-scoped key ($(printf '%s' "$mcp_ro_list" | tr '\n' ' '))"
 fi
@@ -608,7 +627,7 @@ echo "ok: MCP list_artifacts accepts a read-scoped key"
 
 # publish sits one rank above read. The refusal arrives as a tool result carrying isError,
 # not as a JSON-RPC error, so a check for '"error"' would never match it.
-mcp_denied=$(mcp_call_as "$mcp_read_key" 7 tools/call \
+mcp_denied=$(mcp_call_as "$mcp_read_key" 9 tools/call \
   '{"name":"publish_artifact","arguments":{"content":"<h1>denied</h1>","type":"html","slug":"ci-mcp-denied","visibility":"public"}}')
 printf '%s' "$mcp_denied" | grep -q '"isError":true' \
   || fail "MCP publish_artifact accepted a read-scoped key ($(printf '%s' "$mcp_denied" | tr '\n' ' '))"
@@ -622,7 +641,7 @@ expect_code 404 "$code" "scope-refused publish"
 # delete needs `full`. A read key is refused by `publish` and by `full` alike, so the check
 # on the message is what separates them: name the wrong scope here and this goes red, which
 # is what stops delete_artifact's gate from being quietly downgraded to publish.
-mcp_denied_del=$(mcp_call_as "$mcp_read_key" 8 tools/call \
+mcp_denied_del=$(mcp_call_as "$mcp_read_key" 10 tools/call \
   '{"name":"delete_artifact","arguments":{"slug":"ci-mcp"}}')
 printf '%s' "$mcp_denied_del" | grep -q '"isError":true' \
   || fail "MCP delete_artifact accepted a read-scoped key ($(printf '%s' "$mcp_denied_del" | tr '\n' ' '))"
@@ -635,7 +654,7 @@ echo "ok: MCP scope gate refuses publish and delete from a read-scoped key"
 curl -sf -X DELETE "$BASE/api/keys/$mcp_read_key_id" -H "$AUTH" > /dev/null \
   || fail "could not revoke the read-only MCP key ($mcp_read_key_id)"
 
-mcp_call 9 tools/call '{"name":"delete_artifact","arguments":{"slug":"ci-mcp"}}' > /dev/null
+mcp_call 11 tools/call '{"name":"delete_artifact","arguments":{"slug":"ci-mcp"}}' > /dev/null
 code=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/a/ci-mcp")
 expect_code 404 "$code" "MCP delete_artifact"
 
