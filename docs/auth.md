@@ -44,7 +44,7 @@ instance that already has one.
 
 | Scope | Grants |
 |---|---|
-| `read` | list artifacts, read config, MCP `list_artifacts` |
+| `read` | list artifacts, read config, mint a share link, fetch an artifact's QR code, MCP `list_artifacts` |
 | `publish` | create / replace / patch artifacts, all MCP mutation tools (implies `read`) |
 | `full` | delete, write config, MCP `delete_artifact` (implies `publish`) |
 

@@ -347,23 +347,25 @@ switch (command) {
 
   case 'qr': {
     need(1, '<slug> [--png] [--scale n] [--margin n] [-o file]');
+    if (!key) fail('API key required: pass --key or set ARTIFACTS_API_KEY');
+    // `-o out.png` means a PNG, the same way publish infers the type from the extension.
+    const png = opts.png || /\.png$/i.test(opts.output || '');
+    // A PNG on a terminal is noise, so refuse before spending the request.
+    if (png && !opts.output) fail('--png needs -o <file>');
     const query = new URLSearchParams();
-    if (opts.png) query.set('format', 'png');
+    if (png) query.set('format', 'png');
     if (opts.scale !== undefined) query.set('scale', opts.scale);
     if (opts.margin !== undefined) query.set('margin', opts.margin);
     const suffix = [...query].length ? `?${query}` : '';
     // The PNG is binary, so this path reads the body as bytes rather than going through api().
     const res = await fetch(`${url}/api/artifacts/${args[0]}/qr${suffix}`, {
-      headers: key ? { authorization: `Bearer ${key}` } : {},
+      headers: { authorization: `Bearer ${key}` },
     });
     const body = Buffer.from(await res.arrayBuffer());
     if (!res.ok) fail(`${res.status} ${res.statusText}: ${body.toString('utf8').trim()}`);
     if (opts.output) {
       await fs.writeFile(opts.output, body);
       console.log(opts.output);
-    } else if (opts.png) {
-      // A PNG on a terminal is noise, so it needs a file.
-      fail('--png needs -o <file>');
     } else {
       process.stdout.write(body.toString('utf8'));
     }

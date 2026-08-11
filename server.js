@@ -156,11 +156,17 @@ function metaEpoch(meta) {
 
 // The URL to hand out: public is the bare link; private/password carry a token so the
 // private default costs the operator nothing — what they copy is immediately viewable.
+// The permanent URL of an artifact: no token, and the trailing slash a zip site needs so its
+// relative assets resolve. Both the share link and the QR code start here, so the slash rule
+// lives in one place.
+function canonicalUrl(meta) {
+  return `${BASE_URL}/a/${meta.slug}${meta.type === 'zip' ? '/' : ''}`;
+}
+
 function tokenedUrl(meta) {
-  const base = `${BASE_URL}/a/${meta.slug}`;
-  const suffix = meta.type === 'zip' ? '/' : '';
-  if (meta.visibility !== 'private' && meta.visibility !== 'password') return base + suffix;
-  return `${base}${suffix}?k=${signCapToken(meta.slug, metaEpoch(meta))}`;
+  const base = canonicalUrl(meta);
+  if (meta.visibility !== 'private' && meta.visibility !== 'password') return base;
+  return `${base}?k=${signCapToken(meta.slug, metaEpoch(meta))}`;
 }
 
 // A cookie lives at most UNLOCK_TTL_MS, and never past the token that minted it.
@@ -523,13 +529,15 @@ function parseTags(value) {
 }
 
 // A whole-number query parameter inside a range. Rejects junk rather than silently falling
-// back to the default, so a caller that asks for scale=huge learns it asked for nothing.
+// back to the default, so a caller that asks for scale=huge learns it asked for nothing. The
+// digits-only test is deliberate: Number() would take "0x10", "1e1", " 8" and (through the
+// extended query parser) ["8"], none of which are the whole number the docs promise.
 function intParam(value, fallback, min, max, name) {
   if (value === undefined || value === '') return fallback;
+  const bad = () => new ApiError(400, `${name} must be a whole number between ${min} and ${max}`);
+  if (typeof value !== 'string' || !/^\d+$/.test(value)) throw bad();
   const n = Number(value);
-  if (!Number.isInteger(n) || n < min || n > max) {
-    throw new ApiError(400, `${name} must be a whole number between ${min} and ${max}`);
-  }
+  if (n < min || n > max) throw bad();
   return n;
 }
 
@@ -1384,14 +1392,26 @@ app.get('/api/artifacts/:slug/qr', requireAuth('read'), async (req, res, next) =
     const meta = SLUG_RE.test(slug) ? await readMeta(slug) : null;
     if (!meta) throw new ApiError(404, `slug "${slug}" not found`);
 
-    const format = req.query.format === undefined || req.query.format === '' ? 'svg' : String(req.query.format);
+    const raw = req.query.format;
+    const format = raw === undefined || raw === '' ? 'svg' : raw;
     if (format !== 'svg' && format !== 'png') {
       throw new ApiError(400, 'format must be svg or png');
     }
-    const scale = intParam(req.query.scale, 8, 1, 40, 'scale');
-    const margin = intParam(req.query.margin, 4, 0, 16, 'margin');
+    // Scale tops out at 16, not at whatever a caller asks for. Rasterizing and deflating a
+    // PNG is the only synchronous CPU on a read-scope route, and it grows with the square of
+    // the scale: at 40 with the widest margin one request blocks the loop for about 20ms,
+    // which a burst turns into a stalled server. 16 covers print (a 41-module code lands at
+    // roughly 900px) and costs a tenth of that.
+    const scale = intParam(req.query.scale, 8, 1, 16, 'scale');
+    const margin = intParam(req.query.margin, 4, 0, 8, 'margin');
 
-    const url = `${BASE_URL}/a/${slug}${meta.type === 'zip' ? '/' : ''}`;
+    const url = canonicalUrl(meta);
+    // This is the first /api route to answer with a document type a browser can execute, so
+    // it says so: nothing to load, no scripts, no sniffing to another type.
+    res.set({
+      'Content-Security-Policy': "default-src 'none'; sandbox",
+      'X-Content-Type-Options': 'nosniff',
+    });
     if (format === 'png') {
       const png = qrPng(url, { scale, margin });
       res.set({ 'Content-Type': 'image/png', 'Content-Disposition': `inline; filename="${slug}.png"` });
@@ -1424,8 +1444,12 @@ app.get('/api/artifacts', requireAuth('read'), async (req, res, next) => {
   }
 });
 
+// baseUrl rides along because the dashboard cannot derive it: the origin it was opened on is
+// not always the BASE_URL artifact links are built from (a reverse proxy, an IP instead of the
+// hostname). Reading it here keeps the QR dialog from calling /link, which would mint a
+// capability token just to print a URL. It is not config: PUT ignores it.
 app.get('/api/config', requireAuth('read'), (req, res) => {
-  res.json(config.current);
+  res.json({ ...config.current, baseUrl: BASE_URL });
 });
 
 app.put('/api/config', requireAuth('full'), async (req, res, next) => {

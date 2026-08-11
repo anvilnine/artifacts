@@ -1,14 +1,18 @@
 // QR encoder tests, no browser and no decoder dependency.
 //
 // A QR code that is subtly wrong still looks like a QR code, so a visual check proves nothing.
-// Two things stand in for a decoder here:
+// Three things stand in for a decoder here:
 //
-//   1. The fixture below pins the module matrix of one known string. That matrix was decoded by
-//      Chromium's BarcodeDetector during development and came back as the exact input, along
-//      with one payload per version 1 to 20 and every PNG option. Any change to the encoder
-//      that alters a single module fails this hash.
+//   1. The fixtures below pin the module matrix of four payloads, one per corner of the
+//      version range. Each was read back by two independent decoders while this was written,
+//      Chromium's BarcodeDetector and macOS CoreImage, and each returned the exact input. Every
+//      version 1 to 20 was checked the same way; these four are what the suite keeps pinned,
+//      so a change that moves one module in a version 1, 7, 14 or 20 symbol fails here.
 //   2. Both renderers are read back: the PNG is inflated and the SVG is parsed, and each is
 //      compared to the matrix it came from. That catches a drawing bug without a decoder.
+//   3. The two BCH fields are recomputed from the symbol: the format field on every version and
+//      the version field on versions 7 and up, where a mistyped polynomial would otherwise ship
+//      green because no fixture below version 7 carries one.
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -19,12 +23,57 @@ import { qrMatrix, qrSvg, qrPng, QR_MAX_BYTES } from '../lib/qr.js';
 const FIXTURE_TEXT = 'https://artifacts.example.com/a/ci-qr';
 const FIXTURE_SHA = 'd84afc32e746b8cb94ceda59b45b9aa1f0e37d5e3870ee4741b0ef55fb6ae714';
 
+// One payload per corner of the version range, each read back by two decoders.
+const URL_SOURCE = 'https://artifacts.zonily.cloud/a/'.repeat(30);
+const PINS = [
+  { len: 1, version: 1, sha: '6e79d4b3451724104b04bb44306f1f67ab46ee62c15571c6c06b0a415595f86e' },
+  { len: 107, version: 7, sha: 'c68d23806a4bbf3f19a1ce522228c6d9e93ac07a14a550911d9ca7d689440dc7' },
+  { len: 332, version: 14, sha: '5d86aaf8e403bd47a978172144efe1fd5aa61f9d8aea074b91f6624ac9203992' },
+  { len: 625, version: 20, sha: '6fea1208c241930c338fcb63aa01a019fffb894b3fdccd82bc0b77315688a118' },
+];
+
 test('the pinned matrix has not moved', () => {
   const { modules, version, size } = qrMatrix(FIXTURE_TEXT);
   assert.equal(version, 3);
   assert.equal(size, 29);
   const sha = crypto.createHash('sha256').update(Buffer.from(modules)).digest('hex');
   assert.equal(sha, FIXTURE_SHA, 'the encoder changed; re-verify against a real decoder before repinning');
+});
+
+test('the pinned matrices across the version range have not moved', () => {
+  for (const pin of PINS) {
+    const text = URL_SOURCE.slice(0, pin.len);
+    const { modules, version } = qrMatrix(text);
+    assert.equal(version, pin.version, `${pin.len} bytes should be version ${pin.version}`);
+    const sha = crypto.createHash('sha256').update(Buffer.from(modules)).digest('hex');
+    assert.equal(sha, pin.sha, `version ${pin.version} changed; re-verify against a real decoder before repinning`);
+  }
+});
+
+test('versions 7 and up carry a version field that reads back', () => {
+  // 18 bits: 6 of version, 12 of BCH under 0x1f25. Recomputed here rather than compared to a
+  // copied table, and read from both copies, because nothing below version 7 has this field.
+  for (const pin of PINS.filter((p) => p.version >= 7)) {
+    const { size, modules, version } = qrMatrix(URL_SOURCE.slice(0, pin.len));
+    const at = (r, c) => modules[r * size + c];
+
+    for (const corner of ['top-right', 'bottom-left']) {
+      let bits = 0;
+      for (let i = 0; i < 18; i++) {
+        const bit = corner === 'top-right'
+          ? at(Math.floor(i / 3), size - 11 + (i % 3))
+          : at(size - 11 + (i % 3), Math.floor(i / 3));
+        bits |= bit << i;
+      }
+      assert.equal(bits >> 12, version, `${corner} version field says ${bits >> 12}, not ${version}`);
+
+      let rem = bits;
+      for (let bit = 17; bit >= 12; bit--) {
+        if (rem & (1 << bit)) rem ^= 0b1111100100101 << (bit - 12);
+      }
+      assert.equal(rem, 0, `${corner} version field fails its BCH check`);
+    }
+  }
 });
 
 test('size follows the version, and the version follows the payload', () => {
@@ -79,10 +128,17 @@ test('the format field reads back as level M and the mask that was applied', () 
     else bit = at(8, 14 - i);
     bits |= bit << i;
   }
-  const data = (bits ^ 0b101010000010010) >> 10;
-  assert.equal(data >> 3, 0b00, 'EC level bits should say M');
-  const mask = data & 0b111;
-  assert.ok(mask >= 0 && mask <= 7);
+  const unmasked = bits ^ 0b101010000010010;
+  assert.equal(unmasked >> 13, 0b00, 'EC level bits should say M');
+
+  // The 10 check bits have to be the BCH remainder of the 5 data bits under 0x537, or a
+  // scanner rejects the field. Recomputed rather than eyeballed: an assertion that the mask
+  // is between 0 and 7 can never fail.
+  let rem = unmasked;
+  for (let bit = 14; bit >= 10; bit--) {
+    if (rem & (1 << bit)) rem ^= 0b10100110111 << (bit - 10);
+  }
+  assert.equal(rem, 0, 'the format field fails its BCH check');
 
   // Copy two carries the same 15 bits, so a scanner that reads either one agrees.
   let second = 0;

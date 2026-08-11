@@ -44,9 +44,10 @@ artifacts keys revoke <id>
 Type is inferred from the file extension (`.html`, `.jsx`, `.tsx`, `.md`); pass `--type` to override. A redirect has no extension to infer from, so it needs `--type redirect` and a file holding the target URL: `artifacts publish target.txt --type redirect --slug pricing`. `deploy` zips a directory for you and posts it to the zip endpoint. `tag` replaces an artifact's tags (`none` clears them); `list --tag` shows only artifacts carrying that tag.
 
 `qr` prints an SVG of the artifact's permanent URL to stdout, so it pipes into a file or a viewer:
-`artifacts qr pricing > pricing.svg`. `--png` writes a PNG and needs `-o <file>`, because a PNG on
-a terminal is noise. `--scale` sets pixels per module (1 to 40, default 8) and `--margin` the quiet
-zone in modules (0 to 16, default 4).
+`artifacts qr pricing > pricing.svg`. `-o out.png` writes a PNG (the extension picks the format,
+the same way `publish` infers a type), and `--png` says so explicitly; either way a PNG needs
+`-o <file>`, because a PNG on a terminal is noise. `--scale` sets pixels per module (1 to 16,
+default 8) and `--margin` the quiet zone in modules (0 to 8, default 4).
 
 ## API keys
 

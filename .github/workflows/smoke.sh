@@ -50,6 +50,9 @@ echo "ok: framed view served"
 
 # global config -> defaults to frame enabled + on by default
 curl -s "$BASE/api/config" -H "$AUTH" | grep -q '"enabled":true' || fail "config missing enabled:true"
+# the dashboard reads baseUrl from here to caption a QR code; without it the caption would
+# have to come from /link, which mints a capability token to print a URL
+curl -s "$BASE/api/config" -H "$AUTH" | grep -qF "\"baseUrl\":\"$BASE\"" || fail "config missing baseUrl"
 echo "ok: config endpoint"
 
 # per-item frame off -> /a/slug serves the bare artifact (no iframe), then reset to inherit
@@ -649,6 +652,10 @@ qr_local() { # qr_local <url> [scale] [margin]
   node -e 'import("'"$REPO_DIR"'/lib/qr.js").then(({ qrSvg }) => process.stdout.write(qrSvg(process.argv[1], { scale: Number(process.argv[2]), margin: Number(process.argv[3]) })))' \
     "$1" "${2:-8}" "${3:-4}"
 }
+qr_local_png() { # qr_local_png <url> [scale] [margin]
+  node -e 'import("'"$REPO_DIR"'/lib/qr.js").then(({ qrPng }) => process.stdout.write(qrPng(process.argv[1], { scale: Number(process.argv[2]), margin: Number(process.argv[3]) })))' \
+    "$1" "${2:-8}" "${3:-4}"
+}
 
 curl -sf -X POST "$BASE/api/artifacts" -H "$AUTH" -H "$JSON" \
   -d '{"content":"<h1>qr</h1>","type":"html","slug":"ci-qr","visibility":"public"}' > /dev/null
@@ -685,18 +692,47 @@ png_body=$(mktemp)
 code=$(curl -s -D "$png_headers" -o "$png_body" -w '%{http_code}' "$BASE/api/artifacts/ci-qr/qr?format=png" -H "$AUTH")
 expect_code 200 "$code" "qr png"
 grep -qi '^Content-Type: image/png' "$png_headers" || fail "qr png content-type"
+grep -qi '^Content-Disposition: inline; filename="ci-qr.png"' "$png_headers" || fail "qr png filename"
 [ "$(head -c 8 "$png_body" | od -An -tx1 | tr -d ' \n')" = "89504e470d0a1a0a" ] || fail "qr png is not a png"
-rm "$png_headers"
+# byte-for-byte, so the PNG path is pinned to the same URL and options as the SVG path. A
+# signature check alone passes even when scale and margin never reach the renderer.
+diff <(qr_local_png "$BASE/a/ci-qr") "$png_body" > /dev/null || fail "qr png does not encode $BASE/a/ci-qr"
+diff <(qr_local_png "$BASE/a/ci-qr" 3 0) <(curl -s "$BASE/api/artifacts/ci-qr/qr?format=png&scale=3&margin=0" -H "$AUTH") > /dev/null \
+  || fail "qr png ignores scale/margin"
+rm "$png_headers" "$png_body"
 echo "ok: qr png"
 
-# every option is validated rather than quietly falling back to a default
-for bad in 'format=gif' 'format=SVG' 'scale=0' 'scale=41' 'scale=2.5' 'scale=abc' 'margin=-1' 'margin=17'; do
+# the image is inert: it is the first /api route to answer with a document a browser could
+# execute, so it carries the headers that say not to
+qr_headers2=$(mktemp)
+curl -s -D "$qr_headers2" -o /dev/null "$BASE/api/artifacts/ci-qr/qr" -H "$AUTH"
+grep -qi '^Content-Security-Policy:' "$qr_headers2" || fail "qr svg has no CSP"
+grep -qi '^X-Content-Type-Options: nosniff' "$qr_headers2" || fail "qr svg can be sniffed"
+rm "$qr_headers2"
+echo "ok: qr svg is served inert"
+
+# every option is validated rather than quietly falling back to a default. 0x10, 1e1 and a
+# padded value all coerce through Number(), and the extended query parser turns scale[]=8
+# into an array that coerces too, so the check is digits-only.
+for bad in 'format=gif' 'format=SVG' 'scale=0' 'scale=17' 'scale=2.5' 'scale=abc' 'scale=0x10' 'scale=1e1' 'scale%5B%5D=8' 'margin=-1' 'margin=9'; do
   code=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/api/artifacts/ci-qr/qr?$bad" -H "$AUTH")
   expect_code 400 "$code" "qr rejects $bad"
 done
 code=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/api/artifacts/does-not-exist-zzz/qr" -H "$AUTH")
 expect_code 404 "$code" "qr for a missing artifact"
 echo "ok: qr option validation"
+
+# a disabled or expired artifact still has a QR, the same way it still has a share link. The
+# code is for a slug you own, not proof the slug serves today.
+curl -sf -X PATCH "$BASE/api/artifacts/ci-qr" -H "$AUTH" -H "$JSON" -d '{"disabled":true}' > /dev/null
+code=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/a/ci-qr")
+expect_code 404 "$code" "disabled artifact does not serve"
+code=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/api/artifacts/ci-qr/qr" -H "$AUTH")
+expect_code 200 "$code" "disabled artifact still has a qr"
+curl -sf -X PATCH "$BASE/api/artifacts/ci-qr" -H "$AUTH" -H "$JSON" -d '{"disabled":false}' > /dev/null
+rm "$qr_body"
+curl -sf -X DELETE "$BASE/api/artifacts/ci-qr" -H "$AUTH" > /dev/null
+echo "ok: qr for a disabled artifact"
 
 # --- dashboard: the served shell parses and still lines up with its own markup ---
 # Nothing else in CI loads `/`, so a broken inline script in public/index.html used to
@@ -735,10 +771,19 @@ if node "$CLI_DIR/cli.js" list --project web-revamp | grep -q 'ci-cli-2'; then f
 echo "ok: cli project"
 diff <(qr_local "$BASE/a/ci-cli-2") <(node "$CLI_DIR/cli.js" qr ci-cli-2) > /dev/null \
   || fail "cli qr printed something other than the server's svg"
+diff <(qr_local "$BASE/a/ci-cli-2" 3 0) <(node "$CLI_DIR/cli.js" qr ci-cli-2 --scale 3 --margin 0) > /dev/null \
+  || fail "cli qr does not pass --scale/--margin through"
 node "$CLI_DIR/cli.js" qr ci-cli-2 --png -o "$ZIPDIR/cli-qr.png" > /dev/null
 [ "$(head -c 8 "$ZIPDIR/cli-qr.png" | od -An -tx1 | tr -d ' \n')" = "89504e470d0a1a0a" ] || fail "cli qr --png is not a png"
+# -o out.png means a PNG even without --png, the way publish infers a type from the extension
+node "$CLI_DIR/cli.js" qr ci-cli-2 -o "$ZIPDIR/cli-qr-2.png" > /dev/null
+[ "$(head -c 8 "$ZIPDIR/cli-qr-2.png" | od -An -tx1 | tr -d ' \n')" = "89504e470d0a1a0a" ] || fail "cli qr -o *.png wrote an svg"
+node "$CLI_DIR/cli.js" qr ci-cli-2 -o "$ZIPDIR/cli-qr.svg" > /dev/null
+head -c 4 "$ZIPDIR/cli-qr.svg" | grep -q '<svg' || fail "cli qr -o *.svg is not an svg"
 # a PNG on a terminal is noise, so the CLI refuses rather than spraying bytes
 if node "$CLI_DIR/cli.js" qr ci-cli-2 --png > /dev/null 2>&1; then fail "cli qr --png without -o should fail"; fi
+# a bad option is the server's 400, relayed rather than swallowed
+if node "$CLI_DIR/cli.js" qr ci-cli-2 --scale 99 > /dev/null 2>&1; then fail "cli qr --scale 99 should fail"; fi
 echo "ok: cli qr"
 node "$CLI_DIR/cli.js" deploy "$ZIPDIR/site" --slug ci-cli-zip --visibility public > /dev/null
 code=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/a/ci-cli-zip/css/s.css")
