@@ -190,6 +190,32 @@ curl -sf -X POST "$BASE/api/artifacts" -H "$AUTH" -H "$JSON" \
 curl -sf -X DELETE "$BASE/api/artifacts/ci-redir-brace" -H "$AUTH" > /dev/null
 echo "ok: redirect target with braces round-trips"
 
+# meta.json decides where a redirect goes, so the row and the Location header cannot disagree.
+# Rewriting only the body leaves the old target in meta, and the 301 has to follow meta.
+curl -sf -X POST "$BASE/api/artifacts" -H "$AUTH" -H "$JSON" \
+  -d '{"content":"https://example.com/meta-wins","type":"redirect","slug":"ci-redir-auth","visibility":"public"}' > /dev/null
+loc=$(curl -s -o /dev/null -w '%{redirect_url}' "$BASE/a/ci-redir-auth")
+[ "$loc" = 'https://example.com/meta-wins' ] || fail "redirect Location wrong before the drift test: $loc"
+[ "$(list_field ci-redir-auth target)" = 'https://example.com/meta-wins' ] || fail "target missing before the drift test"
+echo "ok: redirect serves what meta says"
+
+# The fallback to source.url for a redirect published before meta carried a target cannot be
+# set up through the API (every write now fills meta), so it is covered in test/redirect.test.js
+# instead of faked here.
+curl -sf -X DELETE "$BASE/api/artifacts/ci-redir-auth" -H "$AUTH" > /dev/null
+
+# credentials in a target are refused at publish: the row shows the target, the list API hands
+# it to every read-scoped key, and the target host gets them from anyone who scans the code
+for creds in 'https://alice:s3cret@example.com/x' 'https://alice@example.com/x'; do
+  code=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/api/artifacts" -H "$AUTH" -H "$JSON" \
+    -d "{\"content\":\"$creds\",\"type\":\"redirect\",\"slug\":\"ci-redir-creds\"}")
+  expect_code 400 "$code" "redirect target with credentials refused: $creds"
+done
+code=$(curl -s -o /dev/null -w '%{http_code}' -X PUT "$BASE/api/artifacts/ci-redir" -H "$AUTH" -H "$JSON" \
+  -d '{"content":"https://alice:s3cret@example.com/x","type":"redirect"}')
+expect_code 400 "$code" "repointing at credentials refused"
+echo "ok: redirect target credentials refused"
+
 # non-http targets are refused at publish time, so they can never reach a Location header
 for bad in 'javascript:alert(1)' 'JaVaScRiPt:alert(1)' 'data:text/html,<script>x</script>' '//evil.example' '/relative/path' 'not a url'; do
   code=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/api/artifacts" -H "$AUTH" -H "$JSON" \

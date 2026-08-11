@@ -33,6 +33,7 @@ import {
 } from './lib/auth.js';
 import { createConfigStore } from './lib/config.js';
 import { ApiError } from './lib/errors.js';
+import { parseRedirectTarget, resolveRedirectTarget } from './lib/redirect.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -205,8 +206,6 @@ const MAX_TAGS = 10;
 // start with a letter or digit. Internal whitespace is collapsed on input.
 const PROJECT_RE = /^[\p{L}\p{N}][\p{L}\p{N}\p{M} ._-]{0,63}$/u;
 const SOURCE_EXT = { html: 'html', jsx: 'jsx', tsx: 'tsx', md: 'md', redirect: 'url' };
-// Longest target a redirect artifact may store, measured on the normalized URL.
-const MAX_REDIRECT_TARGET_LEN = 2048;
 
 // Pinned versions shared with the jsx shell. `external=react` keeps packages on
 // the shell's React instance — separate copies cause "Invalid hook call".
@@ -550,34 +549,6 @@ function isExpired(meta) {
   return Boolean(meta.expiresAt && Date.parse(meta.expiresAt) <= Date.now());
 }
 
-// The target of a redirect artifact, normalized. Checked again at serve time before it
-// reaches a Location header, so a target that got past this (hand-edited storage, a file
-// written by an older build) still cannot ship a non-http scheme to a viewer. That makes
-// the length check run twice on the same string, so it measures the normalized href and
-// not the input: percent-encoding can multiply a short input several times over, and a
-// value that passed here but failed there would publish 201 and then serve 404 forever.
-function parseRedirectTarget(value) {
-  const raw = typeof value === 'string' ? value.trim() : '';
-  let url;
-  try {
-    url = new URL(raw);
-  } catch {
-    throw new ApiError(400, 'content must be an absolute http:// or https:// URL for a redirect');
-  }
-  // The scheme allowlist is the point of this function: a stored `javascript:` or `data:`
-  // target would turn a Location header into script execution on the viewer's click.
-  if (url.protocol !== 'http:' && url.protocol !== 'https:') {
-    throw new ApiError(400, 'content must be an absolute http:// or https:// URL for a redirect');
-  }
-  if (url.href.length > MAX_REDIRECT_TARGET_LEN) {
-    throw new ApiError(
-      400,
-      `redirect target too long (${url.href.length} > ${MAX_REDIRECT_TARGET_LEN} characters once normalized)`,
-    );
-  }
-  return url.href;
-}
-
 async function saveArtifact({ content, type = 'html', slug, title, expiresAt, frame, tags, project, visibility, password }, { replace = false } = {}) {
   if (typeof content !== 'string' || !content.trim()) {
     throw new ApiError(400, 'content (non-empty string) is required');
@@ -618,7 +589,7 @@ async function saveArtifact({ content, type = 'html', slug, title, expiresAt, fr
   else if (type === 'jsx' || type === 'tsx') html = buildJsxHtml(content, finalTitle);
   // md renders at serve time from source.md; nothing baked here.
   // redirect stores the normalized target and nothing else; the serve path reads it back.
-  const body = type === 'redirect' ? parseRedirectTarget(content) : content;
+  const body = type === 'redirect' ? parseRedirectTarget(content, { publishing: true }) : content;
 
   if (html !== undefined) {
     await storage.put(`${finalSlug}/index.html`, html, { contentType: 'text/html; charset=utf-8' });
@@ -1178,11 +1149,13 @@ app.get('/a/:slug', async (req, res) => {
   // after a PUT, so no-store is what keeps repointing the slug working. Crawlers do not
   // follow it either way: the whole domain answers X-Robots-Tag: noindex, nofollow.
   if (meta.type === 'redirect') {
-    const buf = await storage.getBuffer(`${slug}/source.url`);
-    if (!buf) return notFound(res);
+    // meta decides where this goes, with source.url as the fallback for a redirect published
+    // before meta carried a target. See lib/redirect.js for why the two could disagree.
+    const raw = await resolveRedirectTarget(meta, () => storage.getBuffer(`${slug}/source.url`));
+    if (raw === null) return notFound(res);
     let target;
     try {
-      target = parseRedirectTarget(buf.toString('utf8'));
+      target = parseRedirectTarget(raw);
     } catch {
       return notFound(res);
     }

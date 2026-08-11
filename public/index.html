@@ -1312,6 +1312,31 @@
     }
   }
 
+  // Repoint a redirect. This is a PUT, not a PATCH: the target is the artifact's content, so
+  // it goes through the same path and the same validation a publish does. Optimistic like
+  // patchItem, and it restores the old target when the server refuses the new one.
+  async function retarget(a, url) {
+    const idx = allItems.findIndex((x) => x.slug === a.slug);
+    if (idx < 0) return;
+    const prev = allItems[idx];
+    allItems[idx] = { ...prev, target: url, updatedAt: new Date().toISOString() };
+    renderList();
+    try {
+      const res = await fetch('/api/artifacts/' + a.slug, {
+        method: 'PUT', headers: headers(), body: JSON.stringify({ content: url, type: 'redirect' }),
+      });
+      const d = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(d.error || 'update failed');
+      // The server normalizes the target (case, trailing slash, percent-encoding), so take
+      // its answer rather than leaving the row showing what was typed.
+      loadList();
+    } catch (err) {
+      allItems[idx] = prev;
+      renderList();
+      toast(err.message || 'update failed', true);
+    }
+  }
+
   function renderList() {
     // drop collapse state for projects that no longer exist (renamed / cleared)
     const live = new Set(allItems.map((a) => a.project || ''));
@@ -1547,6 +1572,21 @@
 
       const fstate = a.frame === true ? 'on' : a.frame === false ? 'off' : 'auto';
       const more = dropdown('⋯', 'more-btn', (menu) => {
+        // The row shows where a redirect points, so it also offers the edit. Without this the
+        // only way to repoint a slug is the API, the CLI, or MCP.
+        if (a.type === 'redirect') menuItem(menu, 'Edit target…', '', async () => {
+          const v = await dialog({
+            title: 'Target for “' + a.slug + '”',
+            body: 'Where this slug sends visitors. An absolute http:// or https:// URL. Takes effect on the next visit.',
+            input: true, value: a.target || '', placeholder: 'https://example.com/where-it-goes',
+            confirmText: 'Repoint',
+          });
+          if (v === null) return;
+          const url = v.trim();
+          if (!url || url === (a.target || '')) return;
+          retarget(a, url);
+        });
+
         // A redirect has no page to wrap, so the server never reaches the frame branch for
         // one. Offering the control here would take the choice and change nothing.
         if (a.type !== 'redirect') menuItem(menu, 'Frame: ' + fstate + '…', '', async () => {
