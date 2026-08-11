@@ -451,6 +451,15 @@
   .dialog .choices .act.on { color: var(--cream); }
   .dialog .choices .act.on::before { content: "✓"; }
   .dialog .choices .act:hover { background: var(--field); }
+  /* QR dialog: the code on a white card, because a scanner wants light quiet zones. */
+  .qrbox { display: flex; flex-direction: column; align-items: center; gap: 10px; }
+  .qrbox img { width: 232px; height: 232px; background: #fff; border-radius: var(--r-sm); }
+  /* --taupe, not --taupe-dim: this is the one string a user may read out loud, and dim at
+     11px lands under the 4.5:1 contrast floor. */
+  .qrbox .qrurl { font-family: var(--f-mono); font-size: 11px; color: var(--taupe); overflow-wrap: anywhere; text-align: center; }
+  .qrbox .qrlinks { display: flex; gap: 8px; }
+  .qrbox .qrlinks .act { text-decoration: none; }
+  .qrbox .qrfail { font-size: 13px; color: var(--taupe); text-align: center; line-height: 1.5; }
   .dialog .foot { display: flex; justify-content: flex-end; gap: 8px; margin-top: 14px; }
   .dialog button.ghost {
     background: transparent; color: var(--taupe); border: 1px solid var(--rim); font-weight: 600;
@@ -719,6 +728,9 @@
   // ---- login / setup ----
 
   let SETUP = false; // first-run: no admin exists yet → create one
+  // The BASE_URL the server builds artifact links from, which is not always this page's
+  // origin. Filled by loadConfig; the QR dialog shows it.
+  let serverBaseUrl = location.origin;
 
   function showApp() {
     $('lock').style.display = 'none';
@@ -1025,6 +1037,73 @@
     togglePop('compose');
   }
 
+  // The QR is served by the API, so the img tag carries the session cookie and no code here
+  // parses SVG. It encodes the canonical /a/<slug> URL, which is why a private artifact gets
+  // the extra line: scanning it gets the visitor to the door, not through it.
+  function openQr(a) {
+    const canonical = serverBaseUrl + '/a/' + a.slug + (a.type === 'zip' ? '/' : '');
+    const box = document.createElement('div');
+    box.className = 'qrbox';
+
+    const img = document.createElement('img');
+    // The URL is the one thing a screen reader cannot get from the picture, and the dialog
+    // title already says which artifact this is, so the alt text carries the URL instead.
+    img.alt = 'QR code encoding ' + canonical;
+    img.src = '/api/artifacts/' + a.slug + '/qr?scale=8';
+    box.appendChild(img);
+
+    // Built from the server's BASE_URL, not this page's origin, so the caption matches what
+    // the code actually encodes. /link would give the same string, but it mints a capability
+    // token to do it, and printing a URL is no reason to hand out a fresh 30-day grant.
+    const target = document.createElement('div');
+    target.className = 'qrurl';
+    target.textContent = canonical;
+    box.appendChild(target);
+
+    const links = document.createElement('div');
+    links.className = 'qrlinks';
+    for (const [label, href, file] of [
+      ['Download PNG', '/api/artifacts/' + a.slug + '/qr?format=png&scale=12', a.slug + '.png'],
+      ['Download SVG', '/api/artifacts/' + a.slug + '/qr', a.slug + '.svg'],
+    ]) {
+      const link = document.createElement('a');
+      link.className = 'act';
+      link.href = href;
+      link.download = file;
+      link.textContent = label;
+      links.appendChild(link);
+    }
+    box.appendChild(links);
+
+    // A failed image leaves a broken glyph and two buttons that would save the error body as
+    // a .png, so say what happened and take the buttons away.
+    img.addEventListener('error', () => {
+      const oops = document.createElement('div');
+      oops.className = 'qrfail';
+      oops.textContent = 'The QR code could not be loaded. The artifact may have been deleted; reload the list.';
+      img.replaceWith(oops);
+      links.remove();
+    });
+
+    // The three visibilities need three different warnings. A password artifact serves its
+    // unlock page on the bare link, so the scan works and then asks for the password. A
+    // private one answers 404 on the bare link with no prompt at all, so the code is dead
+    // until the artifact changes, and saying "needs a share link" would be misleading: a
+    // share link is a different URL, not something the scanner can ask for.
+    const warning = a.visibility === 'private'
+      ? ' This artifact is private, so the permanent link answers 404 and the code cannot open it. Make it public or password-protected first.'
+      : a.visibility === 'password'
+        ? ' This artifact is password-protected, so a scan lands on the unlock page and asks for the password.'
+        : '';
+    dialog({
+      title: 'QR code for “' + a.slug + '”',
+      body: 'Points at the permanent link, so it keeps working after an update.' + warning,
+      node: box,
+      hideConfirm: true,
+      cancelText: 'Close',
+    });
+  }
+
   const collapsed = new Set();
   let viewMode = 'grouped';
   try { viewMode = localStorage.getItem('artifacts:view') || 'grouped'; } catch {}
@@ -1230,6 +1309,10 @@
         box.appendChild(p);
       }
 
+      // Ready-made content (the QR image and its download links) goes between the body text
+      // and the buttons.
+      if (opts.node) box.appendChild(opts.node);
+
       let input = null;
       let readValue = () => true; // what Save resolves to
       if (opts.choices) {
@@ -1269,10 +1352,10 @@
       foot.className = 'foot';
       const cancel = document.createElement('button');
       cancel.className = 'ghost';
-      cancel.textContent = 'Cancel';
+      cancel.textContent = opts.cancelText || 'Cancel';
       cancel.addEventListener('click', () => finish(null));
       foot.appendChild(cancel);
-      if (!opts.choices) {
+      if (!opts.choices && !opts.hideConfirm) {
         const ok = document.createElement('button');
         if (opts.danger) ok.className = 'danger';
         ok.textContent = opts.confirmText || 'Save';
@@ -1283,7 +1366,12 @@
 
       document.addEventListener('keydown', onKey, true);
       scrim.classList.add('open');
-      const target = input || box.querySelector('.choices .act.on') || cancel;
+      // Focus the first thing the dialog offers, not the last: Close sits at the end of the
+      // tab order, so focusing it sends the next Tab out of the dialog and behind the scrim.
+      const target = input
+        || box.querySelector('.choices .act.on')
+        || (opts.node && opts.node.querySelector('a, button'))
+        || cancel;
       setTimeout(() => {
         target.focus();
         // Focusing an input parks the caret at the end, which on a long value shows its tail and
@@ -1688,6 +1776,8 @@
 
         menuItem(menu, 'Duplicate…', '', () => openDuplicate(a));
 
+        menuItem(menu, 'QR code…', '', () => openQr(a));
+
         menuItem(menu, a.expiresAt ? 'Expiry: ' + a.expiresAt.slice(0, 10) + '…' : 'Expiry…', '', async () => {
           const v = await dialog({
             title: 'Expiry for “' + a.slug + '”',
@@ -1785,6 +1875,7 @@
       const res = await fetch('/api/config', { headers: headers() });
       if (!res.ok) return;
       const cfg = await res.json();
+      if (cfg.baseUrl) serverBaseUrl = cfg.baseUrl;
       $('frameEnabled').checked = !!(cfg.frame && cfg.frame.enabled);
       $('frameDefault').checked = !!(cfg.frame && cfg.frame.default);
       if (cfg.md) {

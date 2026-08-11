@@ -34,6 +34,7 @@ artifacts tag <slug> <a,b,c|none>
 artifacts project <slug> <name|none>
 artifacts delete <slug>
 artifacts source <slug> [-o file]
+artifacts qr <slug> [--png] [--scale n] [--margin n] [-o file]
 artifacts config [--frame-enabled true|false] [--frame-default true|false]
 artifacts keys list
 artifacts keys create <name> [--scopes read,publish,full] [--expires ISO]
@@ -41,6 +42,12 @@ artifacts keys revoke <id>
 ```
 
 Type is inferred from the file extension (`.html`, `.jsx`, `.tsx`, `.md`); pass `--type` to override. A redirect has no extension to infer from, so it needs `--type redirect` and a file holding the target URL: `artifacts publish target.txt --type redirect --slug pricing`. Repoint one the same way with `update`: `artifacts update pricing new-target.txt --type redirect`, which keeps the title and everything else. The target cannot carry a username or password. `deploy` zips a directory for you and posts it to the zip endpoint. `tag` replaces an artifact's tags (`none` clears them); `list --tag` shows only artifacts carrying that tag.
+
+`qr` prints an SVG of the artifact's permanent URL to stdout, so it pipes into a file or a viewer:
+`artifacts qr pricing > pricing.svg`. `-o out.png` writes a PNG (the extension picks the format,
+the same way `publish` infers a type), and `--png` says so explicitly; either way a PNG needs
+`-o <file>`, because a PNG on a terminal is noise. `--scale` sets pixels per module (1 to 16,
+default 8) and `--margin` the quiet zone in modules (0 to 8, default 4).
 
 ## API keys
 
