@@ -216,11 +216,8 @@ jobs:
             -d '{"name":"restart-proof","scopes":["read"]}' > /tmp/minted-key.json
           key=$(node -e 'console.log(JSON.parse(require("fs").readFileSync("/tmp/minted-key.json","utf8")).key)')
           # Without this a changed response shape leaves $key as the string "undefined", and the
-          # check below then blames durability for a 401 the mint caused. The dump is scrubbed on
-          # the token itself, not on the field name: this guard only ever fires when the field
-          # moved, so a name-based scrub (what smoke.sh uses, where the shape is known) would
-          # match nothing in exactly the case that reaches this line.
-          case "$key" in ah_*) ;; *) echo "FAIL: the mint returned no key"; sed 's/ah_[A-Za-z0-9]*/ah_REDACTED/g' /tmp/minted-key.json; exit 1 ;; esac
+          # check below then blames durability for a 401 the mint caused.
+          case "$key" in ah_*) ;; *) echo "FAIL: the mint returned no key"; cat /tmp/minted-key.json; exit 1 ;; esac
           # kill the server and start a brand-new process against the same bucket, with
           # nothing on local disk — proves durability across a container reprovision.
           kill "$(cat server.pid)"; sleep 1
@@ -283,11 +280,8 @@ jobs:
             -d '{"name":"restart-proof","scopes":["read"]}' > /tmp/minted-key.json
           key=$(node -e 'console.log(JSON.parse(require("fs").readFileSync("/tmp/minted-key.json","utf8")).key)')
           # Without this a changed response shape leaves $key as the string "undefined", and the
-          # check below then blames durability for a 401 the mint caused. The dump is scrubbed on
-          # the token itself, not on the field name: this guard only ever fires when the field
-          # moved, so a name-based scrub (what smoke.sh uses, where the shape is known) would
-          # match nothing in exactly the case that reaches this line.
-          case "$key" in ah_*) ;; *) echo "FAIL: the mint returned no key"; sed 's/ah_[A-Za-z0-9]*/ah_REDACTED/g' /tmp/minted-key.json; exit 1 ;; esac
+          # check below then blames durability for a 401 the mint caused.
+          case "$key" in ah_*) ;; *) echo "FAIL: the mint returned no key"; cat /tmp/minted-key.json; exit 1 ;; esac
           kill "$(cat server.pid)"; sleep 1
           # brand-new working copy -> the server must clone it back from the git remote
           GIT_WORK_DIR=/tmp/git-work-fresh node server.js &
@@ -344,11 +338,8 @@ jobs:
             -d '{"name":"restart-proof","scopes":["read"]}' > /tmp/minted-key.json
           key=$(node -e 'console.log(JSON.parse(require("fs").readFileSync("/tmp/minted-key.json","utf8")).key)')
           # Without this a changed response shape leaves $key as the string "undefined", and the
-          # check below then blames durability for a 401 the mint caused. The dump is scrubbed on
-          # the token itself, not on the field name: this guard only ever fires when the field
-          # moved, so a name-based scrub (what smoke.sh uses, where the shape is known) would
-          # match nothing in exactly the case that reaches this line.
-          case "$key" in ah_*) ;; *) echo "FAIL: the mint returned no key"; sed 's/ah_[A-Za-z0-9]*/ah_REDACTED/g' /tmp/minted-key.json; exit 1 ;; esac
+          # check below then blames durability for a 401 the mint caused.
+          case "$key" in ah_*) ;; *) echo "FAIL: the mint returned no key"; cat /tmp/minted-key.json; exit 1 ;; esac
           kill "$(cat server.pid)"; sleep 1
           node server.js &
           for i in $(seq 1 20); do curl -sf http://localhost:3000/healthz && break; sleep 0.5; done
