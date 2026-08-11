@@ -27,6 +27,12 @@ Every tool the server registers. `?` marks an optional argument.
 
 `type` is `html` (the default), `jsx`, `tsx`, `md`, or `redirect`.
 
+`list_artifacts` returns what `GET /api/artifacts` returns: `slug`, `type`, `title`, `createdAt`,
+`updatedAt` and `tags` on every entry, plus whichever of `project`, `expiresAt`, `frame`,
+`visibility`, `disabled`, `files`, `target` and `hasPassword` the artifact has set. `target` is a
+redirect's destination, absent on a redirect published before the server stored targets on the
+artifact. No password hashes and no tokens.
+
 `frame` on a single artifact only decides anything while the server has frames switched on. With
 `FRAME_ENABLED=false` nothing is framed and `frame: true` changes nothing, so a client that gets no
 frame should check the server config before the artifact.
