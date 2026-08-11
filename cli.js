@@ -23,6 +23,7 @@ Usage:
   artifacts project <slug> <name|none>
   artifacts delete <slug>
   artifacts source <slug> [-o file]
+  artifacts qr <slug> [--png] [--scale n] [--margin n] [-o file]
   artifacts config [--frame-enabled true|false] [--frame-default true|false]
   artifacts keys list
   artifacts keys create <name> [--scopes read,publish,full] [--expires ISO]
@@ -55,6 +56,9 @@ const { values: opts, positionals } = parseArgs({
     'frame-enabled': { type: 'string' },
     'frame-default': { type: 'string' },
     output: { type: 'string', short: 'o' },
+    png: { type: 'boolean' },
+    scale: { type: 'string' },
+    margin: { type: 'string' },
     help: { type: 'boolean', short: 'h' },
   },
   allowPositionals: true,
@@ -337,6 +341,31 @@ switch (command) {
       console.log(opts.output);
     } else {
       process.stdout.write(text);
+    }
+    break;
+  }
+
+  case 'qr': {
+    need(1, '<slug> [--png] [--scale n] [--margin n] [-o file]');
+    const query = new URLSearchParams();
+    if (opts.png) query.set('format', 'png');
+    if (opts.scale !== undefined) query.set('scale', opts.scale);
+    if (opts.margin !== undefined) query.set('margin', opts.margin);
+    const suffix = [...query].length ? `?${query}` : '';
+    // The PNG is binary, so this path reads the body as bytes rather than going through api().
+    const res = await fetch(`${url}/api/artifacts/${args[0]}/qr${suffix}`, {
+      headers: key ? { authorization: `Bearer ${key}` } : {},
+    });
+    const body = Buffer.from(await res.arrayBuffer());
+    if (!res.ok) fail(`${res.status} ${res.statusText}: ${body.toString('utf8').trim()}`);
+    if (opts.output) {
+      await fs.writeFile(opts.output, body);
+      console.log(opts.output);
+    } else if (opts.png) {
+      // A PNG on a terminal is noise, so it needs a file.
+      fail('--png needs -o <file>');
+    } else {
+      process.stdout.write(body.toString('utf8'));
     }
     break;
   }

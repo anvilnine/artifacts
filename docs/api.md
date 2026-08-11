@@ -12,6 +12,7 @@ PATCH  /api/artifacts/:slug  {slug?, disabled?, expiresAt?, tags?, project?, fra
 DELETE /api/artifacts/:slug                                                  → {deleted}   [full]
 GET    /api/artifacts        list (?tag= and/or ?project= to filter)         → [...]   [read]
 GET    /api/artifacts/:slug/link  mint a fresh share link, no mutation       → {url, visibility}   [read]
+GET    /api/artifacts/:slug/qr    QR code for the canonical URL (?format=svg|png&scale=&margin=) → image   [read]
 GET    /api/config                                                           → {frame: {enabled, default}, md: {font, width, size, theme}}   [read]
 PUT    /api/config           {frame?: {enabled?, default?}, md?: {font?, width?, size?, theme?}} → updated config   [full]
 GET    /a/:slug              rendered artifact, framed when active (public unless private/password)
@@ -27,6 +28,7 @@ Semantics:
 
 - Body limits: 10 MB JSON, 50 MB zip.
 - `type: "redirect"` publishes a short link instead of a page: `content` is the target, and `GET /a/:slug` answers `301` with `Location: <target>`, `Cache-Control: no-store` and `Referrer-Policy: no-referrer`. The target must be an absolute `http://` or `https://` URL; anything else is a `400`. What gets stored is the normalized URL, capped at 2048 characters. Redirects are never framed and ignore `?raw=1`, and `GET /a/:slug/source` returns the stored target as `text/plain`. Full behavior, including what an open redirector costs you, in [Redirects](formats.md#redirects).
+- QR codes: `GET /api/artifacts/:slug/qr` returns an image of the artifact's canonical URL (`<base>/a/<slug>`, with the trailing slash for a zip site). `format` is `svg` (default) or `png`, `scale` is 1 to 40 pixels per module (default 8) and `margin` is 0 to 16 modules of quiet zone (default 4); a value outside those ranges is a `400` rather than a silent fallback. The code always carries the permanent link, never a capability link: a `?k=` token expires and can be revoked, and a printed code cannot be reissued. A scan of a private or password artifact therefore still needs the password or a share link. Encoding is byte mode at error-correction level M, up to 666 bytes, generated in-process with no external service.
 - `POST` with an existing slug → `409` (use `PUT` to update).
 - Disabled artifacts return `404`; expired ones (`expiresAt` in the past) return `410`. Both keep their content — re-enable or clear/extend the expiry to serve again.
 - Tags: an array of strings, or one comma-separated string (the only form the zip endpoint's `?tags=` accepts). Each tag must match `[a-z0-9][a-z0-9-]{0,31}`; max 10 per artifact. Input is lowercased and deduplicated. `PATCH` replaces the whole list; an empty list clears it. `PUT` without `tags` keeps the existing ones. Artifacts published before tags existed list as `"tags": []`. In the web UI, tags render as chips — click one to filter the list.

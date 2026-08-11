@@ -33,6 +33,7 @@ import {
 } from './lib/auth.js';
 import { createConfigStore } from './lib/config.js';
 import { ApiError } from './lib/errors.js';
+import { qrPng, qrSvg } from './lib/qr.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -519,6 +520,17 @@ function parseTags(value) {
     throw new ApiError(400, `too many tags (${tags.length} > ${MAX_TAGS})`);
   }
   return tags;
+}
+
+// A whole-number query parameter inside a range. Rejects junk rather than silently falling
+// back to the default, so a caller that asks for scale=huge learns it asked for nothing.
+function intParam(value, fallback, min, max, name) {
+  if (value === undefined || value === '') return fallback;
+  const n = Number(value);
+  if (!Number.isInteger(n) || n < min || n > max) {
+    throw new ApiError(400, `${name} must be a whole number between ${min} and ${max}`);
+  }
+  return n;
 }
 
 // Returns a trimmed project name, or '' to clear it. null/'' both mean clear.
@@ -1357,6 +1369,36 @@ app.get('/api/artifacts/:slug/link', requireAuth('read'), async (req, res, next)
     if (!meta) throw new ApiError(404, `slug "${req.params.slug}" not found`);
     if (meta.tokenEpoch !== undefined) await ensureSessionSecret();
     res.json({ url: tokenedUrl(meta), visibility: meta.visibility || 'public' });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// A QR code for the artifact's canonical URL. Canonical, not the share link: a capability
+// token expires and can be revoked, and a printed code cannot be reissued, so a QR that
+// carries one turns into a dead sticker. A non-public artifact still needs its link or its
+// password after the scan; the QR only gets the visitor to the door.
+app.get('/api/artifacts/:slug/qr', requireAuth('read'), async (req, res, next) => {
+  try {
+    const { slug } = req.params;
+    const meta = SLUG_RE.test(slug) ? await readMeta(slug) : null;
+    if (!meta) throw new ApiError(404, `slug "${slug}" not found`);
+
+    const format = req.query.format === undefined || req.query.format === '' ? 'svg' : String(req.query.format);
+    if (format !== 'svg' && format !== 'png') {
+      throw new ApiError(400, 'format must be svg or png');
+    }
+    const scale = intParam(req.query.scale, 8, 1, 40, 'scale');
+    const margin = intParam(req.query.margin, 4, 0, 16, 'margin');
+
+    const url = `${BASE_URL}/a/${slug}${meta.type === 'zip' ? '/' : ''}`;
+    if (format === 'png') {
+      const png = qrPng(url, { scale, margin });
+      res.set({ 'Content-Type': 'image/png', 'Content-Disposition': `inline; filename="${slug}.png"` });
+      return res.send(png);
+    }
+    res.set({ 'Content-Type': 'image/svg+xml; charset=utf-8', 'Content-Disposition': `inline; filename="${slug}.svg"` });
+    return res.send(qrSvg(url, { scale, margin }));
   } catch (err) {
     next(err);
   }

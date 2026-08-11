@@ -639,6 +639,65 @@ mcp_call 9 tools/call '{"name":"delete_artifact","arguments":{"slug":"ci-mcp"}}'
 code=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/a/ci-mcp")
 expect_code 404 "$code" "MCP delete_artifact"
 
+# --- QR codes ---
+# The encoder itself is proven in test/qr.test.js, against a matrix a real decoder read back.
+# What is checked here is the wiring: that the route answers, that it encodes the artifact's
+# canonical URL and not something else, and that its options are validated. Comparing the
+# served bytes against a locally generated code is what pins the encoded URL, since bash has
+# no QR decoder.
+qr_local() { # qr_local <url> [scale] [margin]
+  node -e 'import("'"$REPO_DIR"'/lib/qr.js").then(({ qrSvg }) => process.stdout.write(qrSvg(process.argv[1], { scale: Number(process.argv[2]), margin: Number(process.argv[3]) })))' \
+    "$1" "${2:-8}" "${3:-4}"
+}
+
+curl -sf -X POST "$BASE/api/artifacts" -H "$AUTH" -H "$JSON" \
+  -d '{"content":"<h1>qr</h1>","type":"html","slug":"ci-qr","visibility":"public"}' > /dev/null
+
+code=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/api/artifacts/ci-qr/qr")
+expect_code 401 "$code" "unauth qr"
+
+qr_headers=$(mktemp)
+qr_body=$(mktemp)
+code=$(curl -s -D "$qr_headers" -o "$qr_body" -w '%{http_code}' "$BASE/api/artifacts/ci-qr/qr" -H "$AUTH")
+expect_code 200 "$code" "qr svg"
+grep -qi '^Content-Type: image/svg+xml' "$qr_headers" || fail "qr svg content-type"
+grep -qi '^Content-Disposition: inline; filename="ci-qr.svg"' "$qr_headers" || fail "qr svg filename"
+head -c 4 "$qr_body" | grep -q '<svg' || fail "qr svg body is not an svg"
+diff <(qr_local "$BASE/a/ci-qr") "$qr_body" > /dev/null || fail "qr does not encode $BASE/a/ci-qr"
+rm "$qr_headers"
+echo "ok: qr svg encodes the canonical url"
+
+# a zip site's canonical URL carries the trailing slash, and the QR has to agree
+curl -sf -X POST "$BASE/api/artifacts/zip?slug=ci-qr-zip&visibility=public" -H "$AUTH" \
+  -H "Content-Type: application/zip" --data-binary @"$ZIPDIR/site.zip" > /dev/null
+diff <(qr_local "$BASE/a/ci-qr-zip/") <(curl -s "$BASE/api/artifacts/ci-qr-zip/qr" -H "$AUTH") > /dev/null \
+  || fail "zip qr does not encode the trailing-slash url"
+curl -sf -X DELETE "$BASE/api/artifacts/ci-qr-zip" -H "$AUTH" > /dev/null
+echo "ok: zip qr encodes the trailing-slash url"
+
+# scale and margin reach the renderer
+diff <(qr_local "$BASE/a/ci-qr" 3 0) <(curl -s "$BASE/api/artifacts/ci-qr/qr?scale=3&margin=0" -H "$AUTH") > /dev/null \
+  || fail "qr scale/margin ignored"
+echo "ok: qr scale and margin"
+
+png_headers=$(mktemp)
+png_body=$(mktemp)
+code=$(curl -s -D "$png_headers" -o "$png_body" -w '%{http_code}' "$BASE/api/artifacts/ci-qr/qr?format=png" -H "$AUTH")
+expect_code 200 "$code" "qr png"
+grep -qi '^Content-Type: image/png' "$png_headers" || fail "qr png content-type"
+[ "$(head -c 8 "$png_body" | od -An -tx1 | tr -d ' \n')" = "89504e470d0a1a0a" ] || fail "qr png is not a png"
+rm "$png_headers"
+echo "ok: qr png"
+
+# every option is validated rather than quietly falling back to a default
+for bad in 'format=gif' 'format=SVG' 'scale=0' 'scale=41' 'scale=2.5' 'scale=abc' 'margin=-1' 'margin=17'; do
+  code=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/api/artifacts/ci-qr/qr?$bad" -H "$AUTH")
+  expect_code 400 "$code" "qr rejects $bad"
+done
+code=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/api/artifacts/does-not-exist-zzz/qr" -H "$AUTH")
+expect_code 404 "$code" "qr for a missing artifact"
+echo "ok: qr option validation"
+
 # --- dashboard: the served shell parses and still lines up with its own markup ---
 # Nothing else in CI loads `/`, so a broken inline script in public/index.html used to
 # ship green. No browser here; see the header of dashboard-check.mjs for what that
@@ -674,6 +733,13 @@ node "$CLI_DIR/cli.js" list --project web-revamp | grep -q 'ci-cli-2' || fail "c
 node "$CLI_DIR/cli.js" project ci-cli-2 none > /dev/null
 if node "$CLI_DIR/cli.js" list --project web-revamp | grep -q 'ci-cli-2'; then fail "cli project clear failed"; fi
 echo "ok: cli project"
+diff <(qr_local "$BASE/a/ci-cli-2") <(node "$CLI_DIR/cli.js" qr ci-cli-2) > /dev/null \
+  || fail "cli qr printed something other than the server's svg"
+node "$CLI_DIR/cli.js" qr ci-cli-2 --png -o "$ZIPDIR/cli-qr.png" > /dev/null
+[ "$(head -c 8 "$ZIPDIR/cli-qr.png" | od -An -tx1 | tr -d ' \n')" = "89504e470d0a1a0a" ] || fail "cli qr --png is not a png"
+# a PNG on a terminal is noise, so the CLI refuses rather than spraying bytes
+if node "$CLI_DIR/cli.js" qr ci-cli-2 --png > /dev/null 2>&1; then fail "cli qr --png without -o should fail"; fi
+echo "ok: cli qr"
 node "$CLI_DIR/cli.js" deploy "$ZIPDIR/site" --slug ci-cli-zip --visibility public > /dev/null
 code=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/a/ci-cli-zip/css/s.css")
 expect_code 200 "$code" "cli zip deploy"

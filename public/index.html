@@ -448,6 +448,12 @@
   .dialog .choices .act.on { color: var(--cream); }
   .dialog .choices .act.on::before { content: "✓"; }
   .dialog .choices .act:hover { background: var(--field); }
+  /* QR dialog: the code on a white card, because a scanner wants light quiet zones. */
+  .qrbox { display: flex; flex-direction: column; align-items: center; gap: 10px; }
+  .qrbox img { width: 232px; height: 232px; background: #fff; border-radius: var(--r-sm); }
+  .qrbox .qrurl { font-family: var(--f-mono); font-size: 11px; color: var(--taupe-dim); overflow-wrap: anywhere; text-align: center; }
+  .qrbox .qrlinks { display: flex; gap: 8px; }
+  .qrbox .qrlinks .act { text-decoration: none; }
   .dialog .foot { display: flex; justify-content: flex-end; gap: 8px; margin-top: 14px; }
   .dialog button.ghost {
     background: transparent; color: var(--taupe); border: 1px solid var(--rim); font-weight: 600;
@@ -1001,6 +1007,57 @@
     togglePop('compose');
   }
 
+  // The QR is served by the API, so the img tag carries the session cookie and no code here
+  // parses SVG. It encodes the canonical /a/<slug> URL, which is why a private artifact gets
+  // the extra line: scanning it gets the visitor to the door, not through it.
+  function openQr(a) {
+    const box = document.createElement('div');
+    box.className = 'qrbox';
+
+    const img = document.createElement('img');
+    img.alt = 'QR code for ' + a.slug;
+    img.src = '/api/artifacts/' + a.slug + '/qr?scale=8';
+    box.appendChild(img);
+
+    // The code encodes the server's BASE_URL, which is not always the origin this dashboard
+    // was opened on (a reverse proxy, an IP instead of the hostname). The link endpoint is
+    // built from the same BASE_URL, so ask it rather than guessing, and drop the capability
+    // token it adds for a non-public artifact: the QR carries the permanent link only.
+    const target = document.createElement('div');
+    target.className = 'qrurl';
+    box.appendChild(target);
+    fetch('/api/artifacts/' + a.slug + '/link', { headers: headers() })
+      .then((res) => (res.ok ? res.json() : null))
+      .then((d) => { if (d) target.textContent = d.url.split('?')[0]; })
+      .catch(() => {});
+
+    const links = document.createElement('div');
+    links.className = 'qrlinks';
+    for (const [label, href, file] of [
+      ['Download PNG', '/api/artifacts/' + a.slug + '/qr?format=png&scale=12', a.slug + '.png'],
+      ['Download SVG', '/api/artifacts/' + a.slug + '/qr', a.slug + '.svg'],
+    ]) {
+      const link = document.createElement('a');
+      link.className = 'act';
+      link.href = href;
+      link.download = file;
+      link.textContent = label;
+      links.appendChild(link);
+    }
+    box.appendChild(links);
+
+    const nonPublic = a.visibility === 'private' || a.visibility === 'password';
+    dialog({
+      title: 'QR code for “' + a.slug + '”',
+      body: nonPublic
+        ? 'Points at the permanent link, so it keeps working after an update. This artifact is not public, so a scan still needs the password or a share link.'
+        : 'Points at the permanent link, so it keeps working after an update.',
+      node: box,
+      choices: [],
+      cancelText: 'Close',
+    });
+  }
+
   const collapsed = new Set();
   let viewMode = 'grouped';
   try { viewMode = localStorage.getItem('artifacts:view') || 'grouped'; } catch {}
@@ -1202,6 +1259,10 @@
         box.appendChild(p);
       }
 
+      // Ready-made content (the QR image and its download links) goes between the body text
+      // and the buttons.
+      if (opts.node) box.appendChild(opts.node);
+
       let input = null;
       let readValue = () => true; // what Save resolves to
       if (opts.choices) {
@@ -1235,7 +1296,7 @@
       foot.className = 'foot';
       const cancel = document.createElement('button');
       cancel.className = 'ghost';
-      cancel.textContent = 'Cancel';
+      cancel.textContent = opts.cancelText || 'Cancel';
       cancel.addEventListener('click', () => finish(null));
       foot.appendChild(cancel);
       if (!opts.choices) {
@@ -1558,6 +1619,8 @@
         });
 
         menuItem(menu, 'Duplicate…', '', () => openDuplicate(a));
+
+        menuItem(menu, 'QR code…', '', () => openQr(a));
 
         menuItem(menu, a.expiresAt ? 'Expiry: ' + a.expiresAt.slice(0, 10) + '…' : 'Expiry…', '', async () => {
           const v = await dialog({
