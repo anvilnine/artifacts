@@ -1252,6 +1252,12 @@
         input = document.createElement('input');
         input.type = opts.password ? 'password' : 'text';
         input.value = opts.value || '';
+        // A URL is not prose: spellcheck underlines it in red and a phone would capitalize it.
+        if (opts.url) {
+          input.spellcheck = false;
+          input.autocapitalize = 'off';
+          input.setAttribute('autocorrect', 'off');
+        }
         if (opts.placeholder) input.placeholder = opts.placeholder;
         if (opts.list) { input.setAttribute('list', opts.list); input.autocomplete = 'off'; }
         input.addEventListener('keydown', (e) => { if (e.key === 'Enter') finish(input.value); });
@@ -1278,7 +1284,15 @@
       document.addEventListener('keydown', onKey, true);
       scrim.classList.add('open');
       const target = input || box.querySelector('.choices .act.on') || cancel;
-      setTimeout(() => target.focus(), 30);
+      setTimeout(() => {
+        target.focus();
+        // Focusing an input parks the caret at the end, which on a long value shows its tail and
+        // hides the host. Start at the front, where what matters is.
+        if (input && input.value) {
+          input.setSelectionRange(0, 0);
+          input.scrollLeft = 0;
+        }
+      }, 30);
     });
   }
   $('dlgScrim').addEventListener('click', (e) => {
@@ -1313,24 +1327,51 @@
     }
   }
 
+  // What the server will refuse, checked here first so a rejection can be corrected in the
+  // dialog instead of costing the whole typed URL. Same rules as lib/redirect.js; the server
+  // still decides, this only saves the round trip.
+  function badTarget(url) {
+    let u;
+    try {
+      u = new URL(url);
+    } catch {
+      return 'Needs an absolute URL, starting with http:// or https://.';
+    }
+    if (u.protocol !== 'http:' && u.protocol !== 'https:') {
+      return 'Only http:// and https:// targets work. A scanner or a click cannot follow ' + u.protocol + ' safely.';
+    }
+    if (u.username || u.password) {
+      return 'Remove the username and password before the host. A redirect is a public hop, so anyone who follows it gets them.';
+    }
+    if (u.href.length > 2048) {
+      return 'Too long once encoded (' + u.href.length + ' characters, limit 2048).';
+    }
+    return null;
+  }
+
   // Repoint a redirect. This is a PUT, not a PATCH: the target is the artifact's content, so it
   // goes through the same path and the same validation a publish does.
   //
   // Not optimistic, unlike patchItem. The server normalizes what it stores (case-folded host,
-  // added trailing slash, percent-encoding, and a look-alike host punycoded), so showing the
-  // typed string first means the row asserts something that is about to change, and it would
-  // keep asserting it if the reload afterwards failed. The title rides along because a PUT
-  // without one used to reset it to the slug.
+  // added trailing slash, percent-encoding, and a look-alike host punycoded), so the row takes
+  // the target from the response rather than from the box. Reloading the whole list instead
+  // would reorder it under the pointer and would leave the row asserting the old target if the
+  // reload failed. The title is not sent: the server keeps the stored one, and sending this
+  // tab's copy would overwrite a title changed elsewhere since the list loaded.
   async function retarget(a, url) {
+    const idx = allItems.findIndex((x) => x.slug === a.slug);
     try {
       const res = await fetch('/api/artifacts/' + a.slug, {
-        method: 'PUT',
-        headers: headers(),
-        body: JSON.stringify({ content: url, type: 'redirect', title: a.title || a.slug }),
+        method: 'PUT', headers: headers(), body: JSON.stringify({ content: url, type: 'redirect' }),
       });
       const d = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error(d.error || 'update failed');
-      await loadList();
+      // The API calls the field content; this dialog calls it a target, so say target.
+      if (!res.ok) throw new Error((d.error || 'update failed').replace(/^content /, 'target '));
+      if (idx >= 0) {
+        allItems[idx] = { ...allItems[idx], target: d.target || url, updatedAt: new Date().toISOString() };
+        renderList();
+      }
+      toast('Repointed to ' + (d.target || url));
     } catch (err) {
       toast(err.message || 'update failed', true);
     }
@@ -1573,17 +1614,28 @@
       const more = dropdown('⋯', 'more-btn', (menu) => {
         // The row shows where a redirect points, so it also offers the edit. Without this the
         // only way to repoint a slug is the API, the CLI, or MCP.
-        if (a.type === 'redirect') menuItem(menu, 'Edit target…', '', async () => {
-          const v = await dialog({
-            title: 'Target for “' + a.slug + '”',
-            body: 'Where this slug sends visitors. An absolute http:// or https:// URL. Takes effect on the next visit.',
-            input: true, value: a.target || '', placeholder: 'https://example.com/where-it-goes',
-            confirmText: 'Repoint',
-          });
-          if (v === null) return;
-          const url = v.trim();
-          if (!url || url === (a.target || '')) return;
-          retarget(a, url);
+        if (a.type === 'redirect') menuItem(menu, 'Target…', '', async () => {
+          // The slug is what people already have, so say what does not change. A refused value
+          // reopens the box holding what was typed, with the reason above it: a long URL with one
+          // typo in it should not have to be typed twice.
+          const explain = 'Where this slug sends visitors. The slug does not change, so links already'
+            + ' shared, printed, or turned into a QR code keep working. Takes effect immediately.';
+          let value = a.target || '';
+          let why = '';
+          for (;;) {
+            const v = await dialog({
+              title: 'Target for “' + a.slug + '”',
+              body: why ? why + ' ' + explain : explain,
+              input: true, url: true, value, placeholder: 'https://example.com/where-it-goes',
+              confirmText: 'Repoint',
+            });
+            if (v === null) return;
+            const url = v.trim();
+            if (!url || url === (a.target || '')) return;
+            why = badTarget(url);
+            if (!why) return retarget(a, url);
+            value = url;
+          }
         });
 
         // A redirect has no page to wrap, so the server never reaches the frame branch for

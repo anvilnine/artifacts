@@ -190,26 +190,40 @@ curl -sf -X POST "$BASE/api/artifacts" -H "$AUTH" -H "$JSON" \
 curl -sf -X DELETE "$BASE/api/artifacts/ci-redir-brace" -H "$AUTH" > /dev/null
 echo "ok: redirect target with braces round-trips"
 
-# meta.json decides where a redirect goes. The two stored copies agree in every state reachable
-# through the API, so this pins the value rather than which copy was read; the resolution rule
-# itself is unit-tested in test/redirect.test.js, where the disagreement can be constructed.
+# The Location header, the list row and /source all name the same place. The two stored copies of
+# the target agree in every state reachable through the API, so this pins the value across the
+# three readers rather than proving which copy each one read; the resolution rule itself is
+# unit-tested in test/redirect.test.js, where a disagreement can be constructed.
 curl -sf -X POST "$BASE/api/artifacts" -H "$AUTH" -H "$JSON" \
-  -d '{"content":"https://example.com/meta-wins","type":"redirect","slug":"ci-redir-auth","visibility":"public"}' > /dev/null
-loc=$(curl -s -o /dev/null -w '%{redirect_url}' "$BASE/a/ci-redir-auth")
-[ "$loc" = 'https://example.com/meta-wins' ] || fail "redirect Location wrong before the drift test: $loc"
-[ "$(list_field ci-redir-auth target)" = 'https://example.com/meta-wins' ] || fail "target missing before the drift test"
-echo "ok: redirect serves what meta says"
+  -d '{"content":"https://example.com/one-place","type":"redirect","slug":"ci-redir-agree","visibility":"public"}' > /dev/null
+loc=$(curl -s -o /dev/null -w '%{redirect_url}' "$BASE/a/ci-redir-agree")
+[ "$loc" = 'https://example.com/one-place' ] || fail "redirect Location wrong: $loc"
+[ "$(list_field ci-redir-agree target)" = 'https://example.com/one-place' ] || fail "row does not name the target"
+# publishing answers with the stored target, which is not always what was sent: the dashboard
+# shows the response rather than the box, so a normalized value never has to be guessed at
+resp=$(curl -s -X PUT "$BASE/api/artifacts/ci-redir-agree" -H "$AUTH" -H "$JSON" \
+  -d '{"content":"  HTTPS://EXAMPLE.COM/One-Place  ","type":"redirect"}')
+printf '%s' "$resp" | grep -qF '"target":"https://example.com/One-Place"' \
+  || fail "publish response does not carry the stored target: $resp"
+curl -sf -X PUT "$BASE/api/artifacts/ci-redir-agree" -H "$AUTH" -H "$JSON" \
+  -d '{"content":"https://example.com/one-place","type":"redirect"}' > /dev/null
 
 # The fallback to source.url for a redirect published before meta carried a target cannot be
 # set up through the API (every write now fills meta), so it is covered in test/redirect.test.js
 # instead of faked here.
 
-# /source answers with the target, and with the same value the 301 uses. Both copies agree in
-# every state reachable from here, so this pins the value and the type rather than proving which
-# copy /source read; that half is the resolver's unit tests plus the one call site.
-[ "$(curl -s "$BASE/a/ci-redir-auth/source")" = 'https://example.com/meta-wins' ] \
+[ "$(curl -s "$BASE/a/ci-redir-agree/source")" = 'https://example.com/one-place' ] \
   || fail "redirect /source disagrees with the Location header"
-echo "ok: redirect /source serves the target"
+# a PATCH rebuilds meta, so it has to carry the target forward. Losing it here would blank every
+# redirect row on the next rename while the 301 kept working off the body fallback: exactly the
+# silent disagreement this change removes.
+curl -sf -X PATCH "$BASE/api/artifacts/ci-redir-agree" -H "$AUTH" -H "$JSON" \
+  -d '{"slug":"ci-redir-agree-2","tags":["hop"]}' > /dev/null
+[ "$(list_field ci-redir-agree-2 target)" = 'https://example.com/one-place' ] || fail "a PATCH dropped the target"
+loc=$(curl -s -o /dev/null -w '%{redirect_url}' "$BASE/a/ci-redir-agree-2")
+[ "$loc" = 'https://example.com/one-place' ] || fail "renamed redirect Location wrong: $loc"
+curl -sf -X DELETE "$BASE/api/artifacts/ci-redir-agree-2" -H "$AUTH" > /dev/null
+echo "ok: the 301, the row and /source name one place, through a rename"
 
 # a content-only PUT keeps the title. The dashboard's repoint sends one, and so does the CLI's
 # `update` with no --title, so resetting it to the slug quietly deleted the label off the row.
@@ -225,8 +239,6 @@ curl -sf -X PUT "$BASE/api/artifacts/ci-redir-title" -H "$AUTH" -H "$JSON" \
 [ "$(list_field ci-redir-title title)" = 'ci-redir-title' ] || fail "an explicit empty title did not clear"
 curl -sf -X DELETE "$BASE/api/artifacts/ci-redir-title" -H "$AUTH" > /dev/null
 echo "ok: a content-only PUT keeps the title"
-
-curl -sf -X DELETE "$BASE/api/artifacts/ci-redir-auth" -H "$AUTH" > /dev/null
 
 # credentials in a target are refused at publish: the row shows the target, the list API hands
 # it to every read-scoped key, and the target host gets them from anyone who scans the code

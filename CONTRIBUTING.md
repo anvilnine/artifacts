@@ -32,7 +32,8 @@ npm test
 
 Use one when the case cannot be reached over HTTP, such as a malformed `auth.json` record. The
 `create*Store` functions in `lib/` take their storage and env as arguments, so a stub object is
-enough to drive them. The `test` script names its files, so add yours to it.
+enough to drive them. The `test` script globs `test/*.test.js`, so a new file at that level runs with no edit; a
+subdirectory does not.
 
 ## Releasing
 

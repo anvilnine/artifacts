@@ -648,7 +648,12 @@ async function saveArtifact({ content, type = 'html', slug, title, expiresAt, fr
   // A non-public artifact needs the session secret resident to mint its capability token;
   // it is created lazily (first login otherwise), so force it here (tokenEpoch ⇒ non-public).
   if (meta.tokenEpoch !== undefined) await ensureSessionSecret();
-  return { slug: finalSlug, url: tokenedUrl(meta), visibility: meta.visibility || 'public' };
+  const out = { slug: finalSlug, url: tokenedUrl(meta), visibility: meta.visibility || 'public' };
+  // A redirect answers with the target it stored, which is not always the string that was sent:
+  // the host case-folds, a bare host gains a slash, and everything else percent-encodes. Without
+  // it a caller that wants to show the target has to guess or re-fetch the list.
+  if (meta.target !== undefined) out.target = meta.target;
+  return out;
 }
 
 // Copy an existing artifact into a new slug. Content bytes (source.* / index.html / site/*)
@@ -710,13 +715,17 @@ async function duplicateArtifact(sourceSlug, body = {}) {
   // credentials, published before that rule existed, would have leaked through a duplicate.
   // Anything the parser refuses is left off the copy rather than written to it.
   if (source.type === 'redirect') {
-    const copied = await resolveRedirectTarget(source, () => storage.getBuffer(`${targetSlug}/source.url`));
-    if (copied !== null) {
-      try {
-        meta.target = parseRedirectTarget(copied, { publishing: true });
-      } catch {
-        // a legacy target this build would refuse: the copy keeps the bytes and shows no target
-      }
+    const copied = await resolveRedirectTarget({ meta: source, readSource: () => storage.getBuffer(`${targetSlug}/source.url`) });
+    // A copy is a publish, so it answers to the publish rules. Writing the target unvalidated
+    // was the one door where they did not apply. Refusing beats copying anyway with the target
+    // left off: that produced a brand-new artifact whose row said nothing while its 301 still
+    // handed credentials to the target host, which is the disagreement this whole change exists
+    // to remove. Repoint the original and the copy goes through.
+    try {
+      meta.target = parseRedirectTarget(copied, { publishing: true });
+    } catch (err) {
+      await storage.deleteSlug(targetSlug).catch(() => {}); // drop the bytes copySlug already wrote
+      throw new ApiError(400, `cannot copy "${sourceSlug}": ${err.message}`);
     }
   }
   if (expiry !== undefined) meta.expiresAt = expiry;
@@ -1164,7 +1173,7 @@ app.get('/a/:slug', async (req, res) => {
     // meta decides where this goes, with source.url as the fallback for a redirect published
     // before meta carried a target. The value comes back parsed, so a scheme this build refuses
     // never reaches a Location header whatever is on disk. See lib/redirect.js.
-    const target = await resolveRedirectTarget(meta, () => storage.getBuffer(`${slug}/source.url`));
+    const target = await resolveRedirectTarget({ meta, readSource: () => storage.getBuffer(`${slug}/source.url`) });
     if (target === null) return notFound(res);
     res.set({
       'Cache-Control': 'no-store',
@@ -1226,7 +1235,7 @@ app.get('/a/:slug/source', async (req, res, next) => {
   // the 301 uses rather than the stored bytes. Streaming the body here let /source name one
   // destination while the Location header sent visitors to another.
   if (meta.type === 'redirect') {
-    const target = await resolveRedirectTarget(meta, () => storage.getBuffer(`${slug}/source.url`));
+    const target = await resolveRedirectTarget({ meta, readSource: () => storage.getBuffer(`${slug}/source.url`) });
     if (target === null) return notFound(res);
     return res.type('text/plain; charset=utf-8').send(target);
   }

@@ -40,7 +40,7 @@ artifacts keys create <name> [--scopes read,publish,full] [--expires ISO]
 artifacts keys revoke <id>
 ```
 
-Type is inferred from the file extension (`.html`, `.jsx`, `.tsx`, `.md`); pass `--type` to override. A redirect has no extension to infer from, so it needs `--type redirect` and a file holding the target URL: `artifacts publish target.txt --type redirect --slug pricing`. `deploy` zips a directory for you and posts it to the zip endpoint. `tag` replaces an artifact's tags (`none` clears them); `list --tag` shows only artifacts carrying that tag.
+Type is inferred from the file extension (`.html`, `.jsx`, `.tsx`, `.md`); pass `--type` to override. A redirect has no extension to infer from, so it needs `--type redirect` and a file holding the target URL: `artifacts publish target.txt --type redirect --slug pricing`. Repoint one the same way with `update`: `artifacts update pricing new-target.txt --type redirect`, which keeps the title and everything else. The target cannot carry a username or password. `deploy` zips a directory for you and posts it to the zip endpoint. `tag` replaces an artifact's tags (`none` clears them); `list --tag` shows only artifacts carrying that tag.
 
 ## API keys
 
