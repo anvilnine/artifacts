@@ -114,9 +114,16 @@ curl -X POST https://artifacts.example.com/api/artifacts \
   -d '{"type":"redirect","content":"https://example.com/pricing","slug":"pricing"}'
 ```
 
+The dashboard publishes one too: pick `redirect` in the New artifact form and the content box
+becomes a single Target URL field. The Frame control disappears too, because a redirect answers
+with a `Location` header and never reaches the viewer frame.
+
+<img src="screenshot-redirect-compose.png" alt="The New artifact form with type redirect selected, showing a Target URL field and no Frame control" width="700">
+
 Rules:
 
 - The target must be an absolute `http://` or `https://` URL. Anything else is a 400 at publish time, so a `javascript:` or `data:` target can never reach a viewer's browser.
+- The target cannot carry a username or password. A redirect is a public hop: the credentials would show in the dashboard row, come back from the list API to every `read` key, and reach the target host from anyone who follows the link. A target already stored with credentials keeps redirecting, so an upgrade takes nothing off the air.
 - The stored target is the normalized URL, not the bytes you sent: surrounding whitespace goes, the scheme and host lowercase, and everything else percent-encodes. The 2048-character cap is measured on that normalized value.
 - The response carries `Cache-Control: no-store`. A browser would otherwise pin a 301 for good and strand returning visitors on the old target, so `no-store` is what makes repointing the slug with a `PUT` take effect on the next visit.
 - Redirects skip the viewer frame, and `?raw=1` does not change that. `GET /a/:slug/source` returns the stored target as plain text.
@@ -124,7 +131,17 @@ Rules:
 - Visibility works the same as every other type. A private redirect with no capability link answers 404 on every path and never sends `Location`.
 - Search engines do not follow these. Every response from the server carries `X-Robots-Tag: noindex, nofollow`, which is the same rule that keeps artifacts out of search results.
 
-<img src="screenshot-redirect-list.png" alt="Two redirect artifacts in the dashboard list, each with a redirect badge" width="700">
+Each redirect row in the list shows where it points, under the slug, and the row's menu has an
+Edit target action that repoints the slug. The target is carried in the list payload as `target`,
+alongside `type` and `slug`.
+
+`meta.json` is what the 301 follows. The target is stored twice, in `meta.target` and in the
+artifact's `source.url` body, written by the same call as two separate writes; `meta.json` goes last
+and is the commit marker, so letting it decide keeps the row and the `Location` header from
+disagreeing after two concurrent writes to one slug. A redirect published before `meta.target`
+existed falls back to its `source.url` and shows no target in the row until its next `PUT`.
+
+<img src="screenshot-redirect-rows.png" alt="Two redirect artifacts in the dashboard list, each with a redirect badge and the URL it points at" width="700">
 
 ### What a redirect artifact costs you
 

@@ -33,6 +33,7 @@ import {
 } from './lib/auth.js';
 import { createConfigStore } from './lib/config.js';
 import { ApiError } from './lib/errors.js';
+import { parseRedirectTarget, resolveRedirectTarget } from './lib/redirect.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -205,8 +206,6 @@ const MAX_TAGS = 10;
 // start with a letter or digit. Internal whitespace is collapsed on input.
 const PROJECT_RE = /^[\p{L}\p{N}][\p{L}\p{N}\p{M} ._-]{0,63}$/u;
 const SOURCE_EXT = { html: 'html', jsx: 'jsx', tsx: 'tsx', md: 'md', redirect: 'url' };
-// Longest target a redirect artifact may store, measured on the normalized URL.
-const MAX_REDIRECT_TARGET_LEN = 2048;
 
 // Pinned versions shared with the jsx shell. `external=react` keeps packages on
 // the shell's React instance — separate copies cause "Invalid hook call".
@@ -550,34 +549,6 @@ function isExpired(meta) {
   return Boolean(meta.expiresAt && Date.parse(meta.expiresAt) <= Date.now());
 }
 
-// The target of a redirect artifact, normalized. Checked again at serve time before it
-// reaches a Location header, so a target that got past this (hand-edited storage, a file
-// written by an older build) still cannot ship a non-http scheme to a viewer. That makes
-// the length check run twice on the same string, so it measures the normalized href and
-// not the input: percent-encoding can multiply a short input several times over, and a
-// value that passed here but failed there would publish 201 and then serve 404 forever.
-function parseRedirectTarget(value) {
-  const raw = typeof value === 'string' ? value.trim() : '';
-  let url;
-  try {
-    url = new URL(raw);
-  } catch {
-    throw new ApiError(400, 'content must be an absolute http:// or https:// URL for a redirect');
-  }
-  // The scheme allowlist is the point of this function: a stored `javascript:` or `data:`
-  // target would turn a Location header into script execution on the viewer's click.
-  if (url.protocol !== 'http:' && url.protocol !== 'https:') {
-    throw new ApiError(400, 'content must be an absolute http:// or https:// URL for a redirect');
-  }
-  if (url.href.length > MAX_REDIRECT_TARGET_LEN) {
-    throw new ApiError(
-      400,
-      `redirect target too long (${url.href.length} > ${MAX_REDIRECT_TARGET_LEN} characters once normalized)`,
-    );
-  }
-  return url.href;
-}
-
 async function saveArtifact({ content, type = 'html', slug, title, expiresAt, frame, tags, project, visibility, password }, { replace = false } = {}) {
   if (typeof content !== 'string' || !content.trim()) {
     throw new ApiError(400, 'content (non-empty string) is required');
@@ -612,13 +583,17 @@ async function saveArtifact({ content, type = 'html', slug, title, expiresAt, fr
     throw new ApiError(400, 'cannot replace a zip site with inline content; delete and re-upload');
   }
 
-  const finalTitle = title || finalSlug;
+  // A PUT that omits the title keeps the one already stored, the way it keeps tags and project.
+  // Falling back to the slug instead threw the title away on every content-only update: the CLI
+  // `update` with no --title, MCP `update_artifact`, and repointing a redirect from the
+  // dashboard all did it, and the row simply stopped showing the label.
+  const finalTitle = title !== undefined ? (title || finalSlug) : (existing?.title || finalSlug);
   let html;
   if (type === 'html') html = content;
   else if (type === 'jsx' || type === 'tsx') html = buildJsxHtml(content, finalTitle);
   // md renders at serve time from source.md; nothing baked here.
   // redirect stores the normalized target and nothing else; the serve path reads it back.
-  const body = type === 'redirect' ? parseRedirectTarget(content) : content;
+  const body = type === 'redirect' ? parseRedirectTarget(content, { publishing: true }) : content;
 
   if (html !== undefined) {
     await storage.put(`${finalSlug}/index.html`, html, { contentType: 'text/html; charset=utf-8' });
@@ -634,6 +609,11 @@ async function saveArtifact({ content, type = 'html', slug, title, expiresAt, fr
     createdAt: existing?.createdAt || new Date().toISOString(),
     updatedAt: new Date().toISOString(),
   };
+  // The target lives in source.url, which the list API never reads, so a redirect also
+  // carries it in meta for the dashboard row. Cleared on any other type, or an artifact
+  // converted away from redirect would keep claiming a destination it no longer has.
+  if (type === 'redirect') meta.target = body;
+  else delete meta.target;
   if (expiresAt !== undefined) meta.expiresAt = expiry;
   if (frame !== undefined) meta.frame = frame;
   if (tagList !== undefined) meta.tags = tagList.length ? tagList : undefined;
@@ -668,7 +648,12 @@ async function saveArtifact({ content, type = 'html', slug, title, expiresAt, fr
   // A non-public artifact needs the session secret resident to mint its capability token;
   // it is created lazily (first login otherwise), so force it here (tokenEpoch ⇒ non-public).
   if (meta.tokenEpoch !== undefined) await ensureSessionSecret();
-  return { slug: finalSlug, url: tokenedUrl(meta), visibility: meta.visibility || 'public' };
+  const out = { slug: finalSlug, url: tokenedUrl(meta), visibility: meta.visibility || 'public' };
+  // A redirect answers with the target it stored, which is not always the string that was sent:
+  // the host case-folds, a bare host gains a slash, and everything else percent-encodes. Without
+  // it a caller that wants to show the target has to guess or re-fetch the list.
+  if (meta.target !== undefined) out.target = meta.target;
+  return out;
 }
 
 // Copy an existing artifact into a new slug. Content bytes (source.* / index.html / site/*)
@@ -723,6 +708,26 @@ async function duplicateArtifact(sourceSlug, body = {}) {
     updatedAt: new Date().toISOString(),
   };
   if (source.type === 'zip' && typeof source.files === 'number') meta.files = source.files;
+  // A copy points where the original points, which is what the original's meta says, so this
+  // resolves the same way the serve path does rather than reading the copied bytes. Reading the
+  // bytes re-imported the drift the resolver exists to remove, and it promoted a value nothing
+  // had validated into meta, where the list API hands it to every read-scoped key: a target with
+  // credentials, published before that rule existed, would have leaked through a duplicate.
+  // Anything the parser refuses is left off the copy rather than written to it.
+  if (source.type === 'redirect') {
+    const copied = await resolveRedirectTarget({ meta: source, readSource: () => storage.getBuffer(`${targetSlug}/source.url`) });
+    // A copy is a publish, so it answers to the publish rules. Writing the target unvalidated
+    // was the one door where they did not apply. Refusing beats copying anyway with the target
+    // left off: that produced a brand-new artifact whose row said nothing while its 301 still
+    // handed credentials to the target host, which is the disagreement this whole change exists
+    // to remove. Repoint the original and the copy goes through.
+    try {
+      meta.target = parseRedirectTarget(copied, { publishing: true });
+    } catch (err) {
+      await storage.deleteSlug(targetSlug).catch(() => {}); // drop the bytes copySlug already wrote
+      throw new ApiError(400, `cannot copy "${sourceSlug}": ${err.message}`);
+    }
+  }
   if (expiry !== undefined) meta.expiresAt = expiry;
   if (tagList && tagList.length) meta.tags = tagList;
   if (projectName) meta.project = projectName;
@@ -758,7 +763,7 @@ function seedTokenEpoch(meta) {
 // what the dashboard/API legitimately need; secrets (password) and internal state
 // (tokenEpoch) are dropped, and hasPassword exposes state without the hash.
 const PUBLIC_META_FIELDS = [
-  'slug', 'type', 'title', 'files', 'createdAt', 'updatedAt',
+  'slug', 'type', 'title', 'files', 'target', 'createdAt', 'updatedAt',
   'expiresAt', 'frame', 'tags', 'project', 'visibility', 'disabled',
 ];
 function publicMeta(meta) {
@@ -1165,14 +1170,11 @@ app.get('/a/:slug', async (req, res) => {
   // after a PUT, so no-store is what keeps repointing the slug working. Crawlers do not
   // follow it either way: the whole domain answers X-Robots-Tag: noindex, nofollow.
   if (meta.type === 'redirect') {
-    const buf = await storage.getBuffer(`${slug}/source.url`);
-    if (!buf) return notFound(res);
-    let target;
-    try {
-      target = parseRedirectTarget(buf.toString('utf8'));
-    } catch {
-      return notFound(res);
-    }
+    // meta decides where this goes, with source.url as the fallback for a redirect published
+    // before meta carried a target. The value comes back parsed, so a scheme this build refuses
+    // never reaches a Location header whatever is on disk. See lib/redirect.js.
+    const target = await resolveRedirectTarget({ meta, readSource: () => storage.getBuffer(`${slug}/source.url`) });
+    if (target === null) return notFound(res);
     res.set({
       'Cache-Control': 'no-store',
       'X-Content-Type-Options': 'nosniff',
@@ -1229,6 +1231,14 @@ app.get('/a/:slug/source', async (req, res, next) => {
   if (isExpired(meta)) return res.status(410).type('text/plain').send('artifact expired');
   if (meta.type === 'zip') return next(); // zip sites serve /source as a site path
   res.set({ 'X-Content-Type-Options': 'nosniff', 'Referrer-Policy': 'no-referrer' });
+  // A redirect's "source" is its target, and the docs say so, so it answers with the same value
+  // the 301 uses rather than the stored bytes. Streaming the body here let /source name one
+  // destination while the Location header sent visitors to another.
+  if (meta.type === 'redirect') {
+    const target = await resolveRedirectTarget({ meta, readSource: () => storage.getBuffer(`${slug}/source.url`) });
+    if (target === null) return notFound(res);
+    return res.type('text/plain; charset=utf-8').send(target);
+  }
   // forceType keeps source inert: an HTML/JSX source is served as text/plain, never executed.
   serveObject(req, res, `${slug}/source.${SOURCE_EXT[meta.type]}`, {
     forceType: 'text/plain; charset=utf-8',

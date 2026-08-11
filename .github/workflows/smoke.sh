@@ -18,6 +18,20 @@ expect_code() { # expect_code <expected> <actual> <label>
   echo "ok: $3 -> $1"
 }
 
+# One field of one artifact out of GET /api/artifacts, printed exactly. Empty when the slug is
+# not listed or the field is absent, so comparing the value also catches a row that vanished.
+# Parsed with node, not grep: a '{' inside a target or a title splits any text scan of the
+# payload, and a query string may legitimately carry one.
+list_field() { # list_field <slug> <field>
+  curl -s "$BASE/api/artifacts" -H "$AUTH" | node -e '
+    let s = "";
+    process.stdin.on("data", (d) => { s += d; }).on("end", () => {
+      const row = JSON.parse(s).find((a) => a.slug === process.argv[1]);
+      const v = row ? row[process.argv[2]] : undefined;
+      process.stdout.write(v === undefined ? "" : String(v));
+    });' "$1" "$2"
+}
+
 # unauthenticated write -> 401
 code=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/api/artifacts" -H "$JSON" -d '{"content":"<h1>x</h1>","type":"html"}')
 expect_code 401 "$code" "unauth publish"
@@ -136,6 +150,12 @@ curl -s "$BASE/api/artifacts" -H "$AUTH" | grep -qF '"slug":"ci-redir"' || fail 
 curl -s "$BASE/api/artifacts" -H "$AUTH" | grep -qF '"type":"redirect"' || fail "redirect type not listed"
 echo "ok: redirect listed"
 
+# the row carries its target, so the dashboard can show where a redirect points without
+# fetching /source for every row it renders
+[ "$(list_field ci-redir target)" = 'https://example.com/landing?a=1' ] \
+  || fail "redirect row is missing its target"
+echo "ok: redirect row carries the target"
+
 # the frame never wraps a redirect, and ?raw=1 does not bypass it
 code=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/a/ci-redir?raw=1")
 expect_code 301 "$code" "redirect raw"
@@ -159,6 +179,78 @@ loc=$(curl -s -o /dev/null -w '%{redirect_url}' "$BASE/a/ci-redir-norm")
 [ "$loc" = 'https://example.com/Landing?a=1' ] || fail "redirect target not normalized: $loc"
 curl -sf -X DELETE "$BASE/api/artifacts/ci-redir-norm" -H "$AUTH" > /dev/null
 echo "ok: redirect target normalized"
+
+# a target carrying JSON punctuation survives the round trip into the list row. Normalization
+# percent-encodes braces in the path but leaves them in the query, so this is a target a user
+# can really publish.
+curl -sf -X POST "$BASE/api/artifacts" -H "$AUTH" -H "$JSON" \
+  -d '{"content":"https://example.com/p?a={b}&c=\"d\"","type":"redirect","slug":"ci-redir-brace","visibility":"public"}' > /dev/null
+[ "$(list_field ci-redir-brace target)" = 'https://example.com/p?a={b}&c=%22d%22' ] \
+  || fail "braced redirect target came back wrong: $(list_field ci-redir-brace target)"
+curl -sf -X DELETE "$BASE/api/artifacts/ci-redir-brace" -H "$AUTH" > /dev/null
+echo "ok: redirect target with braces round-trips"
+
+# The Location header, the list row and /source all name the same place. The two stored copies of
+# the target agree in every state reachable through the API, so this pins the value across the
+# three readers rather than proving which copy each one read; the resolution rule itself is
+# unit-tested in test/redirect.test.js, where a disagreement can be constructed.
+curl -sf -X POST "$BASE/api/artifacts" -H "$AUTH" -H "$JSON" \
+  -d '{"content":"https://example.com/one-place","type":"redirect","slug":"ci-redir-agree","visibility":"public"}' > /dev/null
+loc=$(curl -s -o /dev/null -w '%{redirect_url}' "$BASE/a/ci-redir-agree")
+[ "$loc" = 'https://example.com/one-place' ] || fail "redirect Location wrong: $loc"
+[ "$(list_field ci-redir-agree target)" = 'https://example.com/one-place' ] || fail "row does not name the target"
+# publishing answers with the stored target, which is not always what was sent: the dashboard
+# shows the response rather than the box, so a normalized value never has to be guessed at
+resp=$(curl -s -X PUT "$BASE/api/artifacts/ci-redir-agree" -H "$AUTH" -H "$JSON" \
+  -d '{"content":"  HTTPS://EXAMPLE.COM/One-Place  ","type":"redirect"}')
+printf '%s' "$resp" | grep -qF '"target":"https://example.com/One-Place"' \
+  || fail "publish response does not carry the stored target: $resp"
+curl -sf -X PUT "$BASE/api/artifacts/ci-redir-agree" -H "$AUTH" -H "$JSON" \
+  -d '{"content":"https://example.com/one-place","type":"redirect"}' > /dev/null
+
+# The fallback to source.url for a redirect published before meta carried a target cannot be
+# set up through the API (every write now fills meta), so it is covered in test/redirect.test.js
+# instead of faked here.
+
+[ "$(curl -s "$BASE/a/ci-redir-agree/source")" = 'https://example.com/one-place' ] \
+  || fail "redirect /source disagrees with the Location header"
+# a PATCH rebuilds meta, so it has to carry the target forward. Losing it here would blank every
+# redirect row on the next rename while the 301 kept working off the body fallback: exactly the
+# silent disagreement this change removes.
+curl -sf -X PATCH "$BASE/api/artifacts/ci-redir-agree" -H "$AUTH" -H "$JSON" \
+  -d '{"slug":"ci-redir-agree-2","tags":["hop"]}' > /dev/null
+[ "$(list_field ci-redir-agree-2 target)" = 'https://example.com/one-place' ] || fail "a PATCH dropped the target"
+loc=$(curl -s -o /dev/null -w '%{redirect_url}' "$BASE/a/ci-redir-agree-2")
+[ "$loc" = 'https://example.com/one-place' ] || fail "renamed redirect Location wrong: $loc"
+curl -sf -X DELETE "$BASE/api/artifacts/ci-redir-agree-2" -H "$AUTH" > /dev/null
+echo "ok: the 301, the row and /source name one place, through a rename"
+
+# a content-only PUT keeps the title. The dashboard's repoint sends one, and so does the CLI's
+# `update` with no --title, so resetting it to the slug quietly deleted the label off the row.
+curl -sf -X POST "$BASE/api/artifacts" -H "$AUTH" -H "$JSON" \
+  -d '{"content":"https://example.com/one","type":"redirect","slug":"ci-redir-title","title":"Launch link","visibility":"public"}' > /dev/null
+curl -sf -X PUT "$BASE/api/artifacts/ci-redir-title" -H "$AUTH" -H "$JSON" \
+  -d '{"content":"https://example.com/two","type":"redirect"}' > /dev/null
+[ "$(list_field ci-redir-title title)" = 'Launch link' ] || fail "a content-only PUT reset the title"
+[ "$(list_field ci-redir-title target)" = 'https://example.com/two' ] || fail "the PUT did not repoint"
+# an explicit empty title still clears back to the slug, which is what it meant before
+curl -sf -X PUT "$BASE/api/artifacts/ci-redir-title" -H "$AUTH" -H "$JSON" \
+  -d '{"content":"https://example.com/three","type":"redirect","title":""}' > /dev/null
+[ "$(list_field ci-redir-title title)" = 'ci-redir-title' ] || fail "an explicit empty title did not clear"
+curl -sf -X DELETE "$BASE/api/artifacts/ci-redir-title" -H "$AUTH" > /dev/null
+echo "ok: a content-only PUT keeps the title"
+
+# credentials in a target are refused at publish: the row shows the target, the list API hands
+# it to every read-scoped key, and the target host gets them from anyone who scans the code
+for creds in 'https://alice:s3cret@example.com/x' 'https://alice@example.com/x'; do
+  code=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/api/artifacts" -H "$AUTH" -H "$JSON" \
+    -d "{\"content\":\"$creds\",\"type\":\"redirect\",\"slug\":\"ci-redir-creds\"}")
+  expect_code 400 "$code" "redirect target with credentials refused: $creds"
+done
+code=$(curl -s -o /dev/null -w '%{http_code}' -X PUT "$BASE/api/artifacts/ci-redir" -H "$AUTH" -H "$JSON" \
+  -d '{"content":"https://alice:s3cret@example.com/x","type":"redirect"}')
+expect_code 400 "$code" "repointing at credentials refused"
+echo "ok: redirect target credentials refused"
 
 # non-http targets are refused at publish time, so they can never reach a Location header
 for bad in 'javascript:alert(1)' 'JaVaScRiPt:alert(1)' 'data:text/html,<script>x</script>' '//evil.example' '/relative/path' 'not a url'; do
@@ -195,6 +287,9 @@ code=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/a/ci-redir")
 expect_code 301 "$code" "redirect serve after update"
 loc=$(curl -s -o /dev/null -w '%{redirect_url}' "$BASE/a/ci-redir")
 [ "$loc" = 'https://example.org/moved' ] || fail "redirect target not updated: $loc"
+# the row follows the update, so a dashboard row never shows the old destination
+[ "$(list_field ci-redir target)" = 'https://example.org/moved' ] \
+  || fail "redirect row still shows the old target"
 echo "ok: redirect target update"
 
 # an html artifact converted to a redirect serves the 301, not the index.html left behind
@@ -207,6 +302,13 @@ expect_code 301 "$code" "converted artifact serves the redirect"
 loc=$(curl -s -o /dev/null -w '%{redirect_url}' "$BASE/a/ci-redir-conv")
 [ "$loc" = 'https://example.com/converted' ] || fail "converted redirect Location wrong: $loc"
 if curl -s "$BASE/a/ci-redir-conv" | grep -q 'was html'; then fail "converted artifact still serves its old body"; fi
+# converting back to html drops the target, so the row cannot claim a destination the
+# artifact no longer has. The type check first, so an empty target cannot pass by way of a
+# row that is not there at all.
+curl -sf -X PUT "$BASE/api/artifacts/ci-redir-conv" -H "$AUTH" -H "$JSON" \
+  -d '{"content":"<h1>html again</h1>","type":"html"}' > /dev/null
+[ "$(list_field ci-redir-conv type)" = 'html' ] || fail "converted artifact is not listed as html"
+[ -z "$(list_field ci-redir-conv target)" ] || fail "an html artifact kept a redirect target"
 curl -sf -X DELETE "$BASE/api/artifacts/ci-redir-conv" -H "$AUTH" > /dev/null
 echo "ok: html converted to a redirect"
 
@@ -216,6 +318,8 @@ dupslug=$(curl -s -X POST "$BASE/api/artifacts/ci-redir/duplicate" -H "$AUTH" -H
 [ "$dupslug" = "ci-redir-copy" ] || fail "redirect duplicate did not return the new slug"
 loc=$(curl -s -o /dev/null -w '%{redirect_url}' "$BASE/a/ci-redir-copy")
 [ "$loc" = 'https://example.org/moved' ] || fail "duplicated redirect Location wrong: $loc"
+[ "$(list_field ci-redir-copy target)" = 'https://example.org/moved' ] \
+  || fail "duplicated redirect row is missing its target"
 curl -sf -X DELETE "$BASE/api/artifacts/ci-redir-copy" -H "$AUTH" > /dev/null
 echo "ok: redirect duplicate keeps the target"
 
