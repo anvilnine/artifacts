@@ -62,6 +62,98 @@ jobs:
           esac
           [ ! -e /tmp/artifacts-seed-check/artifacts/auth.json ] \
             || { echo "auth.json was written on the refused path"; exit 1; }
+      - name: The setup route claims an instance once and refuses the second
+        # The unauthenticated one-time POST /api/auth/setup hands the instance to whoever reaches
+        # it first (docs/deploy.md, lib/auth.js), and nothing drives it over HTTP. test/auth.test.js
+        # covers the env admin seed, which is a different function writing the same field. Every
+        # job seeds ARTIFACTS_ADMIN_* since T1.1.8, so this step runs its own server on its own
+        # port and data dir and leaves the seeded instance the rest of the job uses alone.
+        env:
+          ARTIFACTS_ADMIN_USERNAME: ''
+          ARTIFACTS_ADMIN_PASSWORD: ''
+          DATA_DIR: /tmp/artifacts-setup-check
+          # 3000 is the job's own server and the postgres job uses 3001 and 3002 for replicas.
+          PORT: 3010
+        run: |
+          BASE=http://localhost:$PORT
+          REPLICA=http://localhost:$((PORT + 1))
+          rm -rf /tmp/artifacts-setup-check
+          node server.js &
+          setup_pid=$!
+          # A second process on the same record, started before any admin exists so it caches an
+          # empty one. Both replicas of a fleet look like this on a shared backend.
+          PORT=$((PORT + 1)) node server.js &
+          replica_pid=$!
+          # Every assertion below exits on failure, so kill on the way out rather than at ten
+          # separate exits, which also covers an exit set -e takes out of our hands.
+          trap 'kill $setup_pid $replica_pid 2>/dev/null' EXIT
+          for i in $(seq 1 20); do curl -sf "$BASE/healthz" && break; sleep 0.5; done
+          # The loop above exits 0 whether or not anything answered. Check our own process, not
+          # just the port: a stranger already on $PORT would answer every assertion below while
+          # this step's server died on EADDRINUSE, and the step would pass having tested nothing.
+          kill -0 $setup_pid 2>/dev/null \
+            || { echo "FAIL: the server with no admin seeded died on boot (port :$PORT already taken?)"; exit 1; }
+          curl -sf "$BASE/healthz" > /dev/null \
+            || { echo "FAIL: the server with no admin seeded never answered on :$PORT"; exit 1; }
+          for i in $(seq 1 20); do curl -sf "$REPLICA/healthz" && break; sleep 0.5; done
+          kill -0 $replica_pid 2>/dev/null \
+            || { echo "FAIL: the replica died on boot (port :$((PORT + 1)) already taken?)"; exit 1; }
+          curl -sf "$REPLICA/healthz" > /dev/null \
+            || { echo "FAIL: the replica never answered on :$((PORT + 1))"; exit 1; }
+          # The flag the dashboard reads to choose between the first-run screen and the login
+          # screen. Nothing had loaded it against an unclaimed instance.
+          curl -s "$BASE/api/auth/session" | grep -q '"needsSetup":true' \
+            || { echo "FAIL: an unclaimed instance does not report needsSetup"; curl -s "$BASE/api/auth/session"; exit 1; }
+          echo "ok: an unclaimed instance reports needsSetup"
+          # docs/auth.md says the setup screen answers 400 on a value that breaks either rule.
+          # test/auth.test.js checks the same two validators on the env-seed path, never here.
+          code=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/api/auth/setup" \
+            -H 'Content-Type: application/json' -d '{"username":"ci-claimer","password":"short"}')
+          [ "$code" = "400" ] || { echo "FAIL: a claim with a rejected password answered $code, expected 400"; exit 1; }
+          curl -s "$BASE/api/auth/session" | grep -q '"needsSetup":true' \
+            || { echo "FAIL: a refused claim consumed the one-time setup"; exit 1; }
+          echo "ok: a claim that breaks the credential rules is refused and leaves the instance claimable"
+          code=$(curl -s -o /tmp/setup-1.json -D /tmp/setup-1.head -w '%{http_code}' -X POST "$BASE/api/auth/setup" \
+            -H 'Content-Type: application/json' -d '{"username":"ci-claimer","password":"ci-claimer-password"}')
+          [ "$code" = "201" ] || { echo "FAIL: the first claim answered $code, expected 201"; cat /tmp/setup-1.json; exit 1; }
+          # Whoever creates the admin is signed in as the admin (docs/auth.md). Without this the
+          # route can stop issuing the cookie and stay green here, while a real operator finishes
+          # the first-run screen and lands on a dashboard that 401s every call.
+          grep -qi '^set-cookie: artifacts_session=' /tmp/setup-1.head \
+            || { echo "FAIL: the claim did not sign the new admin in"; grep -i '^set-cookie' /tmp/setup-1.head || echo "(no set-cookie header at all)"; exit 1; }
+          # Both HMAC secrets are written by completing setup, and docs/deploy.md builds the
+          # multi-replica procedure on that. Read them off disk, which also proves the admin
+          # landed in the file the next boot reads rather than only in this process.
+          node -e '
+            const fs = require("fs");
+            const a = JSON.parse(fs.readFileSync(process.env.DATA_DIR + "/artifacts/auth.json", "utf8"));
+            const missing = ["admin", "sessionSecret", "adminSecret"].filter((k) => !a[k]);
+            if (missing.length) { console.error("FAIL: setup left " + missing.join(", ") + " unwritten"); process.exit(1); }
+            if (a.admin.username !== "ci-claimer") { console.error("FAIL: stored admin is " + a.admin.username); process.exit(1); }
+          '
+          echo "ok: an unclaimed instance is claimable, signs the claimer in, and writes both secrets"
+          # The second claim is the half that matters: this route is unauthenticated, so a 409 is
+          # the only thing standing between a booted instance and whoever reaches it next.
+          code=$(curl -s -o /tmp/setup-2.json -w '%{http_code}' -X POST "$BASE/api/auth/setup" \
+            -H 'Content-Type: application/json' -d '{"username":"ci-second-claimer","password":"ci-second-claimer-password"}')
+          [ "$code" = "409" ] || { echo "FAIL: a second claim answered $code, expected 409"; cat /tmp/setup-2.json; exit 1; }
+          # Same claim from the replica, which booted before the admin existed and still has an
+          # empty record cached. Its outer check passes, so this is the only assertion that
+          # reaches the re-check inside update(), the guard that exists for exactly this race.
+          # Without a second process the route is green with that guard deleted.
+          curl -s "$REPLICA/api/auth/session" | grep -q '"needsSetup":true' \
+            || { echo "FAIL: the replica already saw the admin, so its outer check would refuse first and this proves nothing"; exit 1; }
+          code=$(curl -s -o /tmp/setup-3.json -w '%{http_code}' -X POST "$REPLICA/api/auth/setup" \
+            -H 'Content-Type: application/json' -d '{"username":"ci-replica-claimer","password":"ci-replica-claimer-password"}')
+          [ "$code" = "409" ] || { echo "FAIL: a replica that never saw the admin claimed the instance, answering $code"; cat /tmp/setup-3.json; exit 1; }
+          echo "ok: a replica holding a stale empty record is refused by the stored-record check"
+          # A 409 does not prove the record was left alone, so check the first owner is still there.
+          curl -s "$BASE/api/auth/session" | grep -q '"needsSetup":false' \
+            || { echo "FAIL: the instance went back to needing setup"; curl -s "$BASE/api/auth/session"; exit 1; }
+          code=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/api/auth/login" \
+            -H 'Content-Type: application/json' -d '{"username":"ci-claimer","password":"ci-claimer-password"}')
+          [ "$code" = "200" ] || { echo "FAIL: the original admin stopped working after the refused claim (got $code)"; exit 1; }
+          echo "ok: a second claim is refused and the first admin survives it"
       - name: Boot server
         run: |
           node server.js &
