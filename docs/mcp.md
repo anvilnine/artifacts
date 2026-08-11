@@ -13,8 +13,8 @@ Every tool the server registers. `?` marks an optional argument.
 | Tool | Args | Returns |
 |---|---|---|
 | `publish_artifact` | `content`, `type?`, `slug?`, `title?`, `expiresAt?`, `frame?`, `tags?`, `project?`, `visibility?`, `password?` | share URL (tokened for private/password) |
-| `update_artifact` | `slug`, `content`, `type?`, `title?`, `frame?`, `tags?`, `project?`, `visibility?`, `password?` | share URL |
-| `rename_artifact` | `slug`, `newSlug` | new share URL |
+| `update_artifact` | `slug`, `content`, `type?`, `title?`, `frame?`, `tags?`, `project?`, `visibility?`, `password?` | share URL (tokened for private/password) |
+| `rename_artifact` | `slug`, `newSlug` | new share URL (tokened for private/password) |
 | `set_artifact_expiry` | `slug`, `expiresAt` (ISO 8601, or `null` to clear) | confirmation |
 | `set_artifact_tags` | `slug`, `tags` (full list; empty array clears) | confirmation |
 | `set_artifact_project` | `slug`, `project` (1 to 64 chars of letters, digits, spaces and `-` `_` `.`, starting with a letter or digit; empty string clears) | confirmation |

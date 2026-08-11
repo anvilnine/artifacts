@@ -549,7 +549,10 @@ echo "ok: MCP tools/list serves all $registered_tools registered tools"
 # line below for an unrelated reason. Both DELETEs tolerate a 404.
 curl -s -X DELETE "$BASE/api/artifacts/ci-mcp" -H "$AUTH" > /dev/null
 curl -s -X DELETE "$BASE/api/artifacts/ci-mcp-denied" -H "$AUTH" > /dev/null
-curl -s -X DELETE "$BASE/api/artifacts/ci-mcp-default" -H "$AUTH" > /dev/null
+# Not ci-mcp-default: two assertions in this block grep a list for the bare string
+# `ci-mcp`, and a slug carrying it as a prefix satisfies them, so a stale artifact here
+# would hold those checks up after ci-mcp itself stopped being published.
+curl -s -X DELETE "$BASE/api/artifacts/ci-vis-default" -H "$AUTH" > /dev/null
 
 mcp_pub=$(mcp_call 3 tools/call \
   '{"name":"publish_artifact","arguments":{"content":"<h1>mcp</h1>","type":"html","slug":"ci-mcp","visibility":"public"}}')
@@ -584,19 +587,28 @@ echo "ok: MCP set_artifact_tags round-trip"
 # kind of URL comes back. Every MCP publish above passes visibility explicitly, so both claims
 # were unchecked over this transport. Read the stored visibility back over REST rather than
 # trusting the tool's result text, the same way the tags check does. Assumes the shipped
-# DEFAULT_VISIBILITY, as the REST capability-link block already does.
+# DEFAULT_VISIBILITY, as the REST capability-link block already does, so both failures name it.
 mcp_default=$(mcp_call 6 tools/call \
-  '{"name":"publish_artifact","arguments":{"content":"<h1>mcp default</h1>","type":"html","slug":"ci-mcp-default"}}')
+  '{"name":"publish_artifact","arguments":{"content":"<h1>mcp default</h1>","type":"html","slug":"ci-vis-default"}}')
 mcp_default_url=$(printf '%s' "$mcp_default" | mcp_text)
 case "$mcp_default_url" in
   *'?k='*) ;;
-  *) fail "MCP publish with no visibility returned an untokened url '$mcp_default_url' (got: $(printf '%s' "$mcp_default" | tr '\n' ' '))" ;;
+  *) fail "MCP publish with no visibility returned an untokened url '$mcp_default_url' (is DEFAULT_VISIBILITY=public on this instance?)" ;;
 esac
-mcp_default_meta=$(curl -s -H "$AUTH" "$BASE/api/artifacts")
-printf '%s' "$mcp_default_meta" | tr '{' '\n' | grep '"slug":"ci-mcp-default"' | grep -q '"visibility":"private"' \
-  || fail "MCP publish with no visibility did not store private (list: $mcp_default_meta)"
+# Pull the one row out before it can reach a FAIL line. The tags check above gets a single
+# artifact back because it filters on `?tag=`; there is no per-slug GET, so filter here instead
+# of pasting every slug, title and tag on the instance into a CI log.
+mcp_default_row=$(curl -s -H "$AUTH" "$BASE/api/artifacts" | tr '{' '\n' | grep '"slug":"ci-vis-default"' || true)
+printf '%s' "$mcp_default_row" | grep -q '"visibility":"private"' \
+  || fail "MCP publish with no visibility did not store private (row: $mcp_default_row) (is DEFAULT_VISIBILITY=public on this instance?)"
 echo "ok: MCP publish with no visibility is private and returns a tokened url"
-mcp_call 7 tools/call '{"name":"delete_artifact","arguments":{"slug":"ci-mcp-default"}}' > /dev/null
+mcp_call 7 tools/call '{"name":"delete_artifact","arguments":{"slug":"ci-vis-default"}}' > /dev/null
+# Checked against the authenticated list, not against /a/ci-vis-default. A private artifact's
+# bare URL is 404 whether or not it still exists (that indistinguishability is the point of
+# the visibility gate), so a serve-path check here would pass on a delete that did nothing.
+curl -s -H "$AUTH" "$BASE/api/artifacts" | grep -q '"slug":"ci-vis-default"' \
+  && fail "MCP delete_artifact left ci-vis-default on the instance"
+echo "ok: MCP delete_artifact removes a private artifact"
 
 # --- MCP scopes: a read-scoped key drives a read tool and is refused by publish and delete ---
 # Every call above carries the bootstrap key, which outranks every scope, so nothing above
@@ -606,7 +618,7 @@ mcp_key_resp=$(curl -s -X POST "$BASE/api/keys" -H "$AUTH" -H "$JSON" \
   -d '{"name":"ci-mcp-readonly","scopes":["read"]}')
 mcp_read_key=$(printf '%s' "$mcp_key_resp" | sed -n 's/.*"key":"\([^"]*\)".*/\1/p')
 mcp_read_key_id=$(printf '%s' "$mcp_key_resp" | sed -n 's/.*"id":"\([^"]*\)".*/\1/p')
-# This is the one response on the instance that carries a token in the clear, so scrub it
+# This carries a bearer key in the clear, the one credential on the instance, so scrub it
 # before any of it reaches a CI log.
 mcp_key_redacted=$(printf '%s' "$mcp_key_resp" | tr '\n' ' ' | sed 's/"key":"[^"]*"/"key":"REDACTED"/')
 case "$mcp_read_key" in

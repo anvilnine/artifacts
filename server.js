@@ -1578,11 +1578,14 @@ function createMcpServer(scopes = SCOPES) {
     {
       title: 'Publish artifact',
       description:
-        'Publish an HTML, JSX/TSX (single React component with default export), or Markdown artifact. Returns the share URL, which carries a ?k= capability token for private and password artifacts and is bare for public ones. Hand out the whole URL. Omit slug for a random unguessable one. type "redirect" instead publishes a short link: content is the absolute http(s) target and the URL answers 301.',
+        'Publish an HTML, JSX/TSX (single React component with default export), or Markdown artifact. Returns the share URL: bare for public, or a ?k= capability link for private and password, which opens the artifact on its own. Omit slug for a random unguessable one. type "redirect" instead publishes a short link: content is the absolute http(s) target, and the URL answers 301 once the visibility gate has let the request through.',
       inputSchema: {
         content: z.string().describe('Full source of the artifact, or the target URL when type is "redirect"'),
         type: z.enum(['html', 'jsx', 'tsx', 'md', 'redirect']).default('html'),
-        slug: z.string().optional().describe('Custom URL slug [a-z0-9-], 3-64 chars'),
+        slug: z
+          .string()
+          .optional()
+          .describe('Custom URL slug: 3-64 chars of [a-z0-9-], starting with a letter or digit'),
         title: z.string().optional(),
         expiresAt: z
           .string()
@@ -1591,19 +1594,19 @@ function createMcpServer(scopes = SCOPES) {
         frame: z
           .boolean()
           .optional()
-          .describe('Show the top viewer frame for this artifact, overriding the server default. Decides nothing while the server has frames switched off, where nothing is framed either way'),
+          .describe('Show the top viewer frame for this artifact, overriding the server default. Ignored while the server has frames switched off'),
         tags: z
           .array(z.string())
           .optional()
-          .describe('Tags for organizing artifacts: [a-z0-9-], 1-32 chars each, max 10'),
+          .describe('Tags for organizing artifacts: 1-32 chars each of [a-z0-9-], starting with a letter or digit, max 10. Stored lowercased and deduped'),
         project: z
           .string()
           .optional()
-          .describe('Project this artifact belongs to (single grouping label): 1 to 64 chars of letters, digits, spaces and - _ . , starting with a letter or digit'),
+          .describe('Project this artifact belongs to (single grouping label): 1 to 64 chars of letters, digits, spaces, and - _ . (starting with a letter or digit)'),
         visibility: z
           .enum(['public', 'private', 'password'])
           .optional()
-          .describe('private (the default: viewable through the returned ?k= capability link, by anyone holding it), public (anyone with the bare link), or password (the link plus the shared password)'),
+          .describe('private (the default: opens through the returned ?k= link, for anyone holding it), public (anyone with the bare link), or password (the bare link prompts for the shared password, but the ?k= link returned here skips that prompt)'),
         password: z
           .string()
           .optional()
@@ -1622,7 +1625,7 @@ function createMcpServer(scopes = SCOPES) {
     {
       title: 'Update artifact',
       description:
-        'Rewrite an existing artifact by slug. This replaces the artifact rather than patching it: omitting type makes it html, and omitting title resets the title to the slug, so pass both on every update. frame, tags, project and visibility keep their current value when omitted. To change one field and touch nothing else, use the matching set_artifact_* tool. Returns the share URL, tokened for private and password artifacts.',
+        'Rewrite an existing artifact by slug. Only type and title reset when omitted: type becomes html and title becomes the slug, so pass both on every update. Every other field the artifact has keeps its current value. Returns the share URL, tokened for private and password artifacts.',
       inputSchema: {
         slug: z.string(),
         content: z.string(),
@@ -1631,7 +1634,7 @@ function createMcpServer(scopes = SCOPES) {
         frame: z
           .boolean()
           .optional()
-          .describe('Show the top viewer frame for this artifact, overriding the server default. Decides nothing while the server has frames switched off, where nothing is framed either way'),
+          .describe('Show the top viewer frame for this artifact, overriding the server default. Ignored while the server has frames switched off'),
         tags: z
           .array(z.string())
           .optional()
@@ -1665,7 +1668,9 @@ function createMcpServer(scopes = SCOPES) {
         'Change the URL slug of an existing artifact. Returns the new share URL, tokened for private and password artifacts. The old slug stops serving, and any link already handed out with it dies with it.',
       inputSchema: {
         slug: z.string().describe('Current slug'),
-        newSlug: z.string().describe('New URL slug [a-z0-9-], 3-64 chars'),
+        newSlug: z
+          .string()
+          .describe('New URL slug: 3-64 chars of [a-z0-9-], starting with a letter or digit'),
       },
     },
     async ({ slug, newSlug }) => {
@@ -1702,7 +1707,7 @@ function createMcpServer(scopes = SCOPES) {
     {
       title: 'Set artifact tags',
       description:
-        'Replace the tags of an artifact. Tags are [a-z0-9-], 1-32 chars each, max 10. An empty array clears all tags.',
+        'Replace the tags of an artifact. Tags are 1-32 chars each of [a-z0-9-], starting with a letter or digit, max 10, stored lowercased and deduped. An empty array clears all tags.',
       inputSchema: {
         slug: z.string(),
         tags: z.array(z.string()).describe('Full tag list; empty array clears'),
@@ -1726,7 +1731,7 @@ function createMcpServer(scopes = SCOPES) {
         slug: z.string(),
         project: z
           .string()
-          .describe('Project name: 1 to 64 chars of letters, digits, spaces and - _ . , starting with a letter or digit; empty string clears it'),
+          .describe('Project name: 1 to 64 chars of letters, digits, spaces, and - _ . (starting with a letter or digit). Empty string clears it'),
       },
     },
     async ({ slug, project }) => {
@@ -1742,7 +1747,7 @@ function createMcpServer(scopes = SCOPES) {
     {
       title: 'Set artifact visibility',
       description:
-        'Set an artifact to public (anyone with the bare link), private (viewable through a ?k= capability link, by anyone holding it), or password (the link plus a shared password). Provide password when setting "password". Mint the capability link with GET /api/artifacts/<slug>/link.',
+        'Set an artifact to public (anyone with the bare link), private (opens through a ?k= link, for anyone holding it), or password (the bare link prompts for the shared password). Provide password when setting "password". Mint a ?k= link with GET /api/artifacts/<slug>/link; on a password artifact that link skips the prompt.',
       inputSchema: {
         slug: z.string(),
         visibility: z.enum(['public', 'private', 'password']),
@@ -1793,7 +1798,7 @@ function createMcpServer(scopes = SCOPES) {
     {
       title: 'Set artifact frame',
       description:
-        'Control the top viewer frame for an artifact: true = framed, false = never framed, null = inherit the server default. None of the three frames anything while the server has frames switched off.',
+        'Control the top viewer frame for an artifact. Ignored while the server has frames switched off.',
       inputSchema: {
         slug: z.string(),
         frame: z
@@ -1816,7 +1821,7 @@ function createMcpServer(scopes = SCOPES) {
     {
       title: 'List artifacts',
       description:
-        'List all published artifacts. Each entry carries slug, type, title, timestamps, tags, and whichever of project, expiresAt, frame, visibility, disabled, files and hasPassword the artifact has set. No passwords or tokens. Pass tag and/or project to filter.',
+        'List all published artifacts. Each entry carries slug, type, title, createdAt, updatedAt, tags, and whichever of project, expiresAt, frame, visibility, disabled, files and hasPassword the artifact has set. A public artifact has no visibility field at all. No passwords or tokens. Pass tag and/or project to filter.',
       inputSchema: {
         tag: z.string().optional().describe('Only return artifacts with this tag'),
         project: z.string().optional().describe('Only return artifacts in this project'),
