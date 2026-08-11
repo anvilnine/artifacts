@@ -62,49 +62,52 @@ jobs:
           esac
           [ ! -e /tmp/artifacts-seed-check/artifacts/auth.json ] \
             || { echo "auth.json was written on the refused path"; exit 1; }
-      - name: An unclaimed instance can be claimed once through the setup route
-        # Every job seeds ARTIFACTS_ADMIN_* now, which is what T1.1.8 asked for and which left the
-        # unauthenticated one-time POST /api/auth/setup with no HTTP-level coverage anywhere. That
-        # route is an instance takeover while it is reachable (docs/deploy.md, lib/auth.js), and
-        # test/auth.test.js covers the claim at the store level only. Its own server on its own
-        # port and data dir, so the seeded instance the rest of the job uses is untouched.
+      - name: The setup route claims an instance once and refuses the second
+        # The unauthenticated one-time POST /api/auth/setup hands the instance to whoever reaches
+        # it first (docs/deploy.md, lib/auth.js), and nothing drives it over HTTP. test/auth.test.js
+        # covers the env admin seed, which is a different function writing the same field. Every
+        # job seeds ARTIFACTS_ADMIN_* since T1.1.8, so this step runs its own server on its own
+        # port and data dir and leaves the seeded instance the rest of the job uses alone.
         env:
           ARTIFACTS_ADMIN_USERNAME: ''
           ARTIFACTS_ADMIN_PASSWORD: ''
           DATA_DIR: /tmp/artifacts-setup-check
+          # 3000 is the job's own server and the postgres job uses 3001 and 3002 for replicas.
           PORT: 3010
-          BASE_URL: http://localhost:3010
         run: |
+          BASE=http://localhost:$PORT
           rm -rf /tmp/artifacts-setup-check
           node server.js &
           setup_pid=$!
-          for i in $(seq 1 20); do curl -sf http://localhost:3010/healthz && break; sleep 0.5; done
-          # The loop above exits 0 whether or not anything answered, and every assertion below
-          # would then fail for the wrong reason. T1.1.14 covers the same hole elsewhere.
-          curl -sf http://localhost:3010/healthz > /dev/null \
-            || { echo "FAIL: the unseeded server did not start"; kill $setup_pid 2>/dev/null; exit 1; }
-          # This is the flag the dashboard reads to decide between the first-run screen and the
-          # login screen, and nothing loaded it against a genuinely unclaimed instance before.
-          curl -s http://localhost:3010/api/auth/session | grep -q '"needsSetup":true' \
-            || { echo "FAIL: an unclaimed instance does not report needsSetup"; curl -s http://localhost:3010/api/auth/session; kill $setup_pid 2>/dev/null; exit 1; }
+          # Every assertion below exits on failure, so kill on the way out rather than at seven
+          # separate exits, which also covers an exit set -e takes out of our hands.
+          trap 'kill $setup_pid 2>/dev/null' EXIT
+          for i in $(seq 1 20); do curl -sf "$BASE/healthz" && break; sleep 0.5; done
+          # The loop above exits 0 whether or not anything answered, so without this every
+          # assertion below reports a server that never started as a broken setup route.
+          curl -sf "$BASE/healthz" > /dev/null \
+            || { echo "FAIL: the server with no admin seeded never answered on :$PORT"; exit 1; }
+          # The flag the dashboard reads to choose between the first-run screen and the login
+          # screen. Nothing had loaded it against an unclaimed instance.
+          curl -s "$BASE/api/auth/session" | grep -q '"needsSetup":true' \
+            || { echo "FAIL: an unclaimed instance does not report needsSetup"; curl -s "$BASE/api/auth/session"; exit 1; }
           echo "ok: an unclaimed instance reports needsSetup"
-          code=$(curl -s -o /tmp/setup-1.json -w '%{http_code}' -X POST http://localhost:3010/api/auth/setup \
+          code=$(curl -s -o /tmp/setup-1.json -w '%{http_code}' -X POST "$BASE/api/auth/setup" \
             -H 'Content-Type: application/json' -d '{"username":"ci-claimer","password":"ci-claimer-password"}')
-          [ "$code" = "201" ] || { echo "FAIL: the first claim answered $code"; cat /tmp/setup-1.json; kill $setup_pid 2>/dev/null; exit 1; }
+          [ "$code" = "201" ] || { echo "FAIL: the first claim answered $code, expected 201"; cat /tmp/setup-1.json; exit 1; }
           echo "ok: an unclaimed instance is claimable through the setup route"
           # The second claim is the half that matters: this route is unauthenticated, so a 409 is
           # the only thing standing between a booted instance and whoever reaches it next.
-          code=$(curl -s -o /tmp/setup-2.json -w '%{http_code}' -X POST http://localhost:3010/api/auth/setup \
-            -H 'Content-Type: application/json' -d '{"username":"ci-attacker","password":"ci-attacker-password"}')
-          [ "$code" = "409" ] || { echo "FAIL: a second claim answered $code, expected 409"; cat /tmp/setup-2.json; kill $setup_pid 2>/dev/null; exit 1; }
+          code=$(curl -s -o /tmp/setup-2.json -w '%{http_code}' -X POST "$BASE/api/auth/setup" \
+            -H 'Content-Type: application/json' -d '{"username":"ci-second-claimer","password":"ci-second-claimer-password"}')
+          [ "$code" = "409" ] || { echo "FAIL: a second claim answered $code, expected 409"; cat /tmp/setup-2.json; exit 1; }
           # A 409 does not prove the record was left alone, so check the first owner is still there.
-          curl -s http://localhost:3010/api/auth/session | grep -q '"needsSetup":false' \
-            || { echo "FAIL: the instance went back to needing setup"; kill $setup_pid 2>/dev/null; exit 1; }
-          code=$(curl -s -o /dev/null -w '%{http_code}' -X POST http://localhost:3010/api/auth/login \
+          curl -s "$BASE/api/auth/session" | grep -q '"needsSetup":false' \
+            || { echo "FAIL: the instance went back to needing setup"; curl -s "$BASE/api/auth/session"; exit 1; }
+          code=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/api/auth/login" \
             -H 'Content-Type: application/json' -d '{"username":"ci-claimer","password":"ci-claimer-password"}')
-          [ "$code" = "200" ] || { echo "FAIL: the original admin stopped working after the refused claim (got $code)"; kill $setup_pid 2>/dev/null; exit 1; }
+          [ "$code" = "200" ] || { echo "FAIL: the original admin stopped working after the refused claim (got $code)"; exit 1; }
           echo "ok: a second claim is refused and the first admin survives it"
-          kill $setup_pid
       - name: Boot server
         run: |
           node server.js &
