@@ -4,26 +4,39 @@ Let Claude Code, Codex, or any MCP client publish artifacts with one tool call. 
 
 The server exposes a streamable HTTP endpoint at `/mcp`, bearer-authenticated. Registry listing: [`io.github.anvilnine/artifacts`](https://registry.modelcontextprotocol.io/v0.1/servers?search=io.github.anvilnine/artifacts).
 
-Authenticate with a scoped [managed API key](auth.md) (or the bootstrap `ARTIFACTS_API_KEY`). The key's scope gates the tools: `read` allows `list_artifacts`; `publish` allows the mutation tools; `delete_artifact` needs `full`. A tool called beyond the key's scope comes back as a normal tool result flagged `isError`, naming the scope it wanted, rather than as a JSON-RPC error. Mint a `publish` key for a client that should publish but never delete.
+Authenticate with a scoped [managed API key](auth.md) (or the bootstrap `ARTIFACTS_API_KEY`). The key's scope gates the tools: `read` allows `list_artifacts`; `publish` allows the mutation tools; `delete_artifact` needs `full`. Mint a `publish` key for a client that should publish but never delete. A tool called beyond the key's scope comes back as a normal tool result flagged `isError`, naming the scope it wanted. A client that only watches for JSON-RPC errors will miss it.
 
 ## Tools
 
-Twelve tools, listed in the order `tools/list` serves them. `?` marks an optional argument.
+Every tool the server registers. `?` marks an optional argument.
 
 | Tool | Args | Returns |
 |---|---|---|
-| `publish_artifact` | `content`, `type?` (`html`/`jsx`/`tsx`/`md`/`redirect`, default `html`), `slug?`, `title?`, `expiresAt?`, `frame?`, `tags?`, `project?`, `visibility?`, `password?` | share URL (tokened for private/password) |
+| `publish_artifact` | `content`, `type?`, `slug?`, `title?`, `expiresAt?`, `frame?`, `tags?`, `project?`, `visibility?`, `password?` | share URL (tokened for private/password) |
 | `update_artifact` | `slug`, `content`, `type?`, `title?`, `frame?`, `tags?`, `project?`, `visibility?`, `password?` | share URL |
 | `rename_artifact` | `slug`, `newSlug` | new share URL |
 | `set_artifact_expiry` | `slug`, `expiresAt` (ISO 8601, or `null` to clear) | confirmation |
 | `set_artifact_tags` | `slug`, `tags` (full list; empty array clears) | confirmation |
-| `set_artifact_project` | `slug`, `project` (max 64 chars; empty string clears) | confirmation |
+| `set_artifact_project` | `slug`, `project` (1 to 64 chars of letters, digits, spaces and `-` `_` `.`, starting with a letter or digit; empty string clears) | confirmation |
 | `set_artifact_visibility` | `slug`, `visibility` (`public`/`private`/`password`), `password?` | confirmation |
+| `set_artifact_frame` | `slug`, `frame` (`true` framed, `false` unframed, `null` inherits the server default) | confirmation |
 | `disable_artifact` | `slug` | confirmation (URL serves 404, content kept) |
 | `enable_artifact` | `slug` | confirmation |
-| `set_artifact_frame` | `slug`, `frame` (`true` framed, `false` unframed, `null` inherits the server default) | confirmation |
-| `list_artifacts` | `tag?`, `project?` (filters) | JSON list |
+| `list_artifacts` | `tag?`, `project?` | JSON list |
 | `delete_artifact` | `slug` | confirmation |
+
+`type` is `html` (the default), `jsx`, `tsx`, `md`, or `redirect`.
+
+`frame` on a single artifact only decides anything while the server has frames switched on. With
+`FRAME_ENABLED=false` nothing is framed and `frame: true` changes nothing, so a client that gets no
+frame should check the server config before the artifact.
+
+`update_artifact` rewrites the artifact rather than patching it, and two of its optional arguments
+fall back to a default instead of keeping what is there. Pass `type` on every update of a `jsx`,
+`tsx`, `md` or `redirect` artifact, or the artifact comes back as HTML. Pass `title` to keep the
+title, or it resets to the slug. `frame`, `tags`, `project` and `visibility` do keep their current
+value when omitted, and take the values documented on the matching `set_artifact_*` row. To change
+one field and touch nothing else, use that row's tool instead of `update_artifact`.
 
 No MCP tool for zip sites, because the payload is binary. Use the [CLI](cli.md) or the [zip endpoint](api.md#zip-sites-multi-file-static-projects).
 
