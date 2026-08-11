@@ -75,29 +75,53 @@ jobs:
       # Ahead of the malformed-auth.json step on purpose: that step replaces the whole keys
       # array, so a key minted for a durability check would not survive it. This one asserts
       # the record comes back; the one below asserts a broken record does not take the key
-      # screen down with it.
-      - name: Artifacts and API keys survive a restart (local)
+      # screen down with it. Any step needing a real auth record goes above this comment.
+      # The malformed-auth.json step destroys the record and stays last in this job.
+      - name: Artifacts and API keys survive a fresh restart (new process, same data dir)
         run: |
           curl -sf -X POST http://localhost:3000/api/artifacts \
             -H 'Authorization: Bearer ci-test-key' -H 'Content-Type: application/json' \
             -d '{"content":"<h1>durable</h1>","slug":"restart-proof","visibility":"public"}'
-          # Same shape as the s3, git and postgres steps. The local backend is the one the
-          # README's quick start uses and the only one that never proved this, because the
-          # restart below exists to plant a malformed record, not to assert survival.
+          # An artifact surviving proves the backend keeps objects; only a key proves auth.json
+          # came back, which is the separate promise docs/auth.md makes. The local backend is
+          # the one the README's quick start uses and it had no survival check before this: the
+          # restart in the step below exists to plant a malformed record and asserts nothing
+          # about durability. A key rather than an admin login, because the seed re-creates the
+          # admin with the same password whenever the record has no admin, so a login answers
+          # 200 even when auth.json is gone. A key cannot be re-seeded.
           curl -sf -X POST http://localhost:3000/api/keys \
             -H 'Authorization: Bearer ci-test-key' -H 'Content-Type: application/json' \
             -d '{"name":"restart-proof","scopes":["read"]}' > /tmp/minted-key.json
           key=$(node -e 'console.log(JSON.parse(require("fs").readFileSync("/tmp/minted-key.json","utf8")).key)')
-          case "$key" in ah_*) ;; *) echo "FAIL: the mint returned no key"; cat /tmp/minted-key.json; exit 1 ;; esac
-          kill "$(cat server.pid)"; sleep 1
+          # Without this a changed response shape leaves $key as the string "undefined", and the
+          # check below then blames durability for a 401 the mint caused. The dump is scrubbed on
+          # the token itself, not on the field name: this guard only ever fires when the field
+          # moved, so a name-based scrub (what smoke.sh uses, where the shape is known) would
+          # match nothing in exactly the case that reaches this line.
+          case "$key" in ah_*) ;; *) echo "FAIL: the mint returned no key"; sed 's/ah_[A-Za-z0-9]*/ah_REDACTED/g' /tmp/minted-key.json; exit 1 ;; esac
+          old_pid=$(cat server.pid)
+          kill "$old_pid"; sleep 1
+          # kill returns 0 once the signal is delivered, not once the process is gone. If a
+          # graceful-shutdown handler is ever added to server.js, the old process outlives this
+          # line, the new one dies on EADDRINUSE, healthz answers from the survivor, and the key
+          # check below passes out of its in-memory auth record with the backend empty. Assert
+          # the old process is gone rather than trusting the signal.
+          kill -0 "$old_pid" 2>/dev/null \
+            && { echo "FAIL: the old server outlived the kill, so nothing below would test a restart"; exit 1; }
           node server.js &
+          echo $! > server.pid
           for i in $(seq 1 20); do curl -sf http://localhost:3000/healthz && break; sleep 0.5; done
+          # The loop above exits 0 whether or not anything ever answered, so a server that died
+          # on the second boot would reach the checks below and be reported as lost data. Name
+          # the real cause instead. T1.1.14 covers the same hole in every other boot loop.
+          curl -sf http://localhost:3000/healthz > /dev/null \
+            || { echo "FAIL: the server did not come back up after the restart"; exit 1; }
           code=$(curl -s -o /dev/null -w '%{http_code}' http://localhost:3000/a/restart-proof)
-          [ "$code" = "200" ] || { echo "FAIL: artifact did not survive restart (got $code)"; exit 1; }
+          [ "$code" = "200" ] || { echo "FAIL: artifact did not survive a restart on the local backend (got $code)"; exit 1; }
           echo "ok: artifact survived a restart on the local backend"
           code=$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $key" \
             http://localhost:3000/api/artifacts)
-          [ "$code" = "200" ] || { echo "FAIL: the key minted before the restart stopped working (got $code)"; curl -s -H 'Authorization: Bearer ci-test-key' http://localhost:3000/api/keys; exit 1; }
+          [ "$code" = "200" ] || { echo "FAIL: the key minted before the restart stopped working on the local backend (got $code)"; curl -s -H 'Authorization: Bearer ci-test-key' http://localhost:3000/api/keys; exit 1; }
           echo "ok: the key minted before the restart still works"
       - name: Key routes survive a malformed auth.json
         run: |
@@ -182,7 +206,7 @@ jobs:
             -d '{"content":"<h1>durable</h1>","slug":"restart-proof","visibility":"public"}'
           # Mint a managed key on the way in. An artifact surviving proves the backend keeps
           # objects; only a key proves auth.json came back, which is the separate promise
-          # docs/auth.md makes and which nothing outside the local backend used to check.
+          # docs/auth.md makes and which nothing used to check.
           # The check uses a key instead of an admin login: the seed re-creates the admin with
           # the same password whenever the record has no admin, so logging in answers 200 even
           # when auth.json is gone. A key cannot be re-seeded, so it is the only half of the
@@ -192,8 +216,11 @@ jobs:
             -d '{"name":"restart-proof","scopes":["read"]}' > /tmp/minted-key.json
           key=$(node -e 'console.log(JSON.parse(require("fs").readFileSync("/tmp/minted-key.json","utf8")).key)')
           # Without this a changed response shape leaves $key as the string "undefined", and the
-          # check below then blames durability for a 401 the mint caused.
-          case "$key" in ah_*) ;; *) echo "FAIL: the mint returned no key"; cat /tmp/minted-key.json; exit 1 ;; esac
+          # check below then blames durability for a 401 the mint caused. The dump is scrubbed on
+          # the token itself, not on the field name: this guard only ever fires when the field
+          # moved, so a name-based scrub (what smoke.sh uses, where the shape is known) would
+          # match nothing in exactly the case that reaches this line.
+          case "$key" in ah_*) ;; *) echo "FAIL: the mint returned no key"; sed 's/ah_[A-Za-z0-9]*/ah_REDACTED/g' /tmp/minted-key.json; exit 1 ;; esac
           # kill the server and start a brand-new process against the same bucket, with
           # nothing on local disk — proves durability across a container reprovision.
           kill "$(cat server.pid)"; sleep 1
@@ -256,8 +283,11 @@ jobs:
             -d '{"name":"restart-proof","scopes":["read"]}' > /tmp/minted-key.json
           key=$(node -e 'console.log(JSON.parse(require("fs").readFileSync("/tmp/minted-key.json","utf8")).key)')
           # Without this a changed response shape leaves $key as the string "undefined", and the
-          # check below then blames durability for a 401 the mint caused.
-          case "$key" in ah_*) ;; *) echo "FAIL: the mint returned no key"; cat /tmp/minted-key.json; exit 1 ;; esac
+          # check below then blames durability for a 401 the mint caused. The dump is scrubbed on
+          # the token itself, not on the field name: this guard only ever fires when the field
+          # moved, so a name-based scrub (what smoke.sh uses, where the shape is known) would
+          # match nothing in exactly the case that reaches this line.
+          case "$key" in ah_*) ;; *) echo "FAIL: the mint returned no key"; sed 's/ah_[A-Za-z0-9]*/ah_REDACTED/g' /tmp/minted-key.json; exit 1 ;; esac
           kill "$(cat server.pid)"; sleep 1
           # brand-new working copy -> the server must clone it back from the git remote
           GIT_WORK_DIR=/tmp/git-work-fresh node server.js &
@@ -314,8 +344,11 @@ jobs:
             -d '{"name":"restart-proof","scopes":["read"]}' > /tmp/minted-key.json
           key=$(node -e 'console.log(JSON.parse(require("fs").readFileSync("/tmp/minted-key.json","utf8")).key)')
           # Without this a changed response shape leaves $key as the string "undefined", and the
-          # check below then blames durability for a 401 the mint caused.
-          case "$key" in ah_*) ;; *) echo "FAIL: the mint returned no key"; cat /tmp/minted-key.json; exit 1 ;; esac
+          # check below then blames durability for a 401 the mint caused. The dump is scrubbed on
+          # the token itself, not on the field name: this guard only ever fires when the field
+          # moved, so a name-based scrub (what smoke.sh uses, where the shape is known) would
+          # match nothing in exactly the case that reaches this line.
+          case "$key" in ah_*) ;; *) echo "FAIL: the mint returned no key"; sed 's/ah_[A-Za-z0-9]*/ah_REDACTED/g' /tmp/minted-key.json; exit 1 ;; esac
           kill "$(cat server.pid)"; sleep 1
           node server.js &
           for i in $(seq 1 20); do curl -sf http://localhost:3000/healthz && break; sleep 0.5; done
@@ -400,31 +433,49 @@ jobs:
           for i in $(seq 1 20); do curl -sf http://localhost:3000/healthz && break; sleep 0.5; done
       - name: Smoke test API against sqlite
         run: bash .github/workflows/smoke.sh http://localhost:3000 ci-test-key
-      - name: Artifacts and API keys survive a restart (sqlite)
+      - name: Artifacts and API keys survive a fresh restart (new process, same database file)
         run: |
           curl -sf -X POST http://localhost:3000/api/artifacts \
             -H 'Authorization: Bearer ci-test-key' -H 'Content-Type: application/json' \
             -d '{"content":"<h1>durable</h1>","slug":"restart-proof","visibility":"public"}'
-          # Same shape as the s3, git and postgres steps. An artifact surviving proves the
-          # backend keeps objects; only a key proves auth.json came back, which is the separate
-          # promise docs/auth.md makes for all five backends and which sqlite proved on none.
-          # A key rather than an admin login, because the seed re-creates the admin with the
-          # same password whenever the record has no admin, so a login answers 200 even when
-          # auth.json is gone.
+          # An artifact surviving proves the backend keeps objects; only a key proves auth.json
+          # came back, which is the separate promise docs/auth.md makes for all five backends
+          # and which this job never checked. A key rather than an admin login, because the seed
+          # re-creates the admin with the same password whenever the record has no admin, so a
+          # login answers 200 even when auth.json is gone. A key cannot be re-seeded.
           curl -sf -X POST http://localhost:3000/api/keys \
             -H 'Authorization: Bearer ci-test-key' -H 'Content-Type: application/json' \
             -d '{"name":"restart-proof","scopes":["read"]}' > /tmp/minted-key.json
           key=$(node -e 'console.log(JSON.parse(require("fs").readFileSync("/tmp/minted-key.json","utf8")).key)')
-          case "$key" in ah_*) ;; *) echo "FAIL: the mint returned no key"; cat /tmp/minted-key.json; exit 1 ;; esac
-          kill "$(cat server.pid)"; sleep 1
+          # Without this a changed response shape leaves $key as the string "undefined", and the
+          # check below then blames durability for a 401 the mint caused. The dump is scrubbed on
+          # the token itself, not on the field name: this guard only ever fires when the field
+          # moved, so a name-based scrub (what smoke.sh uses, where the shape is known) would
+          # match nothing in exactly the case that reaches this line.
+          case "$key" in ah_*) ;; *) echo "FAIL: the mint returned no key"; sed 's/ah_[A-Za-z0-9]*/ah_REDACTED/g' /tmp/minted-key.json; exit 1 ;; esac
+          old_pid=$(cat server.pid)
+          kill "$old_pid"; sleep 1
+          # kill returns 0 once the signal is delivered, not once the process is gone. If a
+          # graceful-shutdown handler is ever added to server.js, the old process outlives this
+          # line, the new one dies on EADDRINUSE, healthz answers from the survivor, and the key
+          # check below passes out of its in-memory auth record with the backend empty. Assert
+          # the old process is gone rather than trusting the signal.
+          kill -0 "$old_pid" 2>/dev/null \
+            && { echo "FAIL: the old server outlived the kill, so nothing below would test a restart"; exit 1; }
           node server.js &
+          echo $! > server.pid
           for i in $(seq 1 20); do curl -sf http://localhost:3000/healthz && break; sleep 0.5; done
+          # The loop above exits 0 whether or not anything ever answered, and a second process
+          # opening the same database file is exactly where a boot failure would show up, so
+          # name that instead of reporting it as lost data. T1.1.14 covers the other boot loops.
+          curl -sf http://localhost:3000/healthz > /dev/null \
+            || { echo "FAIL: the server did not come back up after the restart"; exit 1; }
           code=$(curl -s -o /dev/null -w '%{http_code}' http://localhost:3000/a/restart-proof)
-          [ "$code" = "200" ] || { echo "FAIL: artifact did not survive restart (got $code)"; exit 1; }
+          [ "$code" = "200" ] || { echo "FAIL: artifact did not survive a restart via sqlite (got $code)"; exit 1; }
           echo "ok: artifact survived a restart via sqlite"
           code=$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $key" \
             http://localhost:3000/api/artifacts)
-          [ "$code" = "200" ] || { echo "FAIL: the key minted before the restart stopped working (got $code)"; curl -s -H 'Authorization: Bearer ci-test-key' http://localhost:3000/api/keys; exit 1; }
+          [ "$code" = "200" ] || { echo "FAIL: the key minted before the restart stopped working via sqlite (got $code)"; curl -s -H 'Authorization: Bearer ci-test-key' http://localhost:3000/api/keys; exit 1; }
           echo "ok: the key minted before the restart still works"
 
   # Pull requests build the image and boot it, so a broken Dockerfile (or a change to what the
