@@ -1385,6 +1385,9 @@ app.get('/api/artifacts/:slug/link', requireAuth('read'), async (req, res, next)
   try {
     const meta = SLUG_RE.test(req.params.slug) ? await readMeta(req.params.slug) : null;
     if (!meta) throw new ApiError(404, `slug "${req.params.slug}" not found`);
+    // A lapsed artifact mints nothing. Every serve path answers 410 or 404 for it, so a token
+    // handed out here is a link the operator believes works and the recipient cannot open.
+    if (isExpired(meta)) throw new ApiError(410, 'artifact expired');
     if (meta.tokenEpoch !== undefined) await ensureSessionSecret();
     res.json({ url: tokenedUrl(meta), visibility: meta.visibility || 'public' });
   } catch (err) {

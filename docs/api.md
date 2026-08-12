@@ -57,7 +57,7 @@ Each artifact has one of three access levels, set with the `visibility` field on
 - **`private`** (default) — viewed through a **capability link**: the write returns `url` with a `?k=<token>` grant. Opening it sets a per-slug unlock cookie and `302`s to a clean URL. Without a valid token or cookie every serve path (`/a/:slug`, `?raw=1`, `/source`, zip assets) returns a byte-identical `404` — no password, no prompt, no existence leak. No per-artifact secret is stored.
 - **`password`** — the link plus a shared password. `visibility: "password"` requires a `password` field; the top-level URL returns a prompt that accepts that per-artifact password, sub-resources `404` until unlocked.
 
-The write response is `{ slug, url, visibility }`, plus `target` when the artifact is a redirect — `url` is the tokened capability link for `private`/`password`, the bare link for `public`. Mint a fresh link later without mutating the artifact via `GET /api/artifacts/:slug/link` → `{ url }`.
+The write response is `{ slug, url, visibility }`, plus `target` when the artifact is a redirect — `url` is the tokened capability link for `private`/`password`, the bare link for `public`. Mint a fresh link later without mutating the artifact via `GET /api/artifacts/:slug/link` → `{ url }`. An artifact whose `expiresAt` has passed answers `410` there instead of minting a link nobody can open.
 
 **Revocation.** `PATCH /api/artifacts/:slug {"rotateToken": true}` bumps a per-artifact epoch, invalidating every issued capability token **and** every live unlock cookie for that slug immediately; it returns a fresh `url`. Capability tokens expire on their own after `CAP_TOKEN_TTL_DAYS` (default 30).
 
