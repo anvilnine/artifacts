@@ -12,7 +12,7 @@
 //     getBuffer(key)            -> Buffer | null                 // small reads (meta.json)
 //     get(key, { range })       -> { stream, size } | null       // streamed body for serving
 //     head(key)                 -> { size } | null               // existence / size, no body
-//     put(key, data, { contentType })                            // MUST await a durable write
+//     put(key, data, { contentType })                            // MUST await a durable, whole-object write
 //     listMetas()               -> [{ slug, buffer }]            // every artifact's meta.json
 //     move(oldSlug, newSlug)                                     // rename a whole namespace
 //     copySlug(srcSlug, dstSlug)                                 // copy a namespace's content objects (NOT meta.json)
@@ -24,6 +24,16 @@
 // write (publish / replace / patch / delete), so a backend that batches — the git backend
 // coalesces a multi-file write into ONE commit+push — has a single "operation complete"
 // signal. Backends that persist per-put (local, s3) don't implement it.
+//
+// A put replaces the object in one step: a concurrent reader sees either every old byte or
+// every new one, never a mix. s3 and the SQL stores get that from a single PUT or upsert;
+// local (and git, which reuses it) writes a temp file and renames it. Two writers to one key
+// still settle last-writer-wins, so a caller that must not lose a field re-reads inside its
+// own serialized write (server.js withMetaChain, which covers publish, replace, zip deploy,
+// duplicate, patch and delete in one process, not two replicas sharing one store).
+//
+// This is about what a concurrent reader sees, not about surviving a power cut: local does not
+// fsync the file or its directory before the rename.
 //
 // Write-ordering contract (crash-consistency without transactions): callers write all
 // content objects first and `<slug>/meta.json` LAST as a commit marker, because readMeta

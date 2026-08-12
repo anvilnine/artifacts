@@ -447,10 +447,19 @@ function extractSiteFiles(zip) {
   return files;
 }
 
-async function saveZipArtifact(buffer, { slug, title, expiresAt, tags, project, visibility, password }) {
-  if (slug !== undefined && !SLUG_RE.test(slug)) {
+// Chained on the target slug like every other write: the 409 below is a read followed by a
+// write, so a zip deploy and an inline publish naming one slug both used to answer 201 and the
+// loser's bytes stayed on disk with nothing serving them.
+async function saveZipArtifact(buffer, input) {
+  const wanted = wantedSlug(input.slug);
+  if (wanted !== undefined && !SLUG_RE.test(wanted)) {
     throw new ApiError(400, 'slug must match [a-z0-9][a-z0-9-]{2,63}');
   }
+  const finalSlug = wanted || nanoid();
+  return withMetaChain(finalSlug, () => storeZipArtifact(buffer, finalSlug, input));
+}
+
+async function storeZipArtifact(buffer, finalSlug, { title, expiresAt, tags, project, visibility, password }) {
   const expiry = expiresAt !== undefined ? parseExpiresAt(expiresAt) : undefined;
   const tagList = tags !== undefined ? parseTags(tags) : undefined;
   const projectName = project !== undefined ? parseProject(project) : undefined;
@@ -471,7 +480,6 @@ async function saveZipArtifact(buffer, { slug, title, expiresAt, tags, project, 
   }
   const files = extractSiteFiles(zip);
 
-  const finalSlug = slug || nanoid();
   if (await readMeta(finalSlug)) {
     throw new ApiError(409, `slug "${finalSlug}" already exists`);
   }
@@ -569,7 +577,67 @@ function isExpired(meta) {
   return Boolean(meta.expiresAt && Date.parse(meta.expiresAt) <= Date.now());
 }
 
-async function saveArtifact({ content, type = 'html', slug, title, expiresAt, frame, tags, project, visibility, password }, { replace = false } = {}) {
+// Every meta write rewrites the whole record, so a write that started from a snapshot taken
+// before another write landed puts that snapshot back and the other one's field is gone. Two
+// PATCHes to one slug did it in one process without any unusual timing, and the dashboard
+// sends a one-field PATCH per control. Chain the read-modify-write per slug, the way
+// lib/auth.js chains auth.json: each one reloads meta inside the chain, so it changes what
+// the backend holds rather than what the request found when it arrived.
+//
+// This covers one process. Two replicas sharing an s3 or postgres store can still write
+// inside the same window and lose a field; what cannot happen any more is the corrupt
+// meta.json that took the artifact out of every route, because the object write itself is
+// now whole (storage/local.js) or already was (s3, postgres, sqlite).
+const metaWriteChains = new Map();
+function withMetaChain(slug, run) {
+  const prev = metaWriteChains.get(slug) || Promise.resolve();
+  const result = prev.then(run);
+  // The chain holds `tail`, which swallows the rejection, so a write that throws (a 404 on a
+  // missing slug, a 409 on a taken one) does not stop the next caller from running.
+  const tail = result.then(() => {}, () => {});
+  metaWriteChains.set(slug, tail);
+  // Drop the entry once nothing is queued behind it, or the map grows one key per slug the
+  // process ever wrote.
+  tail.then(() => {
+    if (metaWriteChains.get(slug) === tail) metaWriteChains.delete(slug);
+  });
+  return result;
+}
+
+// A rename and a copy write under two names, so they hold both chains. Sorted and de-duplicated
+// first: two renames that cross (a to b while b to a) would otherwise take the two chains in
+// opposite orders and wait on each other forever.
+function withMetaChains(slugs, run) {
+  const keys = [...new Set(slugs)].sort();
+  return keys.reduceRight((next, key) => () => withMetaChain(key, next), run)();
+}
+
+// A slug arriving in a JSON body can be a number, and SLUG_RE coerces it on the way through.
+// `123` and `"123"` name one directory and are two different chain keys, so two writers to that
+// namespace both believed they were alone. Settle it to a string before anything keys on it.
+// `null` means the caller left it out, which is how a JS client writes `slug: form.slug || null`;
+// String() would have turned that into an artifact named "null" and 409'd every publish after it.
+function wantedSlug(value) {
+  if (value === undefined || value === null) return undefined;
+  if (typeof value !== 'string' && typeof value !== 'number') {
+    throw new ApiError(400, 'slug must be a string');
+  }
+  return String(value);
+}
+
+// Publish or replace. The slug is settled first so the write can be chained on it: a replace
+// reads the stored record and writes it back carrying the new content, so a PATCH that landed
+// between those two steps used to disappear.
+async function saveArtifact(input, opts = {}) {
+  const wanted = wantedSlug(input.slug);
+  if (wanted !== undefined && !SLUG_RE.test(wanted)) {
+    throw new ApiError(400, 'slug must match [a-z0-9][a-z0-9-]{2,63}');
+  }
+  const finalSlug = wanted || nanoid();
+  return withMetaChain(finalSlug, () => storeArtifact(finalSlug, input, opts));
+}
+
+async function storeArtifact(finalSlug, { content, type = 'html', title, expiresAt, frame, tags, project, visibility, password }, { replace = false } = {}) {
   if (typeof content !== 'string' || !content.trim()) {
     throw new ApiError(400, 'content (non-empty string) is required');
   }
@@ -588,10 +656,6 @@ async function saveArtifact({ content, type = 'html', slug, title, expiresAt, fr
   if (!TYPES.includes(type)) {
     throw new ApiError(400, `type must be one of: ${TYPES.join(', ')}`);
   }
-  if (slug !== undefined && !SLUG_RE.test(slug)) {
-    throw new ApiError(400, 'slug must match [a-z0-9][a-z0-9-]{2,63}');
-  }
-  const finalSlug = slug || nanoid();
   const existing = await readMeta(finalSlug);
   if (existing && !replace) {
     throw new ApiError(409, `slug "${finalSlug}" already exists`);
@@ -683,13 +747,20 @@ async function saveArtifact({ content, type = 'html', slug, title, expiresAt, fr
 // (stored hashed), so a password-visibility copy requires a new password in the body.
 async function duplicateArtifact(sourceSlug, body = {}) {
   if (!SLUG_RE.test(sourceSlug)) throw new ApiError(404, `slug "${sourceSlug}" not found`);
-  const source = await readMeta(sourceSlug);
-  if (!source) throw new ApiError(404, `slug "${sourceSlug}" not found`);
-
-  const targetSlug = body.slug || nanoid();
+  // Validated after the fallback, the way it always was here: an empty or absent slug on a copy
+  // means "pick one", where the same value on a publish is a 400.
+  const targetSlug = wantedSlug(body.slug) || nanoid();
   if (!SLUG_RE.test(targetSlug)) {
     throw new ApiError(400, 'slug must match [a-z0-9][a-z0-9-]{2,63}');
   }
+  // Both names: the target because the 409 below is a read-then-write, and the source because
+  // copySlug walks its directory while a PATCH there may be renaming a scratch file into place.
+  return withMetaChains([sourceSlug, targetSlug], () => copyArtifact(sourceSlug, targetSlug, body));
+}
+
+async function copyArtifact(sourceSlug, targetSlug, body) {
+  const source = await readMeta(sourceSlug);
+  if (!source) throw new ApiError(404, `slug "${sourceSlug}" not found`);
   if (await readMeta(targetSlug)) {
     throw new ApiError(409, `slug "${targetSlug}" already exists`);
   }
@@ -817,23 +888,38 @@ async function listArtifacts({ tag, project } = {}) {
   return items;
 }
 
+// Chained per slug so the record this reads is the one the last write left, not the one the
+// request found when it arrived. Two one-field PATCHes to one artifact, which the dashboard
+// sends a lot of, used to end with only the second field set.
 async function patchArtifact(slug, patch) {
-  const meta = SLUG_RE.test(slug) ? await readMeta(slug) : null;
+  // Checked here rather than after the chain starts, so a caller-supplied path segment that is
+  // not a slug never becomes a chain key.
+  if (!SLUG_RE.test(slug)) throw new ApiError(404, `slug "${slug}" not found`);
+  // A rename writes under the new name too. Holding only the old one let a publish claim the
+  // destination between the collision check and the move, which answered 500 and, when the move
+  // won instead, left a private artifact's bytes under the publish's public record.
+  const newSlug = wantedSlug(patch?.slug);
+  const renaming = newSlug !== undefined && newSlug !== slug;
+  if (renaming && !SLUG_RE.test(newSlug)) {
+    throw new ApiError(400, 'slug must match [a-z0-9][a-z0-9-]{2,63}');
+  }
+  return withMetaChains(renaming ? [slug, newSlug] : [slug], () => applyPatch(slug, patch, newSlug));
+}
+
+async function applyPatch(slug, patch, newSlug) {
+  const meta = await readMeta(slug);
   if (!meta) {
     throw new ApiError(404, `slug "${slug}" not found`);
   }
 
   let activeSlug = slug;
-  if (patch.slug !== undefined && patch.slug !== slug) {
-    if (!SLUG_RE.test(patch.slug)) {
-      throw new ApiError(400, 'slug must match [a-z0-9][a-z0-9-]{2,63}');
+  if (newSlug !== undefined && newSlug !== slug) {
+    if (await readMeta(newSlug)) {
+      throw new ApiError(409, `slug "${newSlug}" already exists`);
     }
-    if (await readMeta(patch.slug)) {
-      throw new ApiError(409, `slug "${patch.slug}" already exists`);
-    }
-    await storage.move(slug, patch.slug);
-    meta.slug = patch.slug;
-    activeSlug = patch.slug;
+    await storage.move(slug, newSlug);
+    meta.slug = newSlug;
+    activeSlug = newSlug;
   }
 
   if (patch.disabled !== undefined) {
@@ -912,8 +998,18 @@ async function patchArtifact(slug, patch) {
   return { slug: meta.slug, url: tokenedUrl(meta), visibility: meta.visibility || 'public' };
 }
 
+// Chained too. A delete running beside a patch emptied the namespace between the patch's read
+// and its write, and the patch then recreated meta.json under the cleared directory. Both
+// requests answered 200 and the list kept a row whose /a/<slug> serves a 404, with no content
+// left to put back. Serialized, the delete either wins (the patch gets a clean 404) or it loses
+// (the delete removes what the patch just wrote).
 async function deleteArtifact(slug) {
-  if (!SLUG_RE.test(slug) || !(await readMeta(slug))) {
+  if (!SLUG_RE.test(slug)) throw new ApiError(404, `slug "${slug}" not found`);
+  return withMetaChain(slug, () => removeArtifact(slug));
+}
+
+async function removeArtifact(slug) {
+  if (!(await readMeta(slug))) {
     throw new ApiError(404, `slug "${slug}" not found`);
   }
   await storage.deleteSlug(slug);

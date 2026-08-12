@@ -8,8 +8,10 @@
 // caps rather than true streaming. Fine for artifacts, which are bounded (10 MB JSON / 100 MB
 // unzipped), but worth knowing.
 //
-// Note [atomicity]: because writes are single SQL statements, move and delete are naturally
-// atomic here — no partial-namespace states, unlike object stores.
+// Note [atomicity]: because writes are single SQL statements, put, move and delete are atomic
+// here: no partial-namespace states and no half-written row, so two writers to one key cannot
+// leave bytes from both. The local backend builds that with a temp file plus rename. These
+// stores get it from the driver.
 
 import { Readable } from 'node:stream';
 

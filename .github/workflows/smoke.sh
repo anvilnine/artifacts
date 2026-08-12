@@ -426,6 +426,125 @@ if curl -s "$BASE/api/artifacts?project=Acme%20Redesign" -H "$AUTH" | grep -q '"
 echo "ok: PUT preserves / PATCH clears project"
 curl -sf -X DELETE "$BASE/api/artifacts/ci-proj" -H "$AUTH" > /dev/null
 
+# --- two overlapping PATCHes to one slug: both fields land, meta stays readable ---
+# A meta write rewrites the whole record. Before it was serialized, the second writer started
+# from a copy taken before the first one landed and put it back without that field, and on the
+# local backend the two writes interleaved often enough to leave meta.json unparseable, which
+# dropped the artifact from the list and made it 404 on its own DELETE. Five rounds: the
+# corruption reproduced in roughly 4 runs out of 10 when it was one round.
+curl -sf -X POST "$BASE/api/artifacts" -H "$AUTH" -H "$JSON" \
+  -d '{"content":"<h1>race</h1>","type":"html","slug":"ci-race","visibility":"public"}' > /dev/null
+# --max-time on every backgrounded call: a write that never settles would otherwise hang `wait`
+# and burn the job's whole timeout instead of failing.
+for round in 1 2 3 4 5; do
+  curl -sf --max-time 15 -X PATCH "$BASE/api/artifacts/ci-race" -H "$AUTH" -H "$JSON" -d '{"tags":["raced"]}' > /dev/null &
+  tags_pid=$!
+  curl -sf --max-time 15 -X PATCH "$BASE/api/artifacts/ci-race" -H "$AUTH" -H "$JSON" -d '{"project":"Race"}' > /dev/null &
+  proj_pid=$!
+  wait "$tags_pid" || fail "concurrent tags PATCH failed on round $round"
+  wait "$proj_pid" || fail "concurrent project PATCH failed on round $round"
+  [ "$(list_field ci-race tags)" = 'raced' ] || fail "concurrent PATCH lost tags on round $round"
+  [ "$(list_field ci-race project)" = 'Race' ] || fail "concurrent PATCH lost project on round $round"
+  curl -sf -X PATCH "$BASE/api/artifacts/ci-race" -H "$AUTH" -H "$JSON" -d '{"tags":[],"project":""}' > /dev/null
+done
+echo "ok: overlapping PATCHes both land"
+
+# the artifact still answers its own routes, which a corrupt meta.json would not
+code=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/a/ci-race?raw=1")
+expect_code 200 "$code" "artifact still served after overlapping PATCHes"
+
+# a replace rebuilds the record from what it read, so it has to read what the PATCH left
+for round in 1 2 3; do
+  curl -sf --max-time 15 -X PUT "$BASE/api/artifacts/ci-race" -H "$AUTH" -H "$JSON" \
+    -d '{"content":"<h1>race v2</h1>","type":"html"}' > /dev/null &
+  put_pid=$!
+  curl -sf --max-time 15 -X PATCH "$BASE/api/artifacts/ci-race" -H "$AUTH" -H "$JSON" -d '{"tags":["kept"]}' > /dev/null &
+  patch_pid=$!
+  wait "$put_pid" || fail "concurrent PUT failed on round $round"
+  wait "$patch_pid" || fail "concurrent PATCH failed on round $round"
+  [ "$(list_field ci-race tags)" = 'kept' ] || fail "a PUT overwrote a concurrent PATCH on round $round"
+  curl -sf -X PATCH "$BASE/api/artifacts/ci-race" -H "$AUTH" -H "$JSON" -d '{"tags":[]}' > /dev/null
+done
+curl -s "$BASE/a/ci-race?raw=1" | grep -q '<h1>race v2</h1>' || fail "the PUT content did not survive"
+echo "ok: a PUT and a PATCH at once both land"
+
+code=$(curl -s -o /dev/null -w '%{http_code}' -X DELETE "$BASE/api/artifacts/ci-race" -H "$AUTH")
+expect_code 200 "$code" "artifact still deletable after overlapping writes"
+
+# a DELETE beside a PATCH: whichever wins, the row and the artifact have to agree afterwards
+for round in 1 2 3; do
+  curl -sf --max-time 15 -X POST "$BASE/api/artifacts" -H "$AUTH" -H "$JSON" \
+    -d '{"content":"<h1>gone</h1>","type":"html","slug":"ci-race-del","visibility":"public"}' > /dev/null
+  curl -s --max-time 15 -o /dev/null -X DELETE "$BASE/api/artifacts/ci-race-del" -H "$AUTH" &
+  del_pid=$!
+  curl -s --max-time 15 -o /dev/null -X PATCH "$BASE/api/artifacts/ci-race-del" -H "$AUTH" -H "$JSON" -d '{"tags":["z"]}' &
+  patch_pid=$!
+  wait "$del_pid"
+  wait "$patch_pid"
+  listed=$(list_field ci-race-del slug)
+  served=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/a/ci-race-del?raw=1")
+  if [ -n "$listed" ] && [ "$served" != "200" ]; then
+    fail "round $round left a listed artifact that does not serve ($served)"
+  fi
+  curl -s -o /dev/null -X DELETE "$BASE/api/artifacts/ci-race-del" -H "$AUTH"
+done
+echo "ok: a DELETE and a PATCH at once leave no ghost row"
+
+# --- a rename holds the destination too, and two renames that cross do not wait on each other ---
+# A rename writes under two names. Holding only the old one let a publish claim the destination
+# between the collision check and the move, which answered 500. Exactly one of the pair wins.
+rename_code=$(mktemp)
+publish_code=$(mktemp)
+for round in 1 2 3; do
+  curl -s -o /dev/null -X DELETE "$BASE/api/artifacts/ci-ren-src" -H "$AUTH"
+  curl -s -o /dev/null -X DELETE "$BASE/api/artifacts/ci-ren-dst" -H "$AUTH"
+  curl -sf -X POST "$BASE/api/artifacts" -H "$AUTH" -H "$JSON" \
+    -d '{"content":"<h1>s</h1>","type":"html","slug":"ci-ren-src","visibility":"public"}' > /dev/null
+  curl -s --max-time 15 -o /dev/null -w '%{http_code}' -X PATCH "$BASE/api/artifacts/ci-ren-src" \
+    -H "$AUTH" -H "$JSON" -d '{"slug":"ci-ren-dst"}' > "$rename_code" &
+  ren_pid=$!
+  curl -s --max-time 15 -o /dev/null -w '%{http_code}' -X POST "$BASE/api/artifacts" -H "$AUTH" -H "$JSON" \
+    -d '{"content":"<h1>d</h1>","type":"html","slug":"ci-ren-dst","visibility":"public"}' > "$publish_code" &
+  pub_pid=$!
+  wait "$ren_pid"
+  wait "$pub_pid"
+  pair="$(cat "$rename_code")/$(cat "$publish_code")"
+  [ "$pair" = "200/409" ] || [ "$pair" = "409/201" ] || fail "rename raced a publish and answered $pair on round $round"
+done
+rm "$rename_code"
+rm "$publish_code"
+echo "ok: a rename and a publish claiming one slug leave exactly one winner"
+
+# two renames that cross. --max-time turns a lock-ordering regression into a failure instead of a
+# job that hangs until the runner's own timeout.
+curl -sf -X POST "$BASE/api/artifacts" -H "$AUTH" -H "$JSON" \
+  -d '{"content":"<h1>x</h1>","type":"html","slug":"ci-cross-x","visibility":"public"}' > /dev/null
+curl -sf -X POST "$BASE/api/artifacts" -H "$AUTH" -H "$JSON" \
+  -d '{"content":"<h1>y</h1>","type":"html","slug":"ci-cross-y","visibility":"public"}' > /dev/null
+curl -s --max-time 15 -o /dev/null -X PATCH "$BASE/api/artifacts/ci-cross-x" -H "$AUTH" -H "$JSON" -d '{"slug":"ci-cross-y"}' &
+x_pid=$!
+curl -s --max-time 15 -o /dev/null -X PATCH "$BASE/api/artifacts/ci-cross-y" -H "$AUTH" -H "$JSON" -d '{"slug":"ci-cross-x"}' &
+y_pid=$!
+wait "$x_pid" || fail "a crossed rename never answered (lock ordering)"
+wait "$y_pid" || fail "a crossed rename never answered (lock ordering)"
+echo "ok: two renames that cross both answer"
+curl -s -o /dev/null -X DELETE "$BASE/api/artifacts/ci-cross-x" -H "$AUTH"
+curl -s -o /dev/null -X DELETE "$BASE/api/artifacts/ci-cross-y" -H "$AUTH"
+curl -s -o /dev/null -X DELETE "$BASE/api/artifacts/ci-ren-src" -H "$AUTH"
+curl -s -o /dev/null -X DELETE "$BASE/api/artifacts/ci-ren-dst" -H "$AUTH"
+
+# a slug the caller left out is still a slug the server picks, twice over
+first=$(curl -sf -X POST "$BASE/api/artifacts" -H "$AUTH" -H "$JSON" \
+  -d '{"content":"<h1>n1</h1>","type":"html","slug":null}' | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>process.stdout.write(JSON.parse(s).slug))')
+second=$(curl -sf -X POST "$BASE/api/artifacts" -H "$AUTH" -H "$JSON" \
+  -d '{"content":"<h1>n2</h1>","type":"html","slug":null}' | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>process.stdout.write(JSON.parse(s).slug))')
+[ -n "$first" ] && [ -n "$second" ] || fail "a null slug did not publish"
+[ "$first" != "$second" ] || fail "a null slug published to one fixed name ($first)"
+[ "$first" != "null" ] || fail "a null slug became an artifact called null"
+echo "ok: a null slug means the server picks one"
+curl -s -o /dev/null -X DELETE "$BASE/api/artifacts/$first" -H "$AUTH"
+curl -s -o /dev/null -X DELETE "$BASE/api/artifacts/$second" -H "$AUTH"
+
 # zip site: build a tiny site and deploy it
 ZIPDIR=$(mktemp -d)
 mkdir -p "$ZIPDIR/site/css"
