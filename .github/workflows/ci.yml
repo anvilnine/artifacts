@@ -245,6 +245,45 @@ jobs:
           [ "$code" = "200" ] || { echo "FAIL: DELETE /api/keys/k_broken -> $code"; exit 1; }
           if curl -s -H "$AUTH" http://localhost:3000/api/keys | grep -q k_broken; then echo "FAIL: revoked record still listed"; exit 1; fi
           echo "ok: the broken record patches and revokes from the key screen"
+      - name: An artifact whose expiresAt cannot be read serves 410
+        run: |
+          # parseExpiresAt refuses a non-ISO expiresAt on the way in, so the only route to this
+          # record is the one an operator takes: a hand edit, or a restore of an older backup.
+          # Plant it between two boots the way the auth.json step above does, then drive the
+          # real serve path rather than trusting the unit test on lib/expiry.js. Visibility is
+          # explicit because DEFAULT_VISIBILITY is private, and a private artifact answers 404
+          # rather than 410, which would prove nothing either way.
+          AUTH='Authorization: Bearer ci-test-key'
+          curl -s -o /dev/null -X POST http://localhost:3000/api/artifacts -H "$AUTH" \
+            -H 'Content-Type: application/json' \
+            -d '{"slug":"expiry-junk","content":"<p>still here</p>","frame":false,"visibility":"public"}'
+          code=$(curl -s -o /dev/null -w '%{http_code}' http://localhost:3000/a/expiry-junk)
+          [ "$code" = "200" ] || { echo "FAIL: the artifact did not publish (got $code)"; exit 1; }
+          pkill -f 'node server.js' || true
+          sleep 1
+          node -e '
+            const fs = require("fs");
+            const p = process.env.DATA_DIR + "/artifacts/expiry-junk/meta.json";
+            const m = JSON.parse(fs.readFileSync(p, "utf8"));
+            m.expiresAt = "garbage";
+            fs.writeFileSync(p, JSON.stringify(m, null, 2));
+          '
+          node server.js &
+          for i in $(seq 1 20); do curl -sf http://localhost:3000/healthz && break; sleep 0.5; done
+          curl -sf http://localhost:3000/healthz > /dev/null \
+            || { echo "FAIL: the server did not come back up after the restart"; exit 1; }
+          code=$(curl -s -o /dev/null -w '%{http_code}' http://localhost:3000/a/expiry-junk)
+          [ "$code" = "410" ] || { echo "FAIL: /a/expiry-junk -> $code, expected 410"; exit 1; }
+          code=$(curl -s -o /dev/null -w '%{http_code}' http://localhost:3000/a/expiry-junk/source)
+          [ "$code" = "410" ] || { echo "FAIL: /a/expiry-junk/source -> $code, expected 410"; exit 1; }
+          echo "ok: an unreadable expiresAt serves 410 on both serve paths"
+          # And the operator can clear it from the dashboard without touching the file again.
+          code=$(curl -s -o /dev/null -w '%{http_code}' -X PATCH -H "$AUTH" -H 'Content-Type: application/json' \
+            -d '{"expiresAt":null}' http://localhost:3000/api/artifacts/expiry-junk)
+          [ "$code" = "200" ] || { echo "FAIL: PATCH clearing the expiry -> $code"; exit 1; }
+          code=$(curl -s -o /dev/null -w '%{http_code}' http://localhost:3000/a/expiry-junk)
+          [ "$code" = "200" ] || { echo "FAIL: the artifact did not come back after clearing the expiry (got $code)"; exit 1; }
+          echo "ok: clearing the expiry over the API brings the artifact back"
 
   smoke-s3:
     runs-on: ubuntu-latest
