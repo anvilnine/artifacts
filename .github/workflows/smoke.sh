@@ -784,6 +784,102 @@ curl -sf -X DELETE "$BASE/api/artifacts/ci-zip" -H "$AUTH" > /dev/null
 code=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/a/ci-smoke-2")
 expect_code 404 "$code" "deleted artifact"
 
+# --- managed keys: the token is shown once, the scope gate holds, and three ways of
+# killing a key all end in 401. Everything here runs on the bootstrap bearer, because
+# POST /api/keys is admin-only. ---
+resp=$(curl -s -X POST "$BASE/api/keys" -H "$AUTH" -H "$JSON" -d '{"name":"ci-read-key","scopes":["read"]}')
+readkey=$(printf '%s' "$resp" | sed -n 's/.*"key":"\([^"]*\)".*/\1/p')
+readid=$(printf '%s' "$resp" | sed -n 's/.*"id":"\([^"]*\)".*/\1/p')
+[ -n "$readkey" ] || fail "key create returned no key"
+[ -n "$readid" ] || fail "key create returned no id"
+echo "$resp" | grep -q '"prefix":"ah_' || fail "key create returned no prefix"
+if echo "$resp" | grep -q '"hash"'; then fail "key create carried the hash out"; fi
+echo "ok: key create shows the token once, with a prefix and no hash"
+
+READAUTH="Authorization: Bearer $readkey"
+code=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/api/artifacts" -H "$READAUTH")
+expect_code 200 "$code" "read key lists"
+code=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/api/artifacts" -H "$READAUTH" -H "$JSON" \
+  -d '{"content":"<h1>nope</h1>","type":"html","slug":"ci-scope-denied"}')
+expect_code 403 "$code" "read key cannot publish"
+
+# SECURITY.md says a managed key, even full, must not manage keys.
+resp=$(curl -s -X POST "$BASE/api/keys" -H "$AUTH" -H "$JSON" -d '{"name":"ci-full-key","scopes":["full"]}')
+fullkey=$(printf '%s' "$resp" | sed -n 's/.*"key":"\([^"]*\)".*/\1/p')
+fullid=$(printf '%s' "$resp" | sed -n 's/.*"id":"\([^"]*\)".*/\1/p')
+[ -n "$fullkey" ] || fail "full key create returned no key"
+code=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/api/keys" -H "Authorization: Bearer $fullkey")
+expect_code 401 "$code" "full managed key cannot list keys"
+
+# A key expired at mint time never authenticates.
+resp=$(curl -s -X POST "$BASE/api/keys" -H "$AUTH" -H "$JSON" \
+  -d '{"name":"ci-expired-key","scopes":["read"],"expiresAt":"2020-01-01"}')
+expkey=$(printf '%s' "$resp" | sed -n 's/.*"key":"\([^"]*\)".*/\1/p')
+expid=$(printf '%s' "$resp" | sed -n 's/.*"id":"\([^"]*\)".*/\1/p')
+[ -n "$expkey" ] || fail "expired key create returned no key"
+code=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/api/artifacts" -H "Authorization: Bearer $expkey")
+expect_code 401 "$code" "expired key refused"
+curl -sf -X DELETE "$BASE/api/keys/$expid" -H "$AUTH" > /dev/null
+
+# Disable, then re-enable: the gate has to swing both ways or a disable that never took
+# would still look green.
+curl -sf -X PATCH "$BASE/api/keys/$readid" -H "$AUTH" -H "$JSON" -d '{"disabled":true}' > /dev/null
+code=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/api/artifacts" -H "$READAUTH")
+expect_code 401 "$code" "disabled key refused"
+curl -sf -X PATCH "$BASE/api/keys/$readid" -H "$AUTH" -H "$JSON" -d '{"disabled":false}' > /dev/null
+code=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/api/artifacts" -H "$READAUTH")
+expect_code 200 "$code" "re-enabled key works again"
+
+curl -sf -X DELETE "$BASE/api/keys/$readid" -H "$AUTH" > /dev/null
+code=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/api/artifacts" -H "$READAUTH")
+expect_code 401 "$code" "revoked key refused"
+curl -sf -X DELETE "$BASE/api/keys/$fullid" -H "$AUTH" > /dev/null
+echo "ok: managed key lifecycle"
+
+# --- admin session: the cookie the dashboard runs on. Placed before the login burst below,
+# which spends the per-IP failure budget for the next 15 minutes. ---
+ADMIN_USER=${ARTIFACTS_ADMIN_USERNAME:-}
+ADMIN_PASS=${ARTIFACTS_ADMIN_PASSWORD:-}
+if [ -n "$ADMIN_USER" ] && [ -n "$ADMIN_PASS" ]; then
+  hdr=$(curl -s -D - -o /dev/null -c /tmp/sessjar -X POST "$BASE/api/auth/login" -H "$JSON" \
+    -d "{\"username\":\"$ADMIN_USER\",\"password\":\"$ADMIN_PASS\"}")
+  # The flags are read off the Set-Cookie line itself. Grepping the whole header block would
+  # let another header answer for them.
+  cookie_line=$(echo "$hdr" | grep -i '^set-cookie: artifacts_session=' || true)
+  [ -n "$cookie_line" ] || fail "login set no session cookie"
+  echo "$cookie_line" | grep -qi 'httponly' || fail "session cookie is not HttpOnly"
+  echo "$cookie_line" | grep -qi 'samesite=strict' || fail "session cookie is not SameSite=Strict"
+  echo "$cookie_line" | grep -qi 'path=/' || fail "session cookie is not scoped to Path=/"
+  echo "ok: login sets an HttpOnly SameSite=Strict session cookie"
+
+  # No Authorization header on any of these three: the cookie is the whole credential.
+  code=$(curl -s -o /dev/null -w '%{http_code}' -b /tmp/sessjar "$BASE/api/artifacts")
+  expect_code 200 "$code" "session cookie reaches the artifact API"
+  code=$(curl -s -o /dev/null -w '%{http_code}' -b /tmp/sessjar "$BASE/api/keys")
+  expect_code 200 "$code" "session cookie reaches the key API"
+  curl -s -b /tmp/sessjar "$BASE/api/auth/session" | grep -q '"authenticated":true' \
+    || fail "session endpoint does not see the cookie"
+  echo "ok: session endpoint reports the live session"
+
+  # An unknown username and a wrong password must be indistinguishable, which is what the
+  # decoy hash in lib/auth.js is for. Two failures, well inside the 10-per-window budget.
+  b_unknown=$(curl -s -X POST "$BASE/api/auth/login" -H "$JSON" \
+    -d '{"username":"ci-nobody","password":"wrongwrongwrong"}')
+  b_wrong=$(curl -s -X POST "$BASE/api/auth/login" -H "$JSON" \
+    -d "{\"username\":\"$ADMIN_USER\",\"password\":\"wrongwrongwrong\"}")
+  [ "$b_unknown" = "$b_wrong" ] || fail "unknown user and wrong password answer differently"
+  # Both bodies being a rate-limit refusal would also compare equal, which would pass this
+  # while proving nothing, so name the answer that is supposed to be there.
+  echo "$b_wrong" | grep -q 'invalid credentials' || fail "a wrong password did not answer with invalid credentials: $b_wrong"
+  echo "ok: unknown user and wrong password answer identically"
+
+  curl -s -b /tmp/sessjar -c /tmp/sessjar -o /dev/null -X POST "$BASE/api/auth/logout"
+  code=$(curl -s -o /dev/null -w '%{http_code}' -b /tmp/sessjar "$BASE/api/keys")
+  expect_code 401 "$code" "logout drops the session"
+else
+  echo "skip: session cases need ARTIFACTS_ADMIN_USERNAME and ARTIFACTS_ADMIN_PASSWORD in the environment"
+fi
+
 # --- DoS liveness: a burst of unauthenticated login POSTs must not stall /healthz ---
 # Fire 40 concurrent logins (each triggers scrypt) in the background, then time a healthz.
 for i in $(seq 1 40); do

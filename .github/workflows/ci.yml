@@ -678,6 +678,11 @@ jobs:
     env:
       IMAGE: artifacts-host:ci-${{ github.run_id }}
       CONTAINER: artifacts-ci-${{ github.run_id }}
+      # The same credentials the container is seeded with below, in the job shell as well, so
+      # smoke.sh can log in here too. Without them its session block skips, and this is the one
+      # job that boots the shipped image.
+      ARTIFACTS_ADMIN_USERNAME: ci-admin
+      ARTIFACTS_ADMIN_PASSWORD: ci-admin-password
     steps:
       - uses: actions/checkout@v4
       - name: Build image
