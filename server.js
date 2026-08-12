@@ -666,7 +666,7 @@ async function saveArtifact({ content, type = 'html', slug, title, expiresAt, fr
   await storage.flush?.(); // durably commit the completed write (git); no-op elsewhere
   dropMdRender(finalSlug);
   // A non-public artifact needs the session secret resident to mint its capability token;
-  // it is created lazily (first login otherwise), so force it here (tokenEpoch ⇒ non-public).
+  // it is created lazily (at setup otherwise), so force it here (tokenEpoch ⇒ non-public).
   if (meta.tokenEpoch !== undefined) await ensureSessionSecret();
   const out = { slug: finalSlug, url: tokenedUrl(meta), visibility: meta.visibility || 'public' };
   // A redirect answers with the target it stored, which is not always the string that was sent:

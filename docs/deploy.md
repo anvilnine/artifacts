@@ -49,7 +49,7 @@ Or keep the configuration in a file: `cp .env.example .env`, edit it, then `npm 
 | `DEFAULT_VISIBILITY` | no | `private` | Visibility for a new artifact when the caller gives none: `private` or `public`. Ships `private` (opt in to public). |
 | `CAP_TOKEN_TTL_DAYS` | no | `30` | Lifetime of a capability share link (`?k=` token) for `private`/`password` artifacts. A value that is not a positive number (a typo, `0`, a negative) logs a warning and uses 30. |
 
-Day-to-day, give CLI and MCP clients scoped [managed API keys](auth.md) rather than the bootstrap key. Auth state (the admin account, two HMAC secrets, and the managed keys) persists under a reserved `auth.json` object through the storage backend, so it survives a restart on any backend that is itself durable (see [storage backends](#storage-backends)) with no migration. Like the frame config, it is loaded once at boot and cached in memory.
+Day-to-day, give CLI and MCP clients scoped [managed API keys](auth.md) rather than the bootstrap key. Auth state (the admin account, two HMAC secrets, and the managed keys) persists under a reserved `auth.json` object through the storage backend, so it survives a restart on any backend that is itself durable (see [storage backends](#storage-backends)) with no migration. Like the frame config, it is loaded at boot and cached in memory; every write reloads it, so the cache is also as fresh as the last write this process made.
 
 The two secrets are separate on purpose, and neither is written at boot:
 
@@ -90,16 +90,16 @@ Check it took. A JSON typo stops the boot with a message (see [a corrupt auth.js
 
 ### Changing a password or a key on a fleet
 
-The change itself is safe to make on a live fleet: it sticks. What it does not do is take effect on the other replicas until they restart.
+The change itself is safe to make on a live fleet: it sticks. What it does not do is take effect on the other replicas until each of them writes to `auth.json` itself, or restarts.
 
 Writes merge. Every write reloads `auth.json`, applies the one change to what the backend holds, and writes that back, so a replica that has been up since before your change no longer reverts it. Up to and including v1.3.1 it did: each replica held the whole record from boot and wrote all of it back on any change of its own, and an ordinary authenticated read was enough to trigger one, because a key's `lastUsedAt` goes through the same path. The reload and the write are still two steps and no backend here offers compare-and-set, so two replicas writing inside that window can still lose one of the changes. The window is now one request rather than the lifetime of a process.
 
-Reads are still per-process, and that is the part to plan around:
+Reads are still per-process, and that is the part to plan around. A replica serves from the copy it holds in memory, and it replaces that copy only when it writes to `auth.json` itself: every write reloads the stored record first, so the write pulls in whatever anyone else changed. A managed-key request counts, because refreshing that key's `lastUsedAt` is a write, though at most one per key every 5 minutes. The bootstrap key and an admin session cookie do not write, so a replica that only serves those never catches up on its own. Until it does:
 
-- A managed key minted on one replica answers `401` everywhere else until each replica restarts. A key you revoke or disable on one replica keeps working everywhere else until each replica restarts.
+- A managed key minted on one replica answers `401` everywhere else. A key you revoke or disable on one replica keeps working everywhere else.
 - A password change rotates `adminSecret` only on the replica that served it. A stolen session cookie stays valid, with full admin scope, on every other replica for the rest of its 30-day life, and the old password still logs in there while the new one is refused. A password change on a live fleet revokes nothing by itself.
 
-So when you are responding to a suspected leak, restart every replica after the change. When you are doing routine key housekeeping, you can leave the fleet up and let the restart happen whenever you next deploy.
+So when you are responding to a suspected leak, restart every replica after the change rather than waiting for one to catch up. When you are doing routine key housekeeping, you can leave the fleet up and let the restart happen whenever you next deploy.
 
 Capability links are unaffected by all of it. They are signed with `sessionSecret` and checked against per-artifact state that is read from storage on every request, so `PATCH {"rotateToken": true}` does take effect across a fleet immediately.
 
