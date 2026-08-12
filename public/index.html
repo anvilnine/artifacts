@@ -1544,10 +1544,11 @@
 
   function buildItem(a, opts) {
       opts = opts || {};
-      // Same rule as artifactExpired in lib/expiry.js: a value the server cannot read is
-      // lapsed, so the row does not show a live artifact the server answers 410 for.
+      // Same rule as artifactExpired in lib/expiry.js, kept in step by hand: a value the
+      // server cannot read is lapsed, so the row never shows a live artifact the server
+      // answers 410 for. Any change here belongs in both places.
       const expired = a.expiresAt != null && a.expiresAt !== ''
-        && !(Date.parse(a.expiresAt) > Date.now());
+        && (typeof a.expiresAt !== 'string' || !(Date.parse(a.expiresAt) > Date.now()));
       const item = document.createElement('div');
       item.className = 'item' + ((a.disabled || expired) ? ' off' : '');
 
@@ -1781,11 +1782,15 @@
 
         menuItem(menu, 'QR code…', '', () => openQr(a));
 
-        menuItem(menu, a.expiresAt ? 'Expiry: ' + a.expiresAt.slice(0, 10) + '…' : 'Expiry…', '', async () => {
+        // A hand-edited meta.json can hold anything here, and the row menu is the screen the
+        // operator opens to clear it. slice() on a number or an object throws inside the fill
+        // callback, which stops the menu at this line: no Expiry, no Delete, nothing below.
+        const expiry = typeof a.expiresAt === 'string' ? a.expiresAt : '';
+        menuItem(menu, expiry ? 'Expiry: ' + expiry.slice(0, 10) + '…' : 'Expiry…', '', async () => {
           const v = await dialog({
             title: 'Expiry for “' + a.slug + '”',
             body: 'e.g. 2026-08-01 or 2026-08-01T12:00. Leave empty to clear.',
-            input: true, value: a.expiresAt ? a.expiresAt.slice(0, 16) : '',
+            input: true, value: expiry.slice(0, 16),
           });
           if (v === null) return;
           patchItem(a, { expiresAt: v.trim() || null }, { expiresAt: v.trim() || undefined });

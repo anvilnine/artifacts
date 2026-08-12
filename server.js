@@ -1306,7 +1306,6 @@ app.post('/a/:slug/unlock', async (req, res, next) => {
     }
     const meta = SLUG_RE.test(slug) ? await readMeta(slug) : null;
     if (!meta || meta.disabled) return res.status(404).json({ error: 'not found' });
-    if (isExpired(meta)) return res.status(410).json({ error: 'expired' });
     const password = req.body?.password;
     if (meta.visibility !== 'password') {
       // private uses capability links, not passwords; public needs no unlock. Uniform 401
@@ -1322,6 +1321,11 @@ app.post('/a/:slug/unlock', async (req, res, next) => {
       logAuth('unlock', { ip, slug, outcome: 'fail' });
       return res.status(401).json({ error: 'incorrect password' });
     }
+    // Expiry is checked here rather than above the visibility branch. The 404/401 pair over
+    // this route is deliberately uniform (see the comment on that branch), and a 410 handed
+    // out before the password is proven told an anonymous caller the slug exists. The two GET
+    // paths already order it this way; this one did not.
+    if (isExpired(meta)) return res.status(410).json({ error: 'expired' });
     await issueUnlock(res, meta);
     res.json({ ok: true });
   } catch (err) {

@@ -5,6 +5,8 @@ import { parseArgs } from 'node:util';
 
 import AdmZip from 'adm-zip';
 
+import { artifactExpired } from './lib/expiry.js';
+
 const USAGE = `artifacts — publish to a self-hosted artifacts instance
 
 Usage:
@@ -196,7 +198,12 @@ switch (command) {
     for (const a of artifacts) {
       const frameFlag = a.frame === true ? 'frame:on' : a.frame === false ? 'frame:off' : null;
       const visFlag = a.visibility === 'private' ? 'private' : a.visibility === 'password' ? 'password' : null;
-      const flags = [a.disabled && 'disabled', visFlag, frameFlag, a.expiresAt && `expires ${a.expiresAt}`].filter(Boolean);
+      // The row printed an expiry and never said whether it had passed, so an artifact
+      // answering 410 listed the same as a live one, and a stored value that is not a string
+      // printed as "expires [object Object]". Same rule the server serves by.
+      const expired = artifactExpired(a);
+      const expiry = expired ? 'expired' : typeof a.expiresAt === 'string' && `expires ${a.expiresAt}`;
+      const flags = [a.disabled && 'disabled', visFlag, frameFlag, expiry].filter(Boolean);
       const project = a.project ? `@${a.project}` : '';
       const tags = a.tags?.length ? `#${a.tags.join(' #')}` : '';
       const meta = [project, tags].filter(Boolean).join(' ');
