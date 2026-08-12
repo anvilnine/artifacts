@@ -21,7 +21,7 @@ artifacts  (this repo) ── STORAGE_BACKEND=s3 → MinIO ── no volume, sta
 ```
 
 Because artifacts state (every artifact **and** the reserved `auth.json` — admin account,
-session secret, managed keys) all go through the storage backend, once the backend is MinIO the
+both HMAC secrets, managed keys) all go through the storage backend, once the backend is MinIO the
 app container is throwaway. Back up MinIO's volume and you have backed up everything.
 
 ## Why MinIO "just works" here
