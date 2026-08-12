@@ -1950,8 +1950,9 @@
     const bits = [k.prefix + '…'];
     if (k.expiresAt) bits.push('expires ' + k.expiresAt.slice(0, 10));
     bits.push(k.lastUsedAt ? ('used ' + k.lastUsedAt.slice(0, 10)) : 'never used');
-    // A broken record is missing the hash or the scopes the bearer path reads, so it answers
-    // 401 no matter what. Enabling it would change nothing; revoking it is the whole fix.
+    // A broken record is missing the hash or the scopes the bearer path reads, or carries an
+    // expiresAt nothing can read. Either way it answers 401 no matter what: enabling it would
+    // change nothing, and revoking it is the whole fix.
     sub.textContent = k.broken ? 'always answers 401. Revoke it and mint a new key.' : bits.join(' · ');
     meta.append(name, sub);
 

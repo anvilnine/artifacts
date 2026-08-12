@@ -302,8 +302,9 @@ switch (command) {
       const keys = await apiJson('GET', '/api/keys');
       for (const k of keys) {
         const flags = [
-          // A record missing the hash or the scopes the bearer path reads. It answers 401
-          // whatever you do with it, so say so here as well as on the dashboard.
+          // A record missing the hash or the scopes the bearer path reads, or carrying an
+          // expiresAt nothing can read. It answers 401 whatever you do with it, so say so
+          // here as well as on the dashboard.
           k.broken && 'broken, always answers 401',
           k.disabled && 'disabled',
           k.expiresAt && `expires ${k.expiresAt.slice(0, 10)}`,

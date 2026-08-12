@@ -281,6 +281,53 @@ test('publicKey drops timestamps and an id that are not strings', () => {
   assert.equal(row.createdAt, null);
 });
 
+// keyExpired treats an expiry it cannot read as passed, so the record 401s. Before this, both
+// clients still drew it as a working key: a non-string expiresAt comes out of publicKey as null,
+// which reads as "no expiry", and "garbage" reads as an expiry date. The operator's loop was
+// key 401s, open the key screen, see a healthy key, press Disable, nothing changes.
+test('publicKey flags a record whose expiresAt cannot be read', () => {
+  for (const junk of ['garbage', '2026-13-45', {}, true, []]) {
+    const row = publicKey({ ...goodKey(), expiresAt: junk });
+    assert.equal(row.broken, true, `${JSON.stringify(junk)} should read as broken`);
+  }
+});
+
+// An expiry that has passed is not broken. It reads back, both clients print the date, and the
+// operator can see for themselves why the key stopped working.
+test('publicKey leaves a readable expiry alone, past or future', () => {
+  const past = new Date(Date.now() - 60_000).toISOString();
+  const future = new Date(Date.now() + 60_000).toISOString();
+
+  assert.equal(publicKey({ ...goodKey(), expiresAt: past }).broken, false);
+  assert.equal(publicKey({ ...goodKey(), expiresAt: future }).broken, false);
+  assert.equal(publicKey({ ...goodKey(), expiresAt: null }).broken, false);
+  assert.equal(publicKey({ ...goodKey(), expiresAt: '' }).broken, false);
+});
+
+// The boot warning exists because a bearer 401 is logged nowhere. A record killed by an
+// unreadable expiresAt was the one class it did not name.
+test('the boot warning names a record with an unreadable expiresAt', async () => {
+  const lines = [];
+  const warn = console.warn;
+  console.warn = (msg) => lines.push(msg);
+  try {
+    await createAuthStore(
+      stubStorage({
+        version: 1,
+        keys: [goodKey(), { ...goodKey(), id: 'k_junk', expiresAt: 'garbage' }],
+      }),
+      { apiKey: 'bootstrap', baseUrl: 'http://localhost:3000' },
+    );
+  } finally {
+    console.warn = warn;
+  }
+
+  const named = lines.filter((l) => l.includes('k_junk'));
+  assert.equal(named.length, 1, `expected one warning naming k_junk, got ${JSON.stringify(lines)}`);
+  assert.match(named[0], /expiresAt nothing can read/);
+  assert.equal(named[0].includes('k_good'), false);
+});
+
 // A name that is not a string reached the dashboard as "undefined · " in the row title.
 test('publicKey names an unnamed record rather than passing undefined through', () => {
   assert.equal(publicKey({ id: 'k_bad' }).name, '(unnamed)');
