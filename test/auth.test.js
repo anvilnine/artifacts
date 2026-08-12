@@ -9,6 +9,7 @@ import {
   capTtlDays,
   hashKey,
   publicKey,
+  SESSION_COOKIE,
   signSession,
 } from '../lib/auth.js';
 
@@ -350,6 +351,57 @@ test('a freshly minted capability token still verifies', async () => {
     secret,
   );
   assert.equal(store.verifyCapToken(lapsed, 'cap-one', 0), false);
+});
+
+async function sessionStore() {
+  const store = await createAuthStore(
+    stubStorage({
+      version: 1,
+      admin: { username: 'ci-admin', hash: 'not-checked-here' },
+      adminSecret: 'a'.repeat(64),
+      keys: [],
+    }),
+    { apiKey: 'bootstrap', baseUrl: 'http://localhost:3000' },
+  );
+  return { store, secret: store.auth.adminSecret };
+}
+
+const sessionReq = (token) => ({ headers: { cookie: `${SESSION_COOKIE}=${encodeURIComponent(token)}` } });
+
+// issueSession always stamps a numeric exp, and forging a payload needs adminSecret, so nothing
+// reaches this today. It is the session half of the capability-token bug T1.2.12 closed, and it
+// reopens the moment the TTL becomes configurable, which is where a junk value would come from.
+test('a session payload with no numeric exp is refused', async () => {
+  const { store, secret } = await sessionStore();
+
+  for (const payload of [
+    { sub: 'ci-admin' },
+    { sub: 'ci-admin', exp: null },
+    { sub: 'ci-admin', exp: String(Date.now() + 60_000) },
+    { sub: 'ci-admin', exp: {} },
+  ]) {
+    const token = signSession(payload, secret);
+    assert.equal(
+      store.sessionPrincipal(sessionReq(token)),
+      null,
+      `exp ${JSON.stringify(payload.exp)} should not resolve`,
+    );
+  }
+});
+
+// The refusal has to leave the normal path alone.
+test('a session inside its window resolves and one past it does not', async () => {
+  const { store, secret } = await sessionStore();
+
+  const live = store.sessionPrincipal(sessionReq(signSession({ sub: 'ci-admin', exp: Date.now() + 60_000 }, secret)));
+  assert.equal(live?.admin, true);
+  assert.equal(live?.session, true);
+
+  const lapsed = signSession({ sub: 'ci-admin', exp: Date.now() - 1000 }, secret);
+  assert.equal(store.sessionPrincipal(sessionReq(lapsed)), null);
+
+  const wrongUser = signSession({ sub: 'someone-else', exp: Date.now() + 60_000 }, secret);
+  assert.equal(store.sessionPrincipal(sessionReq(wrongUser)), null);
 });
 
 // Two stores over one storage stub are two replicas over one auth.json: each holds the record
