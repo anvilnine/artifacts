@@ -250,11 +250,13 @@ jobs:
           # parseExpiresAt refuses a non-ISO expiresAt on the way in, so the only route to this
           # record is the one an operator takes: a hand edit, or a restore of an older backup.
           # Plant it between two boots the way the auth.json step above does, then drive the
-          # real serve path rather than trusting the unit test on lib/expiry.js.
+          # real serve path rather than trusting the unit test on lib/expiry.js. Visibility is
+          # explicit because DEFAULT_VISIBILITY is private, and a private artifact answers 404
+          # rather than 410, which would prove nothing either way.
           AUTH='Authorization: Bearer ci-test-key'
           curl -s -o /dev/null -X POST http://localhost:3000/api/artifacts -H "$AUTH" \
             -H 'Content-Type: application/json' \
-            -d '{"slug":"expiry-junk","content":"<p>still here</p>","frame":false}'
+            -d '{"slug":"expiry-junk","content":"<p>still here</p>","frame":false,"visibility":"public"}'
           code=$(curl -s -o /dev/null -w '%{http_code}' http://localhost:3000/a/expiry-junk)
           [ "$code" = "200" ] || { echo "FAIL: the artifact did not publish (got $code)"; exit 1; }
           pkill -f 'node server.js' || true
