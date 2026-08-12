@@ -8,6 +8,7 @@ import {
   AuthFileError,
   capTtlDays,
   hashKey,
+  keyExpired,
   publicKey,
   readCookie,
   SESSION_COOKIE,
@@ -290,6 +291,57 @@ test('publicKey drops timestamps and an id that are not strings', () => {
   assert.equal(row.expiresAt, null);
   assert.equal(row.lastUsedAt, null);
   assert.equal(row.createdAt, null);
+});
+
+// keyExpired treats an expiry it cannot read as passed, so the record 401s. Before this, both
+// clients still drew it as a working key: a non-string expiresAt comes out of publicKey as null,
+// which reads as "no expiry", and "garbage" reads as an expiry date. The operator's loop was
+// key 401s, open the key screen, see a healthy key, press Disable, nothing changes.
+test('publicKey flags a record whose expiresAt cannot be read', () => {
+  // The last three are the ones Date.parse reads after stringifying: 2020 and 0 become years,
+  // and a one-element array becomes the string inside it. All three are past dates, so
+  // keyExpired already rejected the key while publicKey drew it as a key with no expiry.
+  for (const junk of ['garbage', '2026-13-45', {}, true, [], 2020, 0, ['2020-01-01']]) {
+    const row = publicKey({ ...goodKey(), expiresAt: junk });
+    assert.equal(row.broken, true, `${JSON.stringify(junk)} should read as broken`);
+    assert.equal(keyExpired({ expiresAt: junk }), true, `${JSON.stringify(junk)} should also 401`);
+  }
+});
+
+// An expiry that has passed is not broken. It reads back, both clients print the date, and the
+// operator can see for themselves why the key stopped working.
+test('publicKey leaves a readable expiry alone, past or future', () => {
+  const past = new Date(Date.now() - 60_000).toISOString();
+  const future = new Date(Date.now() + 60_000).toISOString();
+
+  assert.equal(publicKey({ ...goodKey(), expiresAt: past }).broken, false);
+  assert.equal(publicKey({ ...goodKey(), expiresAt: future }).broken, false);
+  assert.equal(publicKey({ ...goodKey(), expiresAt: null }).broken, false);
+  assert.equal(publicKey({ ...goodKey(), expiresAt: '' }).broken, false);
+});
+
+// The boot warning exists because a bearer 401 is logged nowhere. A record killed by an
+// unreadable expiresAt was the one class it did not name.
+test('the boot warning names a record with an unreadable expiresAt', async () => {
+  const lines = [];
+  const warn = console.warn;
+  console.warn = (msg) => lines.push(msg);
+  try {
+    await createAuthStore(
+      stubStorage({
+        version: 1,
+        keys: [goodKey(), { ...goodKey(), id: 'k_junk', expiresAt: 'garbage' }],
+      }),
+      { apiKey: 'bootstrap', baseUrl: 'http://localhost:3000' },
+    );
+  } finally {
+    console.warn = warn;
+  }
+
+  const named = lines.filter((l) => l.includes('k_junk'));
+  assert.equal(named.length, 1, `expected one warning naming k_junk, got ${JSON.stringify(lines)}`);
+  assert.match(named[0], /expiresAt nothing can read/);
+  assert.equal(named[0].includes('k_good'), false);
 });
 
 // A name that is not a string reached the dashboard as "undefined · " in the row title.

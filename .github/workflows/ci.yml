@@ -274,7 +274,14 @@ jobs:
             const fs = require("fs");
             const p = process.env.DATA_DIR + "/artifacts/auth.json";
             const a = JSON.parse(fs.readFileSync(p, "utf8"));
-            a.keys = [null, "ak_live_oops", { id: "k_broken", name: "broken" }];
+            a.keys = [
+              null,
+              "ak_live_oops",
+              { id: "k_broken", name: "broken" },
+              // Whole record, one unreadable field. The bearer path 401s it and the key
+              // screen used to draw it as a healthy key with no expiry (T1.2.21).
+              { id: "k_expiry", name: "junk expiry", prefix: "ak_live_j", hash: "x".repeat(64), scopes: ["publish"], expiresAt: "garbage" },
+            ];
             fs.writeFileSync(p, JSON.stringify(a, null, 2));
           '
           node server.js &
@@ -285,6 +292,18 @@ jobs:
           grep -q '"broken":true' /tmp/keys.json || { echo "FAIL: broken record not flagged"; cat /tmp/keys.json; exit 1; }
           if grep -q '"id":null' /tmp/keys.json; then echo "FAIL: unaddressable entry listed"; cat /tmp/keys.json; exit 1; fi
           echo "ok: GET /api/keys lists the broken record and skips the unaddressable entries"
+          # Per record, because a single grep for "broken":true passes on k_broken alone and
+          # would say nothing about the record whose only fault is the expiry.
+          node -e '
+            const rows = JSON.parse(require("fs").readFileSync("/tmp/keys.json", "utf8"));
+            const row = rows.find((k) => k.id === "k_expiry");
+            if (!row) { console.error("FAIL: k_expiry is not listed", rows); process.exit(1); }
+            if (row.broken !== true) { console.error("FAIL: k_expiry is not flagged broken", row); process.exit(1); }
+            console.log("ok: a record with an unreadable expiresAt lists as broken");
+          '
+          code=$(curl -s -o /dev/null -w '%{http_code}' -X DELETE -H "$AUTH" http://localhost:3000/api/keys/k_expiry)
+          [ "$code" = "200" ] || { echo "FAIL: DELETE /api/keys/k_expiry -> $code"; exit 1; }
+          echo "ok: the operator can revoke it without hand-editing auth.json"
           code=$(curl -s -o /dev/null -w '%{http_code}' -X PATCH -H "$AUTH" -H 'Content-Type: application/json' \
             -d '{"disabled":true}' http://localhost:3000/api/keys/k_broken)
           [ "$code" = "200" ] || { echo "FAIL: PATCH /api/keys/k_broken -> $code"; exit 1; }
