@@ -132,6 +132,39 @@ jobs:
             if (a.admin.username !== "ci-claimer") { console.error("FAIL: stored admin is " + a.admin.username); process.exit(1); }
           '
           echo "ok: an unclaimed instance is claimable, signs the claimer in, and writes both secrets"
+          # adminSecret is on disk and this job has it, so a session payload can be signed here
+          # the way the server signs one. That is the only way to reach sessionPrincipal with a
+          # payload the server would never mint. A cookie with no exp used to skip the lapse
+          # check and authenticate as the admin for good (T1.2.23).
+          node -e '
+            const crypto = require("crypto");
+            const fs = require("fs");
+            const a = JSON.parse(fs.readFileSync(process.env.DATA_DIR + "/artifacts/auth.json", "utf8"));
+            const sign = (payload) => {
+              const body = Buffer.from(JSON.stringify(payload)).toString("base64url");
+              const sig = crypto.createHmac("sha256", a.adminSecret).update(body).digest("base64url");
+              return body + "." + sig;
+            };
+            fs.writeFileSync("/tmp/forged-noexp.cookie", sign({ sub: "ci-claimer" }));
+            fs.writeFileSync("/tmp/forged-nullexp.cookie", sign({ sub: "ci-claimer", exp: null }));
+            fs.writeFileSync("/tmp/forged-live.cookie", sign({ sub: "ci-claimer", exp: Date.now() + 600000 }));
+          '
+          for shape in noexp nullexp; do
+            code=$(curl -s -o /dev/null -w '%{http_code}' \
+              --cookie "artifacts_session=$(cat /tmp/forged-$shape.cookie)" "$BASE/api/keys")
+            [ "$code" = "401" ] || { echo "FAIL: a session cookie with a $shape payload answered $code on /api/keys, expected 401"; exit 1; }
+          done
+          # The control: same signature path, a real exp, still admitted. Without it the two
+          # checks above would pass on a server that refuses every session cookie.
+          code=$(curl -s -o /dev/null -w '%{http_code}' \
+            --cookie "artifacts_session=$(cat /tmp/forged-live.cookie)" "$BASE/api/keys")
+          [ "$code" = "200" ] || { echo "FAIL: a session cookie with a live exp answered $code on /api/keys, expected 200"; exit 1; }
+          echo "ok: a session cookie with no usable exp is refused, and one with a live exp is not"
+          # A cookie value the browser sends back can hold a stray percent sign, which used to
+          # throw inside decodeURIComponent and reach the error handler as a 500.
+          code=$(curl -s -o /dev/null -w '%{http_code}' --cookie 'artifacts_session=%' "$BASE/api/auth/session")
+          [ "$code" = "200" ] || { echo "FAIL: a malformed session cookie answered $code, expected 200"; exit 1; }
+          echo "ok: a session cookie that does not decode reads as absent"
           # The second claim is the half that matters: this route is unauthenticated, so a 409 is
           # the only thing standing between a booted instance and whoever reaches it next.
           code=$(curl -s -o /tmp/setup-2.json -w '%{http_code}' -X POST "$BASE/api/auth/setup" \

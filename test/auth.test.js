@@ -9,6 +9,7 @@ import {
   capTtlDays,
   hashKey,
   publicKey,
+  readCookie,
   SESSION_COOKIE,
   signSession,
 } from '../lib/auth.js';
@@ -38,16 +39,25 @@ function fakeReq(token) {
 }
 
 // Captures what the middleware answered: a status + body, or the fact that it called next().
+// `cookie` is here so a test can mint a session through issueSession rather than hand-signing
+// one, which is the only way a change to what issueSession stamps can fail a test.
 function fakeRes() {
   const out = { code: null, body: null };
+  // Kept off `out`, which callGuard spreads into a deep-equal assertion.
+  const cookies = {};
   return {
     out,
+    cookies,
     status(code) {
       out.code = code;
       return this;
     },
     json(body) {
       out.body = body;
+      return this;
+    },
+    cookie(name, value) {
+      cookies[name] = value;
       return this;
     },
   };
@@ -389,11 +399,15 @@ test('a session payload with no numeric exp is refused', async () => {
   }
 });
 
-// The refusal has to leave the normal path alone.
+// The refusal has to leave the normal path alone. The live case goes through issueSession
+// rather than hand-signing a payload, so a change to what issueSession stamps fails here
+// instead of passing a test that mints its own cookie and never notices.
 test('a session inside its window resolves and one past it does not', async () => {
   const { store, secret } = await sessionStore();
 
-  const live = store.sessionPrincipal(sessionReq(signSession({ sub: 'ci-admin', exp: Date.now() + 60_000 }, secret)));
+  const res = fakeRes();
+  await store.issueSession(res, 'ci-admin');
+  const live = store.sessionPrincipal(sessionReq(res.cookies[SESSION_COOKIE]));
   assert.equal(live?.admin, true);
   assert.equal(live?.session, true);
 
@@ -402,6 +416,17 @@ test('a session inside its window resolves and one past it does not', async () =
 
   const wrongUser = signSession({ sub: 'someone-else', exp: Date.now() + 60_000 }, secret);
   assert.equal(store.sessionPrincipal(sessionReq(wrongUser)), null);
+});
+
+// A stray percent sign in any cookie made decodeURIComponent throw, which the error handler
+// answered as a 500 on every route that reads one, including the unauthenticated serve path.
+test('a cookie value that does not decode reads as absent, not as a throw', () => {
+  const req = { headers: { cookie: `${SESSION_COOKIE}=%; other=fine` } };
+  assert.equal(readCookie(req, SESSION_COOKIE), null);
+  assert.equal(readCookie(req, 'other'), 'fine');
+
+  assert.equal(readCookie({ headers: { cookie: `${SESSION_COOKIE}=%E0%A4%A` } }, SESSION_COOKIE), null);
+  assert.equal(readCookie({ headers: { cookie: `${SESSION_COOKIE}=a%20b` } }, SESSION_COOKIE), 'a b');
 });
 
 // Two stores over one storage stub are two replicas over one auth.json: each holds the record

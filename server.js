@@ -190,9 +190,10 @@ async function issueUnlock(res, meta, capExp) {
 function unlockValid(req, meta) {
   const p = verifySession(readCookie(req, unlockCookieName(meta.slug)), auth.sessionSecret);
   if (!p || p.typ !== 'unlock' || p.slug !== meta.slug || p.epoch !== metaEpoch(meta)) return false;
-  // Same rule as verifyCapToken: issueUnlock always writes a numeric exp, so a cookie
-  // without one is refused rather than read as "no expiry set".
-  return typeof p.exp === 'number' && p.exp > Date.now();
+  // Same rule as verifyCapToken: issueUnlock always writes a real number here, so a cookie
+  // without one is refused rather than read as "no expiry set". Number.isFinite because
+  // Infinity is a number and is never in the past.
+  return Number.isFinite(p.exp) && p.exp > Date.now();
 }
 
 // May this request view the artifact body? Public: always. private/password: a valid
