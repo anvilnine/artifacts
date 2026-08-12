@@ -823,6 +823,9 @@ curl -s -X DELETE "$BASE/api/artifacts/ci-mcp-denied" -H "$AUTH" > /dev/null
 # `ci-mcp`, and a slug carrying it as a prefix satisfies them, so a stale artifact here
 # would hold those checks up after ci-mcp itself stopped being published.
 curl -s -X DELETE "$BASE/api/artifacts/ci-vis-default" -H "$AUTH" > /dev/null
+# Not ci-mcp-redirect either, for the prefix reason above. This one is published over REST
+# rather than MCP so the list check below needs no extra tools/call.
+curl -s -X DELETE "$BASE/api/artifacts/ci-redir-mcp" -H "$AUTH" > /dev/null
 
 mcp_pub=$(mcp_call 3 tools/call \
   '{"name":"publish_artifact","arguments":{"content":"<h1>mcp</h1>","type":"html","slug":"ci-mcp","visibility":"public"}}')
@@ -834,9 +837,24 @@ mcp_url=$(printf '%s' "$mcp_pub" | mcp_text)
 curl -s "$BASE/a/ci-mcp?raw=1" | grep -q '<h1>mcp</h1>' || fail "MCP publish_artifact served no body"
 echo "ok: MCP publish_artifact round-trip"
 
+curl -sf -X POST "$BASE/api/artifacts" -H "$AUTH" -H "$JSON" \
+  -d '{"content":"https://example.com/mcp-target","type":"redirect","slug":"ci-redir-mcp","visibility":"public"}' \
+  > /dev/null || fail "could not publish the redirect the list_artifacts field check reads"
+
 mcp_list=$(mcp_call 4 tools/call '{"name":"list_artifacts","arguments":{}}')
 printf '%s' "$mcp_list" | grep -q 'ci-mcp' || fail "MCP list_artifacts omits the artifact it just published"
-echo "ok: MCP list_artifacts"
+# The tool hands back whatever publicMeta allows, so `target` reaches an agent for a redirect.
+# The description is the only place an agent learns that, and it enumerates the fields by hand,
+# so a field added to PUBLIC_META_FIELDS goes unmentioned unless something checks. Both halves
+# below are needed: the response proves the field ships, the description proves it is named.
+# The whole pretty-printed list arrives escaped on one SSE line, hence the same-line pattern.
+printf '%s' "$mcp_list" | grep -q 'target[^,]*https://example.com/mcp-target' \
+  || fail "MCP list_artifacts omits target for a redirect ($(printf '%s' "$mcp_list" | tr '\n' ' '))"
+mcp_list_meta=$(printf '%s' "$mcp_tools" | tr '{' '\n' | grep '"name":"list_artifacts"' || true)
+printf '%s' "$mcp_list_meta" | grep -q 'target' \
+  || fail "the list_artifacts description does not name target, which the response carries ($mcp_list_meta)"
+curl -s -X DELETE "$BASE/api/artifacts/ci-redir-mcp" -H "$AUTH" > /dev/null
+echo "ok: MCP list_artifacts, including target for a redirect"
 
 # A mutating tool past publish. tools/list serves only the metadata passed to
 # server.registerTool, so the count check above passes for a tool whose handler throws on
