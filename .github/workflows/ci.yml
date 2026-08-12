@@ -165,6 +165,20 @@ jobs:
           code=$(curl -s -o /dev/null -w '%{http_code}' --cookie 'artifacts_session=%' "$BASE/api/auth/session")
           [ "$code" = "200" ] || { echo "FAIL: a malformed session cookie answered $code, expected 200"; exit 1; }
           echo "ok: a session cookie that does not decode reads as absent"
+          # The same throw on the unlock cookie was worse than a 500: unlockValid runs outside
+          # the async error path, so one unauthenticated request took the process down and every
+          # artifact on the host with it. Publish a password artifact and aim a malformed unlock
+          # cookie at it, then check the server is still answering.
+          curl -s -o /dev/null -X POST "$BASE/api/artifacts" -H 'Authorization: Bearer ci-test-key' \
+            -H 'Content-Type: application/json' \
+            -d '{"slug":"cookie-crash","content":"<p>locked</p>","frame":false,"visibility":"password","password":"letmein"}'
+          curl -s -o /dev/null --cookie 'au_cookie-crash=%' "$BASE/a/cookie-crash" || true
+          sleep 1
+          kill -0 $setup_pid 2>/dev/null \
+            || { echo "FAIL: one request with a malformed unlock cookie killed the server"; exit 1; }
+          curl -sf "$BASE/healthz" > /dev/null \
+            || { echo "FAIL: the server stopped answering after a malformed unlock cookie"; exit 1; }
+          echo "ok: a malformed unlock cookie does not take the process down"
           # The second claim is the half that matters: this route is unauthenticated, so a 409 is
           # the only thing standing between a booted instance and whoever reaches it next.
           code=$(curl -s -o /tmp/setup-2.json -w '%{http_code}' -X POST "$BASE/api/auth/setup" \

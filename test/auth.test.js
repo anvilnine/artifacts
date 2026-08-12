@@ -418,8 +418,9 @@ test('a session inside its window resolves and one past it does not', async () =
   assert.equal(store.sessionPrincipal(sessionReq(wrongUser)), null);
 });
 
-// A stray percent sign in any cookie made decodeURIComponent throw, which the error handler
-// answered as a 500 on every route that reads one, including the unauthenticated serve path.
+// A stray percent sign in any cookie made decodeURIComponent throw. On the API routes that was a
+// 500. On the serve path it killed the process, because unlockValid runs outside the async error
+// path, so one unauthenticated request took every artifact on the host down with it.
 test('a cookie value that does not decode reads as absent, not as a throw', () => {
   const req = { headers: { cookie: `${SESSION_COOKIE}=%; other=fine` } };
   assert.equal(readCookie(req, SESSION_COOKIE), null);
