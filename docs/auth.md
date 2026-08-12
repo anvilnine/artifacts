@@ -77,8 +77,20 @@ hand edit or a crash mid-write can leave behind. The server skips a record with 
 scopes and names it at boot:
 
 ```
-auth.json: ignoring 1 key record(s) with no hash or no scopes (k_7fa2c1). Those keys return 401 until you delete or re-create them.
+auth.json: ignoring 1 key record(s) with no hash or no scopes ("k_7fa2c1"). Revoke them on the key screen and mint new ones.
 ```
+
+An `expiresAt` the server cannot read is the second way a record dies quietly. Anything that is
+not an ISO date string counts, including a number, an object and a value in the wrong format.
+The key answers `401` from that point on, and the key screen shows it as broken with Revoke as
+the only action:
+
+```
+auth.json: 1 key record(s) carry an expiresAt nothing can read ("k_7fa2c1"). They return 401 from here on.
+```
+
+An expiry that has simply passed is not this. It reads back, the key screen prints the date, and
+the key stops working for the reason it says.
 
 ## A corrupt auth.json
 
@@ -120,6 +132,11 @@ it read at boot, so it would keep using the old admin and the old keys until it 
 | `POST` | `/api/auth/password` | `{ currentPassword, newPassword }` (logged in) |
 
 `POST /api/auth/login` is rate-limited to 10 failures per 15 minutes per client IP (a `429` with `Retry-After` after that); a successful login never consumes budget. Client-IP resolution honors `TRUST_PROXY` — see [rate limiting and the edge](deploy.md#rate-limiting-and-the-edge). Credential routes cap the request body at 16 kB.
+
+A session cookie lasts 30 days from the login that issued it. The expiry is carried in the cookie
+itself, so a cookie that does not name one, or names one the server cannot read as a number, is
+refused rather than treated as a session with no end. The same rule covers capability links and
+unlock cookies.
 
 Changing the password signs out every other admin session on the instance that served the change. The browser making the change gets a fresh cookie and stays signed in, so use it if you think a session cookie leaked. On more than one replica it revokes nothing on its own, and the same goes for revoking a key: see [running multiple replicas](deploy.md#running-multiple-replicas). Capability links for private and password artifacts are signed with a separate secret and keep working; revoke those per artifact with `PATCH {"rotateToken": true}`.
 

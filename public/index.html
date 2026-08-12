@@ -1570,7 +1570,11 @@
 
   function buildItem(a, opts) {
       opts = opts || {};
-      const expired = a.expiresAt && Date.parse(a.expiresAt) <= Date.now();
+      // Same rule as artifactExpired in lib/expiry.js, kept in step by hand: a value the
+      // server cannot read is lapsed, so the row never shows a live artifact the server
+      // answers 410 for. Any change here belongs in both places.
+      const expired = a.expiresAt != null && a.expiresAt !== ''
+        && (typeof a.expiresAt !== 'string' || !(Date.parse(a.expiresAt) > Date.now()));
       const item = document.createElement('div');
       item.className = 'item' + ((a.disabled || expired) ? ' off' : '');
 
@@ -1647,8 +1651,17 @@
 
       const nonPublic = a.visibility === 'private' || a.visibility === 'password';
       const copy = actBtn('Copy', 'copy');
-      copy.title = 'Copy the share link';
+      copy.title = expired
+        ? 'This artifact has expired, so its link no longer opens'
+        : 'Copy the share link';
       copy.addEventListener('click', async () => {
+        // An expired row copies nothing. The link route refuses it too, but a public artifact
+        // never calls the route (the bare URL is the share link), so the row answers for both.
+        if (expired) {
+          flash(copy, 'Expired');
+          toast('“' + a.slug + '” has expired. Clear or extend its expiry before sharing it.', true);
+          return;
+        }
         const ok = await busy(copy, 'Copying…', async () => {
           try {
             // Public: the bare link is the share link. Non-public: mint a fresh capability
@@ -1857,11 +1870,15 @@
 
         menuItem(menu, 'QR code…', '', () => openQr(a));
 
-        menuItem(menu, a.expiresAt ? 'Expiry: ' + a.expiresAt.slice(0, 10) + '…' : 'Expiry…', '', async () => {
+        // A hand-edited meta.json can hold anything here, and the row menu is the screen the
+        // operator opens to clear it. slice() on a number or an object throws inside the fill
+        // callback, which stops the menu at this line: no Expiry, no Delete, nothing below.
+        const expiry = typeof a.expiresAt === 'string' ? a.expiresAt : '';
+        menuItem(menu, expiry ? 'Expiry: ' + expiry.slice(0, 10) + '…' : 'Expiry…', '', async () => {
           const v = await dialog({
             title: 'Expiry for “' + a.slug + '”',
             body: 'e.g. 2026-08-01 or 2026-08-01T12:00. Leave empty to clear.',
-            input: true, value: a.expiresAt ? a.expiresAt.slice(0, 16) : '',
+            input: true, value: expiry.slice(0, 16),
           });
           if (v === null) return;
           patchItem(a, { expiresAt: v.trim() || null }, { expiresAt: v.trim() || undefined });
@@ -2029,8 +2046,9 @@
     const bits = [k.prefix + '…'];
     if (k.expiresAt) bits.push('expires ' + k.expiresAt.slice(0, 10));
     bits.push(k.lastUsedAt ? ('used ' + k.lastUsedAt.slice(0, 10)) : 'never used');
-    // A broken record is missing the hash or the scopes the bearer path reads, so it answers
-    // 401 no matter what. Enabling it would change nothing; revoking it is the whole fix.
+    // A broken record is missing the hash or the scopes the bearer path reads, or carries an
+    // expiresAt nothing can read. Either way it answers 401 no matter what: enabling it would
+    // change nothing, and revoking it is the whole fix.
     sub.textContent = k.broken ? 'always answers 401. Revoke it and mint a new key.' : bits.join(' · ');
     meta.append(name, sub);
 
@@ -2047,7 +2065,12 @@
     del.addEventListener('click', async () => {
       const ok = await dialog({
         title: 'Revoke “' + k.name + '”?',
-        body: 'Any CLI or MCP client using this key stops working.',
+        // The row already told the operator this key answers 401 for everything. Warning them
+        // that clients will stop working reads as an argument against the action they were
+        // just sent here to take.
+        body: k.broken
+          ? 'This key already answers 401 for every request. Revoking removes the record.'
+          : 'Any CLI or MCP client using this key stops working.',
         confirmText: 'Revoke', danger: true,
       });
       if (!ok) return;

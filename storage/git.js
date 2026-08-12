@@ -17,7 +17,7 @@ import path from 'node:path';
 import git from 'isomorphic-git';
 import http from 'isomorphic-git/http/node';
 
-import { createAt } from './local.js';
+import { createAt, isScratchFile } from './local.js';
 
 function requireEnv(name) {
   const v = process.env[name];
@@ -165,8 +165,15 @@ export async function create() {
   const withLock = createMutex();
 
   // Stage every add/modify/delete under artifacts/ (git.add alone does not stage deletes).
+  // A put that is still in flight has a scratch file on disk holding the whole record it is
+  // writing; committing that would push a second copy of a view-password hash to the remote and
+  // leave it in history after the artifact itself is deleted.
   async function stageAll() {
-    const matrix = await git.statusMatrix({ fs, dir: workDir, filter: (f) => f.startsWith('artifacts/') });
+    const matrix = await git.statusMatrix({
+      fs,
+      dir: workDir,
+      filter: (f) => f.startsWith('artifacts/') && !isScratchFile(f.slice(f.lastIndexOf('/') + 1)),
+    });
     let changes = 0;
     for (const [filepath, head, workdir, stage] of matrix) {
       if (head === workdir && workdir === stage) continue; // unchanged

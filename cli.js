@@ -5,6 +5,8 @@ import { parseArgs } from 'node:util';
 
 import AdmZip from 'adm-zip';
 
+import { artifactExpired } from './lib/expiry.js';
+
 const USAGE = `artifacts — publish to a self-hosted artifacts instance
 
 Usage:
@@ -196,7 +198,12 @@ switch (command) {
     for (const a of artifacts) {
       const frameFlag = a.frame === true ? 'frame:on' : a.frame === false ? 'frame:off' : null;
       const visFlag = a.visibility === 'private' ? 'private' : a.visibility === 'password' ? 'password' : null;
-      const flags = [a.disabled && 'disabled', visFlag, frameFlag, a.expiresAt && `expires ${a.expiresAt}`].filter(Boolean);
+      // The row printed an expiry and never said whether it had passed, so an artifact
+      // answering 410 listed the same as a live one, and a stored value that is not a string
+      // printed as "expires [object Object]". Same rule the server serves by.
+      const expired = artifactExpired(a);
+      const expiry = expired ? 'expired' : typeof a.expiresAt === 'string' && `expires ${a.expiresAt}`;
+      const flags = [a.disabled && 'disabled', visFlag, frameFlag, expiry].filter(Boolean);
       const project = a.project ? `@${a.project}` : '';
       const tags = a.tags?.length ? `#${a.tags.join(' #')}` : '';
       const meta = [project, tags].filter(Boolean).join(' ');
@@ -301,10 +308,12 @@ switch (command) {
     if (sub === 'list') {
       const keys = await apiJson('GET', '/api/keys');
       for (const k of keys) {
-        const flags = [
-          // A record missing the hash or the scopes the bearer path reads. It answers 401
-          // whatever you do with it, so say so here as well as on the dashboard.
-          k.broken && 'broken, always answers 401',
+        // A record missing the hash or the scopes the bearer path reads, or carrying an
+        // expiresAt nothing can read. It answers 401 whatever you do with it, so say that
+        // and nothing else: the dashboard drops the rest of the line for the same reason,
+        // and "expires garbage" next to "always answers 401" reads like a working key with
+        // an odd date on it.
+        const flags = k.broken ? ['broken, always answers 401'] : [
           k.disabled && 'disabled',
           k.expiresAt && `expires ${k.expiresAt.slice(0, 10)}`,
           k.lastUsedAt ? `used ${k.lastUsedAt.slice(0, 10)}` : 'never used',

@@ -132,6 +132,53 @@ jobs:
             if (a.admin.username !== "ci-claimer") { console.error("FAIL: stored admin is " + a.admin.username); process.exit(1); }
           '
           echo "ok: an unclaimed instance is claimable, signs the claimer in, and writes both secrets"
+          # adminSecret is on disk and this job has it, so a session payload can be signed here
+          # the way the server signs one. That is the only way to reach sessionPrincipal with a
+          # payload the server would never mint. A cookie with no exp used to skip the lapse
+          # check and authenticate as the admin for good (T1.2.23).
+          node -e '
+            const crypto = require("crypto");
+            const fs = require("fs");
+            const a = JSON.parse(fs.readFileSync(process.env.DATA_DIR + "/artifacts/auth.json", "utf8"));
+            const sign = (payload) => {
+              const body = Buffer.from(JSON.stringify(payload)).toString("base64url");
+              const sig = crypto.createHmac("sha256", a.adminSecret).update(body).digest("base64url");
+              return body + "." + sig;
+            };
+            fs.writeFileSync("/tmp/forged-noexp.cookie", sign({ sub: "ci-claimer" }));
+            fs.writeFileSync("/tmp/forged-nullexp.cookie", sign({ sub: "ci-claimer", exp: null }));
+            fs.writeFileSync("/tmp/forged-live.cookie", sign({ sub: "ci-claimer", exp: Date.now() + 600000 }));
+          '
+          for shape in noexp nullexp; do
+            code=$(curl -s -o /dev/null -w '%{http_code}' \
+              --cookie "artifacts_session=$(cat /tmp/forged-$shape.cookie)" "$BASE/api/keys")
+            [ "$code" = "401" ] || { echo "FAIL: a session cookie with a $shape payload answered $code on /api/keys, expected 401"; exit 1; }
+          done
+          # The control: same signature path, a real exp, still admitted. Without it the two
+          # checks above would pass on a server that refuses every session cookie.
+          code=$(curl -s -o /dev/null -w '%{http_code}' \
+            --cookie "artifacts_session=$(cat /tmp/forged-live.cookie)" "$BASE/api/keys")
+          [ "$code" = "200" ] || { echo "FAIL: a session cookie with a live exp answered $code on /api/keys, expected 200"; exit 1; }
+          echo "ok: a session cookie with no usable exp is refused, and one with a live exp is not"
+          # A cookie value the browser sends back can hold a stray percent sign, which used to
+          # throw inside decodeURIComponent and reach the error handler as a 500.
+          code=$(curl -s -o /dev/null -w '%{http_code}' --cookie 'artifacts_session=%' "$BASE/api/auth/session")
+          [ "$code" = "200" ] || { echo "FAIL: a malformed session cookie answered $code, expected 200"; exit 1; }
+          echo "ok: a session cookie that does not decode reads as absent"
+          # The same throw on the unlock cookie was worse than a 500: unlockValid runs outside
+          # the async error path, so one unauthenticated request took the process down and every
+          # artifact on the host with it. Publish a password artifact and aim a malformed unlock
+          # cookie at it, then check the server is still answering.
+          curl -s -o /dev/null -X POST "$BASE/api/artifacts" -H 'Authorization: Bearer ci-test-key' \
+            -H 'Content-Type: application/json' \
+            -d '{"slug":"cookie-crash","content":"<p>locked</p>","frame":false,"visibility":"password","password":"letmein"}'
+          curl -s -o /dev/null --cookie 'au_cookie-crash=%' "$BASE/a/cookie-crash" || true
+          sleep 1
+          kill -0 $setup_pid 2>/dev/null \
+            || { echo "FAIL: one request with a malformed unlock cookie killed the server"; exit 1; }
+          curl -sf "$BASE/healthz" > /dev/null \
+            || { echo "FAIL: the server stopped answering after a malformed unlock cookie"; exit 1; }
+          echo "ok: a malformed unlock cookie does not take the process down"
           # The second claim is the half that matters: this route is unauthenticated, so a 409 is
           # the only thing standing between a booted instance and whoever reaches it next.
           code=$(curl -s -o /tmp/setup-2.json -w '%{http_code}' -X POST "$BASE/api/auth/setup" \
@@ -227,7 +274,14 @@ jobs:
             const fs = require("fs");
             const p = process.env.DATA_DIR + "/artifacts/auth.json";
             const a = JSON.parse(fs.readFileSync(p, "utf8"));
-            a.keys = [null, "ak_live_oops", { id: "k_broken", name: "broken" }];
+            a.keys = [
+              null,
+              "ak_live_oops",
+              { id: "k_broken", name: "broken" },
+              // Whole record, one unreadable field. The bearer path 401s it and the key
+              // screen used to draw it as a healthy key with no expiry (T1.2.21).
+              { id: "k_expiry", name: "junk expiry", prefix: "ak_live_j", hash: "x".repeat(64), scopes: ["publish"], expiresAt: "garbage" },
+            ];
             fs.writeFileSync(p, JSON.stringify(a, null, 2));
           '
           node server.js &
@@ -238,6 +292,18 @@ jobs:
           grep -q '"broken":true' /tmp/keys.json || { echo "FAIL: broken record not flagged"; cat /tmp/keys.json; exit 1; }
           if grep -q '"id":null' /tmp/keys.json; then echo "FAIL: unaddressable entry listed"; cat /tmp/keys.json; exit 1; fi
           echo "ok: GET /api/keys lists the broken record and skips the unaddressable entries"
+          # Per record, because a single grep for "broken":true passes on k_broken alone and
+          # would say nothing about the record whose only fault is the expiry.
+          node -e '
+            const rows = JSON.parse(require("fs").readFileSync("/tmp/keys.json", "utf8"));
+            const row = rows.find((k) => k.id === "k_expiry");
+            if (!row) { console.error("FAIL: k_expiry is not listed", rows); process.exit(1); }
+            if (row.broken !== true) { console.error("FAIL: k_expiry is not flagged broken", row); process.exit(1); }
+            console.log("ok: a record with an unreadable expiresAt lists as broken");
+          '
+          code=$(curl -s -o /dev/null -w '%{http_code}' -X DELETE -H "$AUTH" http://localhost:3000/api/keys/k_expiry)
+          [ "$code" = "200" ] || { echo "FAIL: DELETE /api/keys/k_expiry -> $code"; exit 1; }
+          echo "ok: the operator can revoke it without hand-editing auth.json"
           code=$(curl -s -o /dev/null -w '%{http_code}' -X PATCH -H "$AUTH" -H 'Content-Type: application/json' \
             -d '{"disabled":true}' http://localhost:3000/api/keys/k_broken)
           [ "$code" = "200" ] || { echo "FAIL: PATCH /api/keys/k_broken -> $code"; exit 1; }
@@ -245,6 +311,45 @@ jobs:
           [ "$code" = "200" ] || { echo "FAIL: DELETE /api/keys/k_broken -> $code"; exit 1; }
           if curl -s -H "$AUTH" http://localhost:3000/api/keys | grep -q k_broken; then echo "FAIL: revoked record still listed"; exit 1; fi
           echo "ok: the broken record patches and revokes from the key screen"
+      - name: An artifact whose expiresAt cannot be read serves 410
+        run: |
+          # parseExpiresAt refuses a non-ISO expiresAt on the way in, so the only route to this
+          # record is the one an operator takes: a hand edit, or a restore of an older backup.
+          # Plant it between two boots the way the auth.json step above does, then drive the
+          # real serve path rather than trusting the unit test on lib/expiry.js. Visibility is
+          # explicit because DEFAULT_VISIBILITY is private, and a private artifact answers 404
+          # rather than 410, which would prove nothing either way.
+          AUTH='Authorization: Bearer ci-test-key'
+          curl -s -o /dev/null -X POST http://localhost:3000/api/artifacts -H "$AUTH" \
+            -H 'Content-Type: application/json' \
+            -d '{"slug":"expiry-junk","content":"<p>still here</p>","frame":false,"visibility":"public"}'
+          code=$(curl -s -o /dev/null -w '%{http_code}' http://localhost:3000/a/expiry-junk)
+          [ "$code" = "200" ] || { echo "FAIL: the artifact did not publish (got $code)"; exit 1; }
+          pkill -f 'node server.js' || true
+          sleep 1
+          node -e '
+            const fs = require("fs");
+            const p = process.env.DATA_DIR + "/artifacts/expiry-junk/meta.json";
+            const m = JSON.parse(fs.readFileSync(p, "utf8"));
+            m.expiresAt = "garbage";
+            fs.writeFileSync(p, JSON.stringify(m, null, 2));
+          '
+          node server.js &
+          for i in $(seq 1 20); do curl -sf http://localhost:3000/healthz && break; sleep 0.5; done
+          curl -sf http://localhost:3000/healthz > /dev/null \
+            || { echo "FAIL: the server did not come back up after the restart"; exit 1; }
+          code=$(curl -s -o /dev/null -w '%{http_code}' http://localhost:3000/a/expiry-junk)
+          [ "$code" = "410" ] || { echo "FAIL: /a/expiry-junk -> $code, expected 410"; exit 1; }
+          code=$(curl -s -o /dev/null -w '%{http_code}' http://localhost:3000/a/expiry-junk/source)
+          [ "$code" = "410" ] || { echo "FAIL: /a/expiry-junk/source -> $code, expected 410"; exit 1; }
+          echo "ok: an unreadable expiresAt serves 410 on both serve paths"
+          # And the operator can clear it from the dashboard without touching the file again.
+          code=$(curl -s -o /dev/null -w '%{http_code}' -X PATCH -H "$AUTH" -H 'Content-Type: application/json' \
+            -d '{"expiresAt":null}' http://localhost:3000/api/artifacts/expiry-junk)
+          [ "$code" = "200" ] || { echo "FAIL: PATCH clearing the expiry -> $code"; exit 1; }
+          code=$(curl -s -o /dev/null -w '%{http_code}' http://localhost:3000/a/expiry-junk)
+          [ "$code" = "200" ] || { echo "FAIL: the artifact did not come back after clearing the expiry (got $code)"; exit 1; }
+          echo "ok: clearing the expiry over the API brings the artifact back"
 
   smoke-s3:
     runs-on: ubuntu-latest

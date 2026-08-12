@@ -105,6 +105,17 @@ Capability links are unaffected by all of it. They are signed with `sessionSecre
 
 The global config behaves like the auth record, for the same reason. See [storage backends](#storage-backends).
 
+### Two writes to one artifact at the same time
+
+Artifact writes merge, the way auth writes do. A publish, replace, zip deploy, duplicate, patch or
+delete reloads that slug's `meta.json` before it writes. One instance runs the writes to a single
+slug one at a time, so two one-field `PATCH`es to one artifact both land.
+
+On a fleet the one-request window applies again. Two replicas writing to one slug inside it can
+lose a field, and a rename and a publish aiming at one destination can both pass their collision
+check, which leaves one of them serving bytes under the other's record. Neither case can leave a
+`meta.json` that does not parse: a `put` replaces the whole object in one step on every backend.
+
 ## Storage backends
 
 By default artifacts are plain files under `DATA_DIR` — back up that directory and you have

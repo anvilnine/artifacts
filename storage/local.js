@@ -2,6 +2,7 @@
 // `${DATA_DIR}/artifacts/<slug>/...`, exactly as the server always has — so an existing
 // `/data` volume keeps working with zero migration.
 
+import { randomUUID } from 'node:crypto';
 import fs from 'node:fs/promises';
 import { createReadStream } from 'node:fs';
 import path from 'node:path';
@@ -10,6 +11,57 @@ import { assertSafeKey, UnsafeKeyError } from './index.js';
 
 function isMissing(err) {
   return err && (err.code === 'ENOENT' || err.code === 'ENOTDIR');
+}
+
+// The mode fs.writeFile would have created a new file with. Read once at load: the no-argument
+// process.umask() is implemented as umask(0) followed by umask(old), so calling it per write
+// leaves a window where the mask is 0 and any directory another request creates in that window
+// comes out world-writable. Publishing hard enough produced 0777 artifact directories, and
+// meta.json lives in one of those.
+const DEFAULT_FILE_MODE = 0o666 & ~process.umask();
+
+// The scratch file put() renames into place: a dot, the target's name, a uuid, `.tmp`.
+// Matched rather than guessed at, so a published file that happens to end in `.tmp` is never
+// mistaken for one. A killed process leaves one behind holding the whole record it was writing,
+// which for meta.json includes the view-password hash, so sweepScratch clears them at boot and
+// copySlug and the git backend refuse to carry them anywhere.
+const SCRATCH_RE = /^\..+\.[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.tmp$/;
+
+export function isScratchFile(name) {
+  return SCRATCH_RE.test(name);
+}
+
+// The root and one level down, which is where auth.json and every meta.json live. Not a full
+// recursive walk: that would read every file of every zip site before the port opens, and it
+// would follow a symlinked directory out of the storage root. Dirent.isDirectory() is false for
+// a symlink, so this descends into real directories only.
+async function sweepScratch(root) {
+  let swept = 0;
+  const clear = async (dir, entries) => {
+    for (const entry of entries) {
+      if (entry.isFile() && isScratchFile(entry.name)) {
+        await fs.rm(path.join(dir, entry.name), { force: true }).catch(() => {});
+        swept++;
+      }
+    }
+  };
+  let top;
+  try {
+    top = await fs.readdir(root, { withFileTypes: true });
+  } catch (err) {
+    if (isMissing(err)) return;
+    throw err;
+  }
+  await clear(root, top);
+  for (const entry of top) {
+    if (!entry.isDirectory()) continue;
+    const dir = path.join(root, entry.name);
+    const inner = await fs.readdir(dir, { withFileTypes: true }).catch(() => []);
+    await clear(dir, inner);
+  }
+  if (swept) {
+    console.log(`storage: cleared ${swept} half-written file(s) left behind by a previous run.`);
+  }
 }
 
 export async function create() {
@@ -26,6 +78,7 @@ export async function createAt(root) {
   // Resolve the root through any symlinks once (e.g. /tmp -> /private/tmp) so containment
   // checks compare real paths against a real base.
   const realRoot = await fs.realpath(root);
+  await sweepScratch(realRoot);
 
   // Map a validated key to an absolute path and confirm it stays within `root`. The guard
   // already rejects `..`/absolute/backslash segments; this is belt-and-suspenders against
@@ -95,10 +148,41 @@ export async function createAt(root) {
       return { stream: createReadStream(abs), size: st.size };
     },
 
+    // Write the bytes to a scratch file beside the target, then rename it into place.
+    // Rename within one filesystem swaps the whole object at once, so a reader gets either
+    // all of the old bytes or all of the new ones. A bare writeFile let two writers to one
+    // key interleave: the shorter write landed inside the longer one, meta.json stopped
+    // parsing, and the artifact dropped out of the list and answered 404 on its own DELETE.
+    // The random name keeps two writers off each other's scratch file and off any name a
+    // caller could ask for. s3 and the SQL stores need none of this: one PUT and one upsert
+    // are already whole-object writes.
     async put(key, data) {
       const abs = resolveKey(key);
-      await fs.mkdir(path.dirname(abs), { recursive: true });
-      await fs.writeFile(abs, data);
+      const dir = path.dirname(abs);
+      await fs.mkdir(dir, { recursive: true });
+      const tmp = path.join(dir, `.${path.basename(abs)}.${randomUUID()}.tmp`);
+      try {
+        // 'wx' refuses an existing path, so the write can never follow something planted at the
+        // scratch name. 0600 while it is in flight, because it holds the whole record.
+        await fs.writeFile(tmp, data, { flag: 'wx', mode: 0o600 });
+        // A rename brings a new inode, so it also brings a new mode. writeFile truncated the
+        // object in place and kept whatever the file already had, which is what made the
+        // `chmod 600 auth.json` in docs/deploy.md stick. Carry the old mode over, and fall back
+        // to what writeFile would have created the file with.
+        let current = null;
+        try {
+          current = await fs.stat(abs);
+        } catch (err) {
+          // Only "there is nothing there yet" means use the default. Anything else (a permission
+          // problem on the directory) would quietly hand a hardened file back at 0644.
+          if (!isMissing(err)) throw err;
+        }
+        await fs.chmod(tmp, current ? current.mode & 0o7777 : DEFAULT_FILE_MODE);
+        await fs.rename(tmp, abs);
+      } catch (err) {
+        await fs.rm(tmp, { force: true }).catch(() => {});
+        throw err;
+      }
     },
 
     async listMetas() {
@@ -130,9 +214,11 @@ export async function createAt(root) {
       const absSrc = resolveKey(srcSlug);
       const absDst = resolveKey(dstSlug);
       const skipMeta = path.join(absSrc, 'meta.json');
+      // Scratch files are skipped for the same reason meta.json is: one carries the source's
+      // whole record, view-password hash included, and a copy is never allowed to inherit it.
       await fs.cp(absSrc, absDst, {
         recursive: true,
-        filter: (source) => source !== skipMeta,
+        filter: (source) => source !== skipMeta && !isScratchFile(path.basename(source)),
       });
     },
 
