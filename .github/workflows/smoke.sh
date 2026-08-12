@@ -674,6 +674,15 @@ curl -sf -X PATCH "$BASE/api/artifacts/cap-one" -H "$AUTH" -H "$JSON" -d '{"rota
 code=$(curl -s -o /dev/null -w '%{http_code}' -b /tmp/capjar "$BASE/a/cap-one?raw=1")
 expect_code 404 "$code" "rotate invalidates live cookie"
 
+# a lapsed artifact mints no link: the dashboard's Copy button calls this route, so a 200 here
+# is an operator handing out a URL that answers 410 or 404 on the first click
+curl -sf -X PATCH "$BASE/api/artifacts/cap-one" -H "$AUTH" -H "$JSON" -d '{"expiresAt":"2020-01-01"}' > /dev/null
+code=$(curl -s -o /dev/null -w '%{http_code}' -H "$AUTH" "$BASE/api/artifacts/cap-one/link")
+expect_code 410 "$code" "link route refuses an expired artifact"
+curl -sf -X PATCH "$BASE/api/artifacts/cap-one" -H "$AUTH" -H "$JSON" -d '{"expiresAt":null}' > /dev/null
+code=$(curl -s -o /dev/null -w '%{http_code}' -H "$AUTH" "$BASE/api/artifacts/cap-one/link")
+expect_code 200 "$code" "link route mints once the expiry is cleared"
+
 # oracle uniformity: a missing slug and a locked-private slug return identical 404 bodies
 b_missing=$(curl -s "$BASE/a/does-not-exist-zzz")
 b_locked=$(curl -s "$BASE/a/cap-one")

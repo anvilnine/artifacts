@@ -1625,8 +1625,17 @@
 
       const nonPublic = a.visibility === 'private' || a.visibility === 'password';
       const copy = actBtn('Copy', 'copy');
-      copy.title = 'Copy the share link';
+      copy.title = expired
+        ? 'This artifact has expired, so its link no longer opens'
+        : 'Copy the share link';
       copy.addEventListener('click', async () => {
+        // An expired row copies nothing. The link route refuses it too, but a public artifact
+        // never calls the route (the bare URL is the share link), so the row answers for both.
+        if (expired) {
+          flash(copy, 'Expired');
+          toast('“' + a.slug + '” has expired. Clear or extend its expiry before sharing it.', true);
+          return;
+        }
         const ok = await busy(copy, 'Copying…', async () => {
           try {
             // Public: the bare link is the share link. Non-public: mint a fresh capability
