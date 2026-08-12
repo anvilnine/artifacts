@@ -1897,7 +1897,7 @@ function createMcpServer(scopes = SCOPES) {
     {
       title: 'List artifacts',
       description:
-        'List all published artifacts. Each entry carries slug, type, title, createdAt, updatedAt, tags, and whichever of project, expiresAt, frame, visibility, disabled, files and hasPassword the artifact has set. A public artifact has no visibility field at all. No passwords or tokens. Pass tag and/or project to filter.',
+        'List all published artifacts. Each entry carries slug, type, title, createdAt, updatedAt, tags, and whichever of project, expiresAt, frame, visibility, disabled, files, target and hasPassword the artifact has set. A public artifact has no visibility field at all. A redirect carries target, the URL its 301 points at, unless it was published before targets were stored on the artifact. No passwords or tokens. Pass tag and/or project to filter.',
       inputSchema: {
         tag: z.string().optional().describe('Only return artifacts with this tag'),
         project: z.string().optional().describe('Only return artifacts in this project'),
