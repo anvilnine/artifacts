@@ -1969,7 +1969,12 @@
     del.addEventListener('click', async () => {
       const ok = await dialog({
         title: 'Revoke “' + k.name + '”?',
-        body: 'Any CLI or MCP client using this key stops working.',
+        // The row already told the operator this key answers 401 for everything. Warning them
+        // that clients will stop working reads as an argument against the action they were
+        // just sent here to take.
+        body: k.broken
+          ? 'This key already answers 401 for every request. Revoking removes the record.'
+          : 'Any CLI or MCP client using this key stops working.',
         confirmText: 'Revoke', danger: true,
       });
       if (!ok) return;

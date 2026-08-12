@@ -8,6 +8,7 @@ import {
   AuthFileError,
   capTtlDays,
   hashKey,
+  keyExpired,
   publicKey,
   signSession,
 } from '../lib/auth.js';
@@ -286,9 +287,13 @@ test('publicKey drops timestamps and an id that are not strings', () => {
 // which reads as "no expiry", and "garbage" reads as an expiry date. The operator's loop was
 // key 401s, open the key screen, see a healthy key, press Disable, nothing changes.
 test('publicKey flags a record whose expiresAt cannot be read', () => {
-  for (const junk of ['garbage', '2026-13-45', {}, true, []]) {
+  // The last three are the ones Date.parse reads after stringifying: 2020 and 0 become years,
+  // and a one-element array becomes the string inside it. All three are past dates, so
+  // keyExpired already rejected the key while publicKey drew it as a key with no expiry.
+  for (const junk of ['garbage', '2026-13-45', {}, true, [], 2020, 0, ['2020-01-01']]) {
     const row = publicKey({ ...goodKey(), expiresAt: junk });
     assert.equal(row.broken, true, `${JSON.stringify(junk)} should read as broken`);
+    assert.equal(keyExpired({ expiresAt: junk }), true, `${JSON.stringify(junk)} should also 401`);
   }
 });
 

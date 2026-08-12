@@ -77,8 +77,20 @@ hand edit or a crash mid-write can leave behind. The server skips a record with 
 scopes and names it at boot:
 
 ```
-auth.json: ignoring 1 key record(s) with no hash or no scopes (k_7fa2c1). Those keys return 401 until you delete or re-create them.
+auth.json: ignoring 1 key record(s) with no hash or no scopes ("k_7fa2c1"). Revoke them on the key screen and mint new ones.
 ```
+
+An `expiresAt` the server cannot read is the second way a record dies quietly. Anything that is
+not an ISO date string counts, including a number, an object and a value in the wrong format.
+The key answers `401` from that point on, and the key screen shows it as broken with Revoke as
+the only action:
+
+```
+auth.json: 1 key record(s) carry an expiresAt nothing can read ("k_7fa2c1"). They return 401 from here on.
+```
+
+An expiry that has simply passed is not this. It reads back, the key screen prints the date, and
+the key stops working for the reason it says.
 
 ## A corrupt auth.json
 
