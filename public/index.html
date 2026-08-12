@@ -1544,7 +1544,10 @@
 
   function buildItem(a, opts) {
       opts = opts || {};
-      const expired = a.expiresAt && Date.parse(a.expiresAt) <= Date.now();
+      // Same rule as artifactExpired in lib/expiry.js: a value the server cannot read is
+      // lapsed, so the row does not show a live artifact the server answers 410 for.
+      const expired = a.expiresAt != null && a.expiresAt !== ''
+        && !(Date.parse(a.expiresAt) > Date.now());
       const item = document.createElement('div');
       item.className = 'item' + ((a.disabled || expired) ? ' off' : '');
 

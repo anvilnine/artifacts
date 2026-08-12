@@ -33,6 +33,7 @@ import {
 } from './lib/auth.js';
 import { createConfigStore } from './lib/config.js';
 import { ApiError } from './lib/errors.js';
+import { artifactExpired } from './lib/expiry.js';
 import { qrPng, qrSvg } from './lib/qr.js';
 import { parseRedirectTarget, resolveRedirectTarget } from './lib/redirect.js';
 
@@ -565,9 +566,9 @@ function parseExpiresAt(value) {
   return new Date(value).toISOString();
 }
 
-function isExpired(meta) {
-  return Boolean(meta.expiresAt && Date.parse(meta.expiresAt) <= Date.now());
-}
+// The rule itself is in lib/expiry.js, where a unit test can reach the records a request
+// cannot make. The five call sites below keep the short local name.
+const isExpired = artifactExpired;
 
 async function saveArtifact({ content, type = 'html', slug, title, expiresAt, frame, tags, project, visibility, password }, { replace = false } = {}) {
   if (typeof content !== 'string' || !content.trim()) {
