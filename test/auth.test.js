@@ -9,6 +9,8 @@ import {
   capTtlDays,
   hashKey,
   publicKey,
+  readCookie,
+  SESSION_COOKIE,
   signSession,
 } from '../lib/auth.js';
 
@@ -37,16 +39,25 @@ function fakeReq(token) {
 }
 
 // Captures what the middleware answered: a status + body, or the fact that it called next().
+// `cookie` is here so a test can mint a session through issueSession rather than hand-signing
+// one, which is the only way a change to what issueSession stamps can fail a test.
 function fakeRes() {
   const out = { code: null, body: null };
+  // Kept off `out`, which callGuard spreads into a deep-equal assertion.
+  const cookies = {};
   return {
     out,
+    cookies,
     status(code) {
       out.code = code;
       return this;
     },
     json(body) {
       out.body = body;
+      return this;
+    },
+    cookie(name, value) {
+      cookies[name] = value;
       return this;
     },
   };
@@ -350,6 +361,73 @@ test('a freshly minted capability token still verifies', async () => {
     secret,
   );
   assert.equal(store.verifyCapToken(lapsed, 'cap-one', 0), false);
+});
+
+async function sessionStore() {
+  const store = await createAuthStore(
+    stubStorage({
+      version: 1,
+      admin: { username: 'ci-admin', hash: 'not-checked-here' },
+      adminSecret: 'a'.repeat(64),
+      keys: [],
+    }),
+    { apiKey: 'bootstrap', baseUrl: 'http://localhost:3000' },
+  );
+  return { store, secret: store.auth.adminSecret };
+}
+
+const sessionReq = (token) => ({ headers: { cookie: `${SESSION_COOKIE}=${encodeURIComponent(token)}` } });
+
+// issueSession always stamps a numeric exp, and forging a payload needs adminSecret, so nothing
+// reaches this today. It is the session half of the capability-token bug T1.2.12 closed, and it
+// reopens the moment the TTL becomes configurable, which is where a junk value would come from.
+test('a session payload with no numeric exp is refused', async () => {
+  const { store, secret } = await sessionStore();
+
+  for (const payload of [
+    { sub: 'ci-admin' },
+    { sub: 'ci-admin', exp: null },
+    { sub: 'ci-admin', exp: String(Date.now() + 60_000) },
+    { sub: 'ci-admin', exp: {} },
+  ]) {
+    const token = signSession(payload, secret);
+    assert.equal(
+      store.sessionPrincipal(sessionReq(token)),
+      null,
+      `exp ${JSON.stringify(payload.exp)} should not resolve`,
+    );
+  }
+});
+
+// The refusal has to leave the normal path alone. The live case goes through issueSession
+// rather than hand-signing a payload, so a change to what issueSession stamps fails here
+// instead of passing a test that mints its own cookie and never notices.
+test('a session inside its window resolves and one past it does not', async () => {
+  const { store, secret } = await sessionStore();
+
+  const res = fakeRes();
+  await store.issueSession(res, 'ci-admin');
+  const live = store.sessionPrincipal(sessionReq(res.cookies[SESSION_COOKIE]));
+  assert.equal(live?.admin, true);
+  assert.equal(live?.session, true);
+
+  const lapsed = signSession({ sub: 'ci-admin', exp: Date.now() - 1000 }, secret);
+  assert.equal(store.sessionPrincipal(sessionReq(lapsed)), null);
+
+  const wrongUser = signSession({ sub: 'someone-else', exp: Date.now() + 60_000 }, secret);
+  assert.equal(store.sessionPrincipal(sessionReq(wrongUser)), null);
+});
+
+// A stray percent sign in any cookie made decodeURIComponent throw. On the API routes that was a
+// 500. On the serve path it killed the process, because unlockValid runs outside the async error
+// path, so one unauthenticated request took every artifact on the host down with it.
+test('a cookie value that does not decode reads as absent, not as a throw', () => {
+  const req = { headers: { cookie: `${SESSION_COOKIE}=%; other=fine` } };
+  assert.equal(readCookie(req, SESSION_COOKIE), null);
+  assert.equal(readCookie(req, 'other'), 'fine');
+
+  assert.equal(readCookie({ headers: { cookie: `${SESSION_COOKIE}=%E0%A4%A` } }, SESSION_COOKIE), null);
+  assert.equal(readCookie({ headers: { cookie: `${SESSION_COOKIE}=a%20b` } }, SESSION_COOKIE), 'a b');
 });
 
 // Two stores over one storage stub are two replicas over one auth.json: each holds the record
