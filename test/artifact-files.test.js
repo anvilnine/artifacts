@@ -4,9 +4,23 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { ownedKeys, staleKeys, SOURCE_EXT } from '../lib/artifact-files.js';
+import { dropStaleObjects, ownedKeys, staleKeys, SOURCE_EXT } from '../lib/artifact-files.js';
 
 const TYPES = ['html', 'jsx', 'tsx', 'md', 'redirect'];
+
+// Minimal stand-in for storage/*.js: dropStaleObjects only calls delete, so recording the keys
+// it asks for is the whole contract. `fails` makes that delete throw, which is the branch that
+// decides whether a failed cleanup can sink a write that already landed.
+function stubStorage({ fails = false } = {}) {
+  const asked = [];
+  return {
+    asked,
+    async delete(key) {
+      asked.push(key);
+      if (fails) throw new Error('backend said no');
+    },
+  };
+}
 
 test('each type owns the objects the serve path reads back', () => {
   assert.deepEqual(ownedKeys('s', 'html'), ['s/index.html', 's/source.html']);
@@ -84,4 +98,59 @@ test('a type with no source extension drops nothing', () => {
   assert.equal(SOURCE_EXT.zip, undefined);
   assert.deepEqual(staleKeys('s', 'zip', 'html'), []);
   assert.deepEqual(ownedKeys('s', 'zip'), []);
+});
+
+// A meta.json edited by hand can carry any string as its type. A plain SOURCE_EXT[type] lookup
+// walks the prototype, so "constructor" built `s/source.function Object() { [native code] }`.
+test('a type name off the prototype chain builds no key', () => {
+  for (const type of ['constructor', 'toString', '__proto__', 'hasOwnProperty', 'valueOf']) {
+    assert.deepEqual(ownedKeys('s', type), [], type);
+    assert.deepEqual(staleKeys('s', type, 'html'), [], `${type} to html`);
+  }
+});
+
+// The link the rest of the file does not cover: that something actually calls delete. No test
+// boots server.js, so while the loop lived inline there it was provably dead weight - replacing
+// it with `for (const key of [])` left every unit test and the whole smoke suite green, on all
+// five backends, because a stale object is not reachable over HTTP.
+test('a conversion asks the backend to drop every stale key', async () => {
+  const storage = stubStorage();
+  const dropped = await dropStaleObjects(storage, 'conv', 'html', 'redirect');
+  assert.deepEqual(storage.asked, ['conv/index.html', 'conv/source.html']);
+  assert.deepEqual(dropped, ['conv/index.html', 'conv/source.html']);
+});
+
+test('a write that does not change the type asks the backend for nothing', async () => {
+  const storage = stubStorage();
+  assert.deepEqual(await dropStaleObjects(storage, 'conv', 'md', 'md'), []);
+  assert.deepEqual(await dropStaleObjects(storage, 'conv', undefined, 'md'), []);
+  assert.deepEqual(storage.asked, []);
+});
+
+test('every direction asks for exactly the keys staleKeys names', async () => {
+  for (const from of TYPES) {
+    for (const to of TYPES) {
+      const storage = stubStorage();
+      await dropStaleObjects(storage, 'conv', from, to);
+      assert.deepEqual(storage.asked, staleKeys('conv', from, to), `${from} to ${to}`);
+    }
+  }
+});
+
+// The write has already landed and meta already names the new type, so a backend that refuses
+// the cleanup must not turn a successful replace into a 500 the caller would retry. It still
+// tries every key rather than stopping at the first failure.
+test('a delete that throws is swallowed and does not stop the rest', async () => {
+  const storage = stubStorage({ fails: true });
+  const dropped = await dropStaleObjects(storage, 'conv', 'html', 'redirect');
+  assert.deepEqual(storage.asked, ['conv/index.html', 'conv/source.html']);
+  assert.deepEqual(dropped, []);
+});
+
+// A backend that never implemented delete raises "storage.delete is not a function", which the
+// same catch swallows. createStorage refuses such a backend at boot; this pins that the write
+// path survives it rather than 500ing on every conversion.
+test('a backend with no delete does not sink the write', async () => {
+  const dropped = await dropStaleObjects({}, 'conv', 'html', 'md');
+  assert.deepEqual(dropped, []);
 });

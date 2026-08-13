@@ -31,7 +31,7 @@ import {
   validateCredentials,
   parseKeyInput,
 } from './lib/auth.js';
-import { SOURCE_EXT, staleKeys } from './lib/artifact-files.js';
+import { SOURCE_EXT, dropStaleObjects } from './lib/artifact-files.js';
 import { createConfigStore } from './lib/config.js';
 import { ApiError } from './lib/errors.js';
 import { artifactExpired } from './lib/expiry.js';
@@ -211,7 +211,9 @@ function artifactUnlocked(req, meta) {
   return unlockValid(req, meta);
 }
 
-const TYPES = ['html', 'jsx', 'tsx', 'md', 'redirect'];
+// Read off the same table lib/artifact-files.js cleans up from, so a sixth type cannot become
+// publishable here and stay invisible to the type-change cleanup there.
+const TYPES = Object.keys(SOURCE_EXT);
 const SLUG_RE = /^[a-z0-9][a-z0-9-]{2,63}$/;
 const TAG_RE = /^[a-z0-9][a-z0-9-]{0,31}$/;
 const MAX_TAGS = 10;
@@ -219,7 +221,6 @@ const MAX_TAGS = 10;
 // slug — Unicode letters/digits, spaces, and - _ . — but bounded, and must
 // start with a letter or digit. Internal whitespace is collapsed on input.
 const PROJECT_RE = /^[\p{L}\p{N}][\p{L}\p{N}\p{M} ._-]{0,63}$/u;
-// SOURCE_EXT and the type-change cleanup rule live in lib/artifact-files.js, imported above.
 
 // Pinned versions shared with the jsx shell. `external=react` keeps packages on
 // the shell's React instance — separate copies cause "Invalid hook call".
@@ -738,18 +739,9 @@ async function storeArtifact(finalSlug, { content, type = 'html', title, descrip
     contentType: 'application/json',
   });
   // The old type's objects are unreachable now that meta names the new one, so drop them. After
-  // the meta write, never before: a crash in between then leaves the old record whole rather
-  // than a listed artifact whose body is gone. Before flush, so git carries the deletions in the
-  // same commit as the write.
-  for (const key of staleKeys(finalSlug, existing?.type, type)) {
-    // Bloat, not correctness. The write has already landed, so a cleanup that fails must not
-    // turn a successful replace into a 500 the caller would retry.
-    try {
-      await storage.delete(key);
-    } catch (err) {
-      console.warn(`storage: could not drop ${key} after a type change: ${err.message}`);
-    }
-  }
+  // the meta write and before flush; the ordering and the swallowed failure are explained in
+  // lib/artifact-files.js.
+  await dropStaleObjects(storage, finalSlug, existing?.type, type);
   await storage.flush?.(); // durably commit the completed write (git); no-op elsewhere
   dropMdRender(finalSlug);
   // A non-public artifact needs the session secret resident to mint its capability token;
@@ -1192,9 +1184,15 @@ function parseRange(header, size) {
 // status/headers are flushed and immutable, so an upstream error must ABORT the socket
 // (res.destroy) — never res.end(), which would pass a truncated artifact off as complete.
 function pipeStream(res, stream) {
-  stream.on('error', () => {
-    if (!res.headersSent) res.status(500).type('text/plain').send('internal error');
-    else res.destroy();
+  stream.on('error', (err) => {
+    if (res.headersSent) return res.destroy();
+    // A read that passed the stat can still miss when the open happens: local checks the file
+    // and then opens it, so a write that landed in between took the object away. That is the
+    // same "not there" the stat catches, and the rename path has always answered it as a 404,
+    // so it answers 404 here too rather than the 500 a real read error gets.
+    const gone = err?.code === 'ENOENT' || err?.code === 'ENOTDIR';
+    if (gone) return res.status(404).type('text/plain').send('not found');
+    res.status(500).type('text/plain').send('internal error');
   });
   stream.pipe(res);
 }
@@ -1401,6 +1399,9 @@ app.get('/a/:slug/source', async (req, res, next) => {
     if (target === null) return notFound(res);
     return res.type('text/plain; charset=utf-8').send(target);
   }
+  // meta.type comes off disk unvalidated, and a bare SOURCE_EXT lookup walks the prototype, so a
+  // hand-edited "constructor" built a key out of a function body. Same guard ownedKeys uses.
+  if (!Object.hasOwn(SOURCE_EXT, meta.type)) return notFound(res);
   // forceType keeps source inert: an HTML/JSX source is served as text/plain, never executed.
   serveObject(req, res, `${slug}/source.${SOURCE_EXT[meta.type]}`, {
     forceType: 'text/plain; charset=utf-8',
@@ -1858,7 +1859,7 @@ function createMcpServer(scopes = SCOPES) {
     {
       title: 'Update artifact',
       description:
-        'Rewrite an existing artifact by slug. Only type and title reset when omitted: type becomes html and title becomes the slug, so pass both on every update. Every other field the artifact has keeps its current value. Returns the share URL, tokened for private and password artifacts.',
+        'Rewrite an existing artifact by slug. Only type resets when omitted: it becomes html, and changing the type deletes the files the old type owned, so pass it on every update of a jsx, tsx, md or redirect artifact. Every other field, title included, keeps its current value. Returns the share URL, tokened for private and password artifacts.',
       inputSchema: {
         slug: z.string(),
         content: z.string(),

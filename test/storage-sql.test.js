@@ -1,7 +1,8 @@
 // Unit tests for the SQL-backed stores, driven through sqlite. node:sqlite ships with the Node
 // >=22 this project already requires, so this runs with no external service. postgres.js hands
-// makeSqlStore the same six operations against the same one-table schema, so proving the shared
-// core here is as close as a laptop gets to covering both.
+// makeSqlStore the same operations against the same one-table schema, so the shared core these
+// tests drive is the same code postgres runs. postgres's own SQL is not: `DELETE FROM artifacts
+// WHERE key = $1` (storage/postgres.js) only ever runs under the CI backend matrix.
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';

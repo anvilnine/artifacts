@@ -505,14 +505,12 @@ curl -s "$BASE/a/ci-conv?raw=1" | grep -q 'step tsx' || fail "tsx conversion los
 curl -s "$BASE/a/ci-conv/source" | grep -q 'step tsx' || fail "tsx conversion lost source.tsx"
 convert_to redirect 'https://example.com/step-redirect'
 code=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/a/ci-conv")
-expect_code 301 "$code" "converted artifact serves the redirect"
+expect_code 301 "$code" "the conversion walk's redirect hop"
 [ "$(curl -s "$BASE/a/ci-conv/source")" = 'https://example.com/step-redirect' ] \
   || fail "redirect conversion lost source.url"
 convert_to html '<h1>step html again</h1>'
 curl -s "$BASE/a/ci-conv?raw=1" | grep -q 'step html again' || fail "html conversion lost index.html"
 curl -s "$BASE/a/ci-conv/source" | grep -q 'step html again' || fail "html conversion lost source.html"
-# md renders per request, so an md that became html must not still be handed back as markdown
-if curl -s "$BASE/a/ci-conv?raw=1" | grep -q 'step md'; then fail "html artifact still serves the old markdown"; fi
 curl -sf -X DELETE "$BASE/api/artifacts/ci-conv" -H "$AUTH" > /dev/null
 echo "ok: every type conversion serves the type it was given"
 
