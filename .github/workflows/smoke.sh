@@ -295,6 +295,40 @@ echo "ok: preview field validation"
 curl -sf -X DELETE "$BASE/api/artifacts/ci-preview" -H "$AUTH" > /dev/null
 curl -sf -X DELETE "$BASE/api/artifacts/ci-preview-md" -H "$AUTH" > /dev/null
 
+# --- a patch the server refuses never moves the artifact ---
+# The rename moves storage, so every other field has to be parsed first. The 400 on its own was
+# already true before this; what it hid was an artifact that had moved anyway, leaving a row whose
+# link was dead and a live URL that appeared in no row.
+code=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/api/artifacts" -H "$AUTH" -H "$JSON" \
+  -d '{"content":"<h1>halfmove</h1>","type":"html","slug":"ci-halfmove","visibility":"public"}')
+expect_code 201 "$code" "publish the rename-refusal artifact"
+# One entry per field a patch can set, each carrying a rename the server must not perform.
+for bad in '{"slug":"ci-halfmove-2","disabled":"yes"}' '{"slug":"ci-halfmove-2","frame":"on"}' \
+  '{"slug":"ci-halfmove-2","expiresAt":"not-a-date"}' '{"slug":"ci-halfmove-2","tags":[5]}' \
+  '{"slug":"ci-halfmove-2","project":5}' '{"slug":"ci-halfmove-2","description":5}' \
+  '{"slug":"ci-halfmove-2","ogImage":5}' '{"slug":"ci-halfmove-2","visibility":"secret"}' \
+  '{"slug":"ci-halfmove-2","visibility":"password"}' '{"slug":"ci-halfmove-2","rotateToken":true}'; do
+  code=$(curl -s -o /dev/null -w '%{http_code}' -X PATCH "$BASE/api/artifacts/ci-halfmove" \
+    -H "$AUTH" -H "$JSON" -d "$bad")
+  [ "$code" = 400 ] || fail "refused rename patch $bad: expected 400, got $code"
+  code=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/a/ci-halfmove")
+  [ "$code" = 200 ] || fail "$bad: old slug should still serve, got $code"
+  code=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/a/ci-halfmove-2")
+  [ "$code" = 404 ] || fail "$bad: new slug should be empty, got $code"
+  [ "$(list_field ci-halfmove slug)" = 'ci-halfmove' ] || fail "$bad: the row lost the artifact"
+done
+echo "ok: a refused patch leaves the artifact at its old slug, one case per field"
+# A patch that names a taken slug still answers 409, ahead of any field the server would refuse.
+code=$(curl -s -o /dev/null -w '%{http_code}' -X PATCH "$BASE/api/artifacts/ci-halfmove" \
+  -H "$AUTH" -H "$JSON" -d '{"slug":"ci-smoke-2","tags":[5]}')
+expect_code 409 "$code" "a taken slug wins over a bad field"
+# The rename itself still works, so the checks above are not passing on a broken rename.
+curl -sf -X PATCH "$BASE/api/artifacts/ci-halfmove" -H "$AUTH" -H "$JSON" \
+  -d '{"slug":"ci-halfmove-2","tags":["moved"]}' > /dev/null
+code=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/a/ci-halfmove-2")
+expect_code 200 "$code" "an accepted rename still moves the artifact"
+curl -sf -X DELETE "$BASE/api/artifacts/ci-halfmove-2" -H "$AUTH" > /dev/null
+
 # --- redirects: a real 301 to the stored target, not a JS bounce ---
 # %{redirect_url} is curl's parsed Location, so these compare the whole value instead of
 # grepping a header line where an unanchored pattern would match a longer target.
