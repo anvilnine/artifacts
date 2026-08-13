@@ -77,6 +77,33 @@ test('a put keeps the mode the object already had', async () => {
   assert.equal((await fs.stat(abs)).mode & 0o777, 0o600);
 });
 
+test('delete removes one object and leaves the rest of the namespace alone', async () => {
+  const { root, store } = await tmpStore();
+  await store.put('conv/meta.json', SHORT);
+  await store.put('conv/index.html', '<h1>was html</h1>');
+  await store.put('conv/source.html', '<h1>was html</h1>');
+  await store.delete('conv/source.html');
+  assert.deepEqual((await fs.readdir(path.join(root, 'conv'))).sort(), ['index.html', 'meta.json']);
+  assert.equal(await store.getBuffer('conv/source.html'), null);
+  assert.equal((await store.getBuffer('conv/meta.json')).toString('utf8'), SHORT);
+});
+
+// A conversion runs the same delete on every backend, and the object may already be gone (an
+// artifact published before the type owned that file). A throw there would turn a write that
+// already landed into a 500.
+test('deleting an object that is not there is not an error', async () => {
+  const { store } = await tmpStore();
+  await store.put('conv/meta.json', SHORT);
+  await store.delete('conv/source.url');
+  await store.delete('never-published/source.md');
+});
+
+test('delete refuses a key that escapes the namespace', async () => {
+  const { store } = await tmpStore();
+  await assert.rejects(() => store.delete('../outside.json'));
+  await assert.rejects(() => store.delete('/etc/passwd'));
+});
+
 test('a scratch file a crash left behind is swept at startup and never copied', async () => {
   const { root, store } = await tmpStore();
   await store.put('race/meta.json', SHORT);

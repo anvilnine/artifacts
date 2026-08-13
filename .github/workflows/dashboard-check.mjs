@@ -21,7 +21,6 @@
 // Usage: node dashboard-check.mjs <base-url>
 
 import vm from 'node:vm';
-import { readFile } from 'node:fs/promises';
 
 const base = process.argv[2];
 if (!base) {
@@ -47,15 +46,15 @@ for (const marker of ['<div id="lock">', '<div id="app">', '<title>artifacts</ti
 }
 // Every inline type the server publishes needs an option inside the compose type select, or
 // that type can only be published through the API, the CLI or MCP. redirect shipped without
-// one (T2.1.7). The list comes from server.js rather than a copy here, so a sixth type fails
-// this check on the day it is added instead of shipping with no way to compose it.
+// one (T2.1.7). The list is imported rather than copied here, so a sixth type fails this check
+// on the day it is added instead of shipping with no way to compose it. It reads SOURCE_EXT,
+// which is what server.js builds TYPES from and what the type-change cleanup keys off, so all
+// three cannot drift apart (T2.1.9).
 const typeSelect = html.match(/<select id="type">([\s\S]*?)<\/select>/);
 if (!typeSelect) fail('the compose form has no <select id="type">');
-const serverSrc = await readFile(new URL('../../server.js', import.meta.url), 'utf8');
-const typesLine = serverSrc.match(/^const TYPES = \[([^\]]*)\]/m);
-if (!typesLine) fail('could not read the TYPES list out of server.js');
-const types = [...typesLine[1].matchAll(/'([^']+)'/g)].map((m) => m[1]);
-if (types.length < 2) fail(`parsed only ${types.length} type(s) from server.js TYPES`);
+const { SOURCE_EXT } = await import(new URL('../../lib/artifact-files.js', import.meta.url));
+const types = Object.keys(SOURCE_EXT);
+if (types.length < 2) fail(`parsed only ${types.length} type(s) from SOURCE_EXT`);
 for (const type of types) {
   if (!typeSelect[1].includes(`value="${type}"`)) {
     fail(`the compose type select has no option for ${type}`);

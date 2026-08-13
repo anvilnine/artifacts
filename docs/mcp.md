@@ -42,12 +42,12 @@ author's own HTML. Details in [Link previews](formats.md#link-previews).
 `FRAME_ENABLED=false` nothing is framed and `frame: true` changes nothing, so a client that gets no
 frame should check the server config before the artifact.
 
-`update_artifact` rewrites the artifact rather than patching it, and two of its optional arguments
-fall back to a default instead of keeping what is there. Pass `type` on every update of a `jsx`,
-`tsx`, `md` or `redirect` artifact, or the artifact comes back as HTML. Pass `title` to keep the
-title, or it resets to the slug. `frame`, `tags`, `project` and `visibility` do keep their current
-value when omitted, and take the values documented on the matching `set_artifact_*` row. To change
-one field and touch nothing else, use that row's tool instead of `update_artifact`.
+`update_artifact` rewrites the artifact rather than patching it, and `type` falls back to `html`
+instead of keeping what is there. Pass it on every update of a `jsx`, `tsx`, `md` or `redirect`
+artifact, or the artifact comes back as HTML and the files the old type owned are deleted. `title`,
+`frame`, `tags`, `project`, `visibility`, `description` and `ogImage` all keep their current value
+when omitted, and take the values documented on the matching `set_artifact_*` row. To change one
+field and touch nothing else, use that row's tool instead of `update_artifact`.
 
 No MCP tool for zip sites, because the payload is binary. Use the [CLI](cli.md) or the [zip endpoint](api.md#zip-sites-multi-file-static-projects).
 

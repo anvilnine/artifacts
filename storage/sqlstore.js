@@ -1,7 +1,7 @@
 // Shared core for the SQL-backed stores (sqlite, postgres). Both keep every object as a row
 // in one table `artifacts(key, data, content_type)`, keyed by `<slug>/<relpath>`. A driver
-// supplies the six data operations; this module wraps them with the key guard and the stream
-// shape the serving layer expects.
+// supplies the data operations listed below; this module wraps them with the key guard and the
+// stream shape the serving layer expects.
 //
 // Note [streaming]: unlike local/s3, SQL rows are read whole — get() buffers the entire object
 // in memory (there is no partial-row streaming), so these backends rely on the upload size
@@ -29,6 +29,7 @@ function toBuffer(data) {
 //   listMetas()      -> Promise<[{slug, buffer}]>
 //   move(oldSlug, newSlug) -> Promise<void>
 //   copySlug(srcSlug, dstSlug) -> Promise<void>
+//   delete(key)      -> Promise<void>
 //   deleteSlug(slug) -> Promise<void>
 //   init()           -> Promise<void>             (create table + connectivity probe)
 //   close?()         -> Promise<void>
@@ -76,6 +77,11 @@ export function makeSqlStore(driver) {
       assertSafeKey(srcSlug);
       assertSafeKey(dstSlug);
       await driver.copySlug(srcSlug, dstSlug);
+    },
+
+    async delete(key) {
+      assertSafeKey(key);
+      await driver.delete(key);
     },
 
     async deleteSlug(slug) {

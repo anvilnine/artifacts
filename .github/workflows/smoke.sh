@@ -478,6 +478,42 @@ curl -sf -X PUT "$BASE/api/artifacts/ci-redir-conv" -H "$AUTH" -H "$JSON" \
 curl -sf -X DELETE "$BASE/api/artifacts/ci-redir-conv" -H "$AUTH" > /dev/null
 echo "ok: html converted to a redirect"
 
+# T2.1.9: a type change drops the objects the old type owned. The bytes themselves are not
+# reachable over HTTP (every serve path keys off meta.type, which is why they sat there
+# unnoticed since md shipped), so what this proves is the other half: the cleanup never takes a
+# file the new type still needs. Walk one artifact through every type and read it back after
+# each hop. test/artifact-files.test.js covers which keys each direction drops, and
+# test/storage-local.test.js plus test/storage-sql.test.js cover the delete itself.
+convert_to() { # convert_to <type> <content>
+  curl -sf -X PUT "$BASE/api/artifacts/ci-conv" -H "$AUTH" -H "$JSON" \
+    -d "$(node -e 'process.stdout.write(JSON.stringify({content: process.argv[1], type: process.argv[2]}))' "$2" "$1")" > /dev/null \
+    || fail "converting to $1 was refused"
+  [ "$(list_field ci-conv type)" = "$1" ] || fail "converted artifact is not listed as $1"
+}
+curl -sf -X POST "$BASE/api/artifacts" -H "$AUTH" -H "$JSON" \
+  -d '{"content":"<h1>step html</h1>","type":"html","slug":"ci-conv","visibility":"public"}' > /dev/null
+convert_to md '# step md'
+# md renders inside the frame, so the rendered body is behind ?raw=1 like every other type
+curl -s "$BASE/a/ci-conv?raw=1" | grep -q '<h1>step md</h1>' || fail "md conversion lost the rendered body"
+[ "$(curl -s "$BASE/a/ci-conv/source")" = '# step md' ] || fail "md conversion lost source.md"
+convert_to jsx 'export default () => <p>step jsx</p>'
+curl -s "$BASE/a/ci-conv?raw=1" | grep -q 'step jsx' || fail "jsx conversion lost index.html"
+curl -s "$BASE/a/ci-conv/source" | grep -q 'step jsx' || fail "jsx conversion lost source.jsx"
+# jsx to tsx is the direction where both types bake an index.html and only the extension moves
+convert_to tsx 'export default () => <p>step tsx</p>'
+curl -s "$BASE/a/ci-conv?raw=1" | grep -q 'step tsx' || fail "tsx conversion lost index.html"
+curl -s "$BASE/a/ci-conv/source" | grep -q 'step tsx' || fail "tsx conversion lost source.tsx"
+convert_to redirect 'https://example.com/step-redirect'
+code=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/a/ci-conv")
+expect_code 301 "$code" "the conversion walk's redirect hop"
+[ "$(curl -s "$BASE/a/ci-conv/source")" = 'https://example.com/step-redirect' ] \
+  || fail "redirect conversion lost source.url"
+convert_to html '<h1>step html again</h1>'
+curl -s "$BASE/a/ci-conv?raw=1" | grep -q 'step html again' || fail "html conversion lost index.html"
+curl -s "$BASE/a/ci-conv/source" | grep -q 'step html again' || fail "html conversion lost source.html"
+curl -sf -X DELETE "$BASE/api/artifacts/ci-conv" -H "$AUTH" > /dev/null
+echo "ok: every type conversion serves the type it was given"
+
 # a copy keeps the target
 dupslug=$(curl -s -X POST "$BASE/api/artifacts/ci-redir/duplicate" -H "$AUTH" -H "$JSON" \
   -d '{"slug":"ci-redir-copy","visibility":"public"}' | sed -n 's/.*"slug":"\([^"]*\)".*/\1/p')

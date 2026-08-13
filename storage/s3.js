@@ -258,6 +258,12 @@ export async function create() {
       }
     },
 
+    // Remove one object. deleteKeys already treats a 404 as done, which is what a conversion
+    // needs: it asks for the old type's files without checking whether each one is there.
+    async delete(key) {
+      await deleteKeys([key]);
+    },
+
     async deleteSlug(slug) {
       const keys = await listKeys(slug);
       const meta = `${slug}/meta.json`;

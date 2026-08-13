@@ -35,6 +35,7 @@ export async function create() {
     'UPDATE artifacts SET key = ? || substr(key, ?) WHERE key >= ? AND key < ?',
   );
   const deleteStmt = db.prepare('DELETE FROM artifacts WHERE key >= ? AND key < ?');
+  const deleteKeyStmt = db.prepare('DELETE FROM artifacts WHERE key = ?');
   const copyStmt = db.prepare(
     'INSERT INTO artifacts (key, data, content_type) ' +
       'SELECT ? || substr(key, ?), data, content_type FROM artifacts ' +
@@ -74,6 +75,11 @@ export async function create() {
 
     copySlug(srcSlug, dstSlug) {
       copyStmt.run(dstSlug, srcSlug.length + 1, `${srcSlug}/`, `${srcSlug}0`, `${srcSlug}/meta.json`);
+    },
+
+    delete(key) {
+      // Equality, not a range: this drops one object, so a row that is not there is a no-op.
+      deleteKeyStmt.run(key);
     },
 
     deleteSlug(slug) {

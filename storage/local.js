@@ -222,6 +222,13 @@ export async function createAt(root) {
       });
     },
 
+    // Remove one object. `force` so a key that is already gone is not an error: a conversion
+    // asks for the old type's files without checking, and an artifact published before that
+    // type owned one of them has nothing there to drop.
+    async delete(key) {
+      await fs.rm(resolveKey(key), { force: true });
+    },
+
     async deleteSlug(slug) {
       // meta.json first so a crash mid-delete leaves an invisible (404) namespace, never a
       // live artifact with missing files.
