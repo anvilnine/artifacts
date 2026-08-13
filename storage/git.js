@@ -213,6 +213,7 @@ export async function create() {
     put: (key, data, opts) => files.put(key, data, opts),
     move: (oldSlug, newSlug) => files.move(oldSlug, newSlug),
     copySlug: (src, dst) => files.copySlug(src, dst),
+    delete: (key) => files.delete(key),
     deleteSlug: (slug) => files.deleteSlug(slug),
 
     // Commit the completed write and push it, serialized so two operations never race the

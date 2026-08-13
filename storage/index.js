@@ -16,6 +16,7 @@
 //     listMetas()               -> [{ slug, buffer }]            // every artifact's meta.json
 //     move(oldSlug, newSlug)                                     // rename a whole namespace
 //     copySlug(srcSlug, dstSlug)                                 // copy a namespace's content objects (NOT meta.json)
+//     delete(key)                                                // remove ONE object; a key that is gone is not an error
 //     deleteSlug(slug)                                           // remove a whole namespace
 //     flush?()                  // optional: durably commit a completed write (git)
 //   }
@@ -39,6 +40,10 @@
 // content objects first and `<slug>/meta.json` LAST as a commit marker, because readMeta
 // and listMetas key off meta.json — a namespace with no meta is invisible (404), never
 // half-served. deleteSlug removes meta first. See server.js for where this is applied.
+//
+// The same ordering decides where delete(key) goes: a replace that changes the type drops the
+// old type's objects AFTER meta.json names the new one, so a crash mid-conversion leaves the
+// old record whole rather than a listed artifact whose body is gone.
 
 // A key/segment that fails validation. Callers map this to 404 (it only reaches a backend
 // via user-controlled zip sub-paths); it must never surface as a 500.

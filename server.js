@@ -31,6 +31,7 @@ import {
   validateCredentials,
   parseKeyInput,
 } from './lib/auth.js';
+import { SOURCE_EXT, staleKeys } from './lib/artifact-files.js';
 import { createConfigStore } from './lib/config.js';
 import { ApiError } from './lib/errors.js';
 import { artifactExpired } from './lib/expiry.js';
@@ -218,7 +219,7 @@ const MAX_TAGS = 10;
 // slug — Unicode letters/digits, spaces, and - _ . — but bounded, and must
 // start with a letter or digit. Internal whitespace is collapsed on input.
 const PROJECT_RE = /^[\p{L}\p{N}][\p{L}\p{N}\p{M} ._-]{0,63}$/u;
-const SOURCE_EXT = { html: 'html', jsx: 'jsx', tsx: 'tsx', md: 'md', redirect: 'url' };
+// SOURCE_EXT and the type-change cleanup rule live in lib/artifact-files.js, imported above.
 
 // Pinned versions shared with the jsx shell. `external=react` keeps packages on
 // the shell's React instance — separate copies cause "Invalid hook call".
@@ -736,6 +737,19 @@ async function storeArtifact(finalSlug, { content, type = 'html', title, descrip
   await storage.put(`${finalSlug}/meta.json`, JSON.stringify(meta, null, 2), {
     contentType: 'application/json',
   });
+  // The old type's objects are unreachable now that meta names the new one, so drop them. After
+  // the meta write, never before: a crash in between then leaves the old record whole rather
+  // than a listed artifact whose body is gone. Before flush, so git carries the deletions in the
+  // same commit as the write.
+  for (const key of staleKeys(finalSlug, existing?.type, type)) {
+    // Bloat, not correctness. The write has already landed, so a cleanup that fails must not
+    // turn a successful replace into a 500 the caller would retry.
+    try {
+      await storage.delete(key);
+    } catch (err) {
+      console.warn(`storage: could not drop ${key} after a type change: ${err.message}`);
+    }
+  }
   await storage.flush?.(); // durably commit the completed write (git); no-op elsewhere
   dropMdRender(finalSlug);
   // A non-public artifact needs the session secret resident to mint its capability token;
