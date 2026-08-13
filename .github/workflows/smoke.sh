@@ -1343,6 +1343,35 @@ node "$CLI_DIR/cli.js" list --project web-revamp | grep -q 'ci-cli-2' || fail "c
 node "$CLI_DIR/cli.js" project ci-cli-2 none > /dev/null
 if node "$CLI_DIR/cli.js" list --project web-revamp | grep -q 'ci-cli-2'; then fail "cli project clear failed"; fi
 echo "ok: cli project"
+# link preview: both fields on publish, then the preview verb on an existing slug. The served
+# page is the check, since that is the only place the tags actually have to appear.
+url=$(node "$CLI_DIR/cli.js" publish "$ZIPDIR/cli.html" --slug ci-cli-og --visibility public \
+  --description 'set from the cli' --og-image https://example.com/cli.png)
+[ "$url" = "$BASE/a/ci-cli-og" ] || fail "cli publish with preview fields: unexpected url $url"
+curl -s "$BASE/a/ci-cli-og" | grep -qF '<meta name="description" content="set from the cli">' \
+  || fail "cli --description not stored"
+curl -s "$BASE/a/ci-cli-og" | grep -qF '<meta property="og:image" content="https://example.com/cli.png">' \
+  || fail "cli --og-image not stored"
+node "$CLI_DIR/cli.js" list | grep 'ci-cli-og' | grep -q 'preview' || fail "cli list does not flag a preview"
+node "$CLI_DIR/cli.js" update ci-cli-og "$ZIPDIR/cli.html" --description 'set from cli update' > /dev/null
+curl -s "$BASE/a/ci-cli-og" | grep -qF '<meta name="description" content="set from cli update">' \
+  || fail "cli update --description not stored"
+node "$CLI_DIR/cli.js" preview ci-cli-og --description 'edited by the preview verb' > /dev/null
+curl -s "$BASE/a/ci-cli-og" | grep -qF '<meta name="description" content="edited by the preview verb">' \
+  || fail "cli preview --description did not land"
+# The image is untouched by a description-only edit, which is the whole point of one PATCH per field.
+curl -s "$BASE/a/ci-cli-og" | grep -qF 'https://example.com/cli.png' || fail "cli preview dropped the image"
+node "$CLI_DIR/cli.js" preview ci-cli-og --description none --og-image none > /dev/null
+if curl -s "$BASE/a/ci-cli-og" | grep -q 'og:image'; then fail "cli preview none did not clear the image"; fi
+if node "$CLI_DIR/cli.js" list | grep 'ci-cli-og' | grep -q 'preview'; then fail "cli list still flags a cleared preview"; fi
+# No flag at all is a usage error, not a PATCH that changes nothing.
+if node "$CLI_DIR/cli.js" preview ci-cli-og > /dev/null 2>&1; then fail "cli preview with no flag should fail"; fi
+# A value the server refuses comes back as its 400, relayed rather than swallowed.
+if node "$CLI_DIR/cli.js" preview ci-cli-og --og-image /relative.png > /dev/null 2>&1; then
+  fail "cli preview --og-image /relative.png should fail"
+fi
+node "$CLI_DIR/cli.js" delete ci-cli-og > /dev/null
+echo "ok: cli link preview"
 diff <(qr_local "$BASE/a/ci-cli-2") <(node "$CLI_DIR/cli.js" qr ci-cli-2) > /dev/null \
   || fail "cli qr printed something other than the server's svg"
 diff <(qr_local "$BASE/a/ci-cli-2" 3 0) <(node "$CLI_DIR/cli.js" qr ci-cli-2 --scale 3 --margin 0) > /dev/null \
@@ -1359,9 +1388,12 @@ if node "$CLI_DIR/cli.js" qr ci-cli-2 --png > /dev/null 2>&1; then fail "cli qr 
 # a bad option is the server's 400, relayed rather than swallowed
 if node "$CLI_DIR/cli.js" qr ci-cli-2 --scale 99 > /dev/null 2>&1; then fail "cli qr --scale 99 should fail"; fi
 echo "ok: cli qr"
-node "$CLI_DIR/cli.js" deploy "$ZIPDIR/site" --slug ci-cli-zip --visibility public > /dev/null
+node "$CLI_DIR/cli.js" deploy "$ZIPDIR/site" --slug ci-cli-zip --visibility public \
+  --description 'a zip from the cli' > /dev/null
 code=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/a/ci-cli-zip/css/s.css")
 expect_code 200 "$code" "cli zip deploy"
+curl -s "$BASE/a/ci-cli-zip/" | grep -qF '<meta name="description" content="a zip from the cli">' \
+  || fail "cli deploy --description not stored"
 node "$CLI_DIR/cli.js" delete ci-cli-2 > /dev/null
 node "$CLI_DIR/cli.js" delete ci-cli-zip > /dev/null
 code=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/a/ci-cli-2")
