@@ -10,9 +10,9 @@ import { artifactExpired } from './lib/expiry.js';
 const USAGE = `artifacts — publish to a self-hosted artifacts instance
 
 Usage:
-  artifacts publish <file> [--slug s] [--title t] [--tags a,b] [--project p] [--expires ISO] [--type html|jsx|tsx|md|redirect] [--frame on|off] [--visibility public|private|password] [--password pw]
-  artifacts deploy <dir|zip> [--slug s] [--title t] [--tags a,b] [--project p] [--expires ISO] [--visibility public|private|password] [--password pw]
-  artifacts update <slug> <file> [--title t] [--tags a,b] [--project p] [--type html|jsx|tsx|md|redirect]
+  artifacts publish <file> [--slug s] [--title t] [--tags a,b] [--project p] [--description d] [--og-image url] [--expires ISO] [--type html|jsx|tsx|md|redirect] [--frame on|off] [--visibility public|private|password] [--password pw]
+  artifacts deploy <dir|zip> [--slug s] [--title t] [--tags a,b] [--project p] [--description d] [--og-image url] [--expires ISO] [--visibility public|private|password] [--password pw]
+  artifacts update <slug> <file> [--title t] [--tags a,b] [--project p] [--description d] [--og-image url] [--type html|jsx|tsx|md|redirect]
   artifacts list [--tag t] [--project p]
   artifacts rename <slug> <new-slug>
   artifacts disable <slug>
@@ -23,6 +23,7 @@ Usage:
   artifacts expire <slug> <ISO-date|never>
   artifacts tag <slug> <a,b,c|none>
   artifacts project <slug> <name|none>
+  artifacts preview <slug> [--description <d|none>] [--og-image <url|none>]
   artifacts delete <slug>
   artifacts source <slug> [-o file]
   artifacts qr <slug> [--png] [--scale n] [--margin n] [-o file]
@@ -49,6 +50,8 @@ const { values: opts, positionals } = parseArgs({
     tags: { type: 'string' },
     tag: { type: 'string' },
     project: { type: 'string' },
+    description: { type: 'string' },
+    'og-image': { type: 'string' },
     expires: { type: 'string' },
     scopes: { type: 'string' },
     type: { type: 'string' },
@@ -136,6 +139,8 @@ switch (command) {
       ...(opts.title && { title: opts.title }),
       ...(opts.tags !== undefined && { tags: opts.tags }),
       ...(opts.project !== undefined && { project: opts.project }),
+      ...(opts.description !== undefined && { description: opts.description }),
+      ...(opts['og-image'] !== undefined && { ogImage: opts['og-image'] }),
       ...(opts.expires && { expiresAt: opts.expires }),
       ...(opts.frame && opts.frame !== 'default' && { frame: opts.frame === 'on' }),
       ...(opts.visibility !== undefined && { visibility: opts.visibility }),
@@ -161,6 +166,8 @@ switch (command) {
     if (opts.title) params.set('title', opts.title);
     if (opts.tags) params.set('tags', opts.tags);
     if (opts.project) params.set('project', opts.project);
+    if (opts.description) params.set('description', opts.description);
+    if (opts['og-image']) params.set('ogImage', opts['og-image']);
     if (opts.expires) params.set('expiresAt', opts.expires);
     if (opts.visibility) params.set('visibility', opts.visibility);
     if (opts.password) params.set('password', opts.password);
@@ -182,6 +189,8 @@ switch (command) {
       ...(opts.title && { title: opts.title }),
       ...(opts.tags !== undefined && { tags: opts.tags }),
       ...(opts.project !== undefined && { project: opts.project }),
+      ...(opts.description !== undefined && { description: opts.description }),
+      ...(opts['og-image'] !== undefined && { ogImage: opts['og-image'] }),
       ...(opts.visibility !== undefined && { visibility: opts.visibility }),
       ...(opts.password !== undefined && { password: opts.password }),
     });
@@ -203,7 +212,10 @@ switch (command) {
       // printed as "expires [object Object]". Same rule the server serves by.
       const expired = artifactExpired(a);
       const expiry = expired ? 'expired' : typeof a.expiresAt === 'string' && `expires ${a.expiresAt}`;
-      const flags = [a.disabled && 'disabled', visFlag, frameFlag, expiry].filter(Boolean);
+      // One flag for both preview fields: the row has no width for a 300-char description or a
+      // full image URL, and what a caller wants from a list is which artifacts still have none.
+      const preview = a.description || a.ogImage ? 'preview' : null;
+      const flags = [a.disabled && 'disabled', visFlag, frameFlag, preview, expiry].filter(Boolean);
       const project = a.project ? `@${a.project}` : '';
       const tags = a.tags?.length ? `#${a.tags.join(' #')}` : '';
       const meta = [project, tags].filter(Boolean).join(' ');
@@ -293,6 +305,31 @@ switch (command) {
     const project = args[1] === 'none' ? '' : args[1];
     await apiJson('PATCH', `/api/artifacts/${args[0]}`, { project });
     console.log(args[1] === 'none' ? `${args[0]} project cleared` : `${args[0]} → project ${args[1]}`);
+    break;
+  }
+
+  // Both preview fields on one verb, because a link preview reads as one thing and setting the
+  // image usually means editing the text beside it. Flags rather than positionals, so either
+  // field can be set on its own; "none" clears it, the way tag and project take none.
+  case 'preview': {
+    need(1, '<slug> [--description <d|none>] [--og-image <url|none>]');
+    const patch = {
+      ...(opts.description !== undefined && {
+        description: opts.description === 'none' ? '' : opts.description,
+      }),
+      ...(opts['og-image'] !== undefined && {
+        ogImage: opts['og-image'] === 'none' ? '' : opts['og-image'],
+      }),
+    };
+    if (!Object.keys(patch).length) fail('preview needs --description or --og-image');
+    await apiJson('PATCH', `/api/artifacts/${args[0]}`, patch);
+    // Echoed under the flag name, not the API field name, so the line names what was typed.
+    if ('description' in patch) {
+      console.log(patch.description ? `${args[0]} description: ${patch.description}` : `${args[0]} description cleared`);
+    }
+    if ('ogImage' in patch) {
+      console.log(patch.ogImage ? `${args[0]} og-image: ${patch.ogImage}` : `${args[0]} og-image cleared`);
+    }
     break;
   }
 

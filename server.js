@@ -928,62 +928,50 @@ async function patchArtifact(slug, patch) {
   return withMetaChains(renaming ? [slug, newSlug] : [slug], () => applyPatch(slug, patch, newSlug));
 }
 
-async function applyPatch(slug, patch, newSlug) {
-  const meta = await readMeta(slug);
-  if (!meta) {
-    throw new ApiError(404, `slug "${slug}" not found`);
-  }
-
-  // Parsed before the rename below, because the rename moves storage: a patch carrying both a new
-  // slug and a value this refuses would otherwise move the artifact and then throw, leaving a list
-  // row whose link is dead and a live URL that appears in no row. The other fields in this
-  // function still validate after the move, which is the same shape and is filed as its own item.
-  const summary = patch.description !== undefined ? parseDescription(patch.description) : undefined;
-  const previewImage = patch.ogImage !== undefined ? parseOgImage(patch.ogImage) : undefined;
-
-  let activeSlug = slug;
-  if (newSlug !== undefined && newSlug !== slug) {
-    if (await readMeta(newSlug)) {
-      throw new ApiError(409, `slug "${newSlug}" already exists`);
-    }
-    await storage.move(slug, newSlug);
-    meta.slug = newSlug;
-    activeSlug = newSlug;
-  }
+// Reads a patch and returns the values to write, or throws on the first one the server refuses.
+// Nothing here writes or moves, so a refusal costs the artifact nothing. A key is present when
+// the patch touches that field, so `undefined` (clear it) and "left out" stay different; `null`
+// means delete the key outright.
+async function parsePatch(patch, meta) {
+  const changes = {};
 
   if (patch.disabled !== undefined) {
     if (typeof patch.disabled !== 'boolean') {
       throw new ApiError(400, 'disabled must be a boolean');
     }
-    meta.disabled = patch.disabled || undefined;
+    changes.disabled = patch.disabled || undefined;
   }
 
   if (patch.frame !== undefined) {
     if (patch.frame === null) {
-      delete meta.frame; // reset to inherit the global default
+      changes.frame = null; // reset to inherit the global default
     } else if (typeof patch.frame === 'boolean') {
-      meta.frame = patch.frame;
+      changes.frame = patch.frame;
     } else {
       throw new ApiError(400, 'frame must be a boolean or null');
     }
   }
 
   if (patch.expiresAt !== undefined) {
-    meta.expiresAt = parseExpiresAt(patch.expiresAt);
+    changes.expiresAt = parseExpiresAt(patch.expiresAt);
   }
 
   if (patch.tags !== undefined) {
     const tags = parseTags(patch.tags);
-    meta.tags = tags.length ? tags : undefined;
+    changes.tags = tags.length ? tags : undefined;
   }
 
   if (patch.project !== undefined) {
-    const project = parseProject(patch.project);
-    meta.project = project || undefined; // '' clears it
+    changes.project = parseProject(patch.project) || undefined; // '' clears it
   }
 
-  if (summary !== undefined) meta.description = summary || undefined; // '' clears it
-  if (previewImage !== undefined) meta.ogImage = previewImage || undefined; // '' clears it
+  if (patch.description !== undefined) {
+    changes.description = parseDescription(patch.description) || undefined; // '' clears it
+  }
+
+  if (patch.ogImage !== undefined) {
+    changes.ogImage = parseOgImage(patch.ogImage) || undefined; // '' clears it
+  }
 
   if (patch.visibility !== undefined || patch.password !== undefined) {
     if (patch.visibility !== undefined && !VISIBILITIES.includes(patch.visibility)) {
@@ -992,28 +980,80 @@ async function applyPatch(slug, patch, newSlug) {
     const target = patch.visibility !== undefined ? patch.visibility : meta.visibility || 'public';
     if (target === 'password') {
       if (typeof patch.password === 'string' && patch.password) {
-        meta.password = await hashPassword(patch.password); // set or rotate
+        changes.password = await hashPassword(patch.password); // set or rotate
       } else if (!meta.password) {
         throw new ApiError(400, 'password is required for visibility "password"');
       }
-      meta.visibility = 'password';
+      changes.visibility = 'password';
     } else if (target === 'private') {
-      meta.visibility = 'private';
-      delete meta.password;
+      changes.visibility = 'private';
+      changes.password = null;
     } else {
-      delete meta.visibility; // public
-      delete meta.password;
+      changes.visibility = null; // public
+      changes.password = null;
     }
   }
 
   // Rotating a link is a single epoch bump — it invalidates every issued token AND live
-  // unlock cookie for the slug on the next request.
+  // unlock cookie for the slug on the next request. Read against the visibility this same patch
+  // is about to set, which is what the old in-place version saw by running after it.
   if (patch.rotateToken === true) {
-    if (meta.visibility !== 'private' && meta.visibility !== 'password') {
+    const after = 'visibility' in changes ? changes.visibility : meta.visibility;
+    if (after !== 'private' && after !== 'password') {
       throw new ApiError(400, 'only private or password artifacts have a link to rotate');
     }
-    meta.tokenEpoch = metaEpoch(meta) + 1;
+    changes.rotateToken = true;
   }
+
+  return changes;
+}
+
+async function applyPatch(slug, patch, newSlug) {
+  const meta = await readMeta(slug);
+  if (!meta) {
+    throw new ApiError(404, `slug "${slug}" not found`);
+  }
+
+  // Every field is parsed before the rename below, because the rename moves storage: a patch
+  // carrying both a new slug and a value the server refuses used to move the artifact and then
+  // throw, leaving a list row whose link is dead and a live URL that appears in no row.
+  // The collision check is a read, so it can stay ahead of the parse the way it was before: a
+  // patch that names a taken slug still answers 409 rather than 400, and a password in the same
+  // patch does not pay for a scrypt hash the 409 throws away. Nothing else can claim the name in
+  // between, since patchArtifact holds the chain for both slugs across all of this.
+  const renaming = newSlug !== undefined && newSlug !== slug;
+  if (renaming && (await readMeta(newSlug))) {
+    throw new ApiError(409, `slug "${newSlug}" already exists`);
+  }
+
+  const changes = await parsePatch(patch, meta);
+
+  let activeSlug = slug;
+  if (renaming) {
+    await storage.move(slug, newSlug);
+    meta.slug = newSlug;
+    activeSlug = newSlug;
+  }
+
+  if ('disabled' in changes) meta.disabled = changes.disabled;
+  if ('frame' in changes) {
+    if (changes.frame === null) delete meta.frame;
+    else meta.frame = changes.frame;
+  }
+  if ('expiresAt' in changes) meta.expiresAt = changes.expiresAt;
+  if ('tags' in changes) meta.tags = changes.tags;
+  if ('project' in changes) meta.project = changes.project;
+  if ('description' in changes) meta.description = changes.description;
+  if ('ogImage' in changes) meta.ogImage = changes.ogImage;
+  if ('visibility' in changes) {
+    if (changes.visibility === null) delete meta.visibility;
+    else meta.visibility = changes.visibility;
+  }
+  if ('password' in changes) {
+    if (changes.password === null) delete meta.password;
+    else meta.password = changes.password;
+  }
+  if (changes.rotateToken) meta.tokenEpoch = metaEpoch(meta) + 1;
 
   // Seed the epoch when an artifact enters private/password (covers a pre-existing public
   // artifact flipped to private); drop it when it becomes public.

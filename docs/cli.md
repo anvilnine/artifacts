@@ -20,9 +20,9 @@ export ARTIFACTS_API_KEY=...
 ## Commands
 
 ```
-artifacts publish <file> [--slug s] [--title t] [--tags a,b] [--project p] [--expires ISO] [--type html|jsx|tsx|md|redirect] [--frame on|off] [--visibility public|private|password] [--password pw]
-artifacts deploy <dir|zip> [--slug s] [--title t] [--tags a,b] [--project p] [--expires ISO] [--visibility public|private|password] [--password pw]
-artifacts update <slug> <file> [--title t] [--tags a,b] [--project p]
+artifacts publish <file> [--slug s] [--title t] [--tags a,b] [--project p] [--description d] [--og-image url] [--expires ISO] [--type html|jsx|tsx|md|redirect] [--frame on|off] [--visibility public|private|password] [--password pw]
+artifacts deploy <dir|zip> [--slug s] [--title t] [--tags a,b] [--project p] [--description d] [--og-image url] [--expires ISO] [--visibility public|private|password] [--password pw]
+artifacts update <slug> <file> [--title t] [--tags a,b] [--project p] [--description d] [--og-image url]
 artifacts list [--tag t] [--project p]
 artifacts rename <slug> <new-slug>
 artifacts disable <slug> | enable <slug>
@@ -32,6 +32,7 @@ artifacts rotate <slug>          # invalidate every share link already handed ou
 artifacts expire <slug> <ISO-date|never>
 artifacts tag <slug> <a,b,c|none>
 artifacts project <slug> <name|none>
+artifacts preview <slug> [--description <d|none>] [--og-image <url|none>]
 artifacts delete <slug>
 artifacts source <slug> [-o file]
 artifacts qr <slug> [--png] [--scale n] [--margin n] [-o file]
@@ -52,6 +53,24 @@ default 8) and `--margin` the quiet zone in modules (0 to 8, default 4).
 ## API keys
 
 Mint scoped bearer tokens for CLI/MCP clients instead of sharing the bootstrap key. `keys create` prints the full token once (store it) — the server keeps only a hash. `--scopes` defaults to `publish`. See [Auth & API keys](auth.md).
+
+## Link previews
+
+`--description` and `--og-image` set what a chat app or a social card shows when someone pastes the
+link. Both take a value on `publish`, `deploy` and `update`, and `artifacts preview <slug>` sets
+either one on an artifact that is already up:
+
+```bash
+artifacts preview hello --description "Q3 numbers, one page"
+artifacts preview hello --og-image https://cdn.example.com/card.png
+artifacts preview hello --og-image none        # clear just the image
+```
+
+Either flag on its own leaves the other field alone. `none` clears a field, the same word `tag` and
+`project` take. The image has to be an absolute `http://` or `https://` URL, and a description is
+capped at 300 characters after whitespace collapses. `artifacts list` marks a row `preview` when
+either field is set. Which pages actually carry the tags is in [formats](formats.md); an artifact
+served with no frame carries its stored bytes untouched, so it carries no tags either.
 
 ## Projects
 
@@ -87,6 +106,9 @@ artifacts list --tag demo                     # only artifacts tagged "demo"
 
 artifacts project hello acme-redesign         # file it under a project
 artifacts list --project acme-redesign        # only that project's artifacts
+
+artifacts preview hello --description "Q3 numbers, one page"   # link preview text
+artifacts preview hello --og-image none                        # drop the preview image
 
 artifacts config --frame-enabled true --frame-default true   # turn the frame on globally
 artifacts frame hello off                                     # no frame for this one artifact
