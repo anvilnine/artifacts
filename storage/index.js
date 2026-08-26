@@ -16,6 +16,7 @@
 //     listMetas()               -> [{ slug, buffer }]            // every artifact's meta.json
 //     move(oldSlug, newSlug)                                     // rename a whole namespace
 //     copySlug(srcSlug, dstSlug)                                 // copy a namespace's content objects (NOT meta.json)
+//     delete(key)                                                // remove ONE object (never a prefix); a key that is gone is not an error
 //     deleteSlug(slug)                                           // remove a whole namespace
 //     flush?()                  // optional: durably commit a completed write (git)
 //   }
@@ -39,6 +40,10 @@
 // content objects first and `<slug>/meta.json` LAST as a commit marker, because readMeta
 // and listMetas key off meta.json — a namespace with no meta is invisible (404), never
 // half-served. deleteSlug removes meta first. See server.js for where this is applied.
+//
+// The same ordering decides where delete(key) goes: a replace that changes the type drops the
+// old type's objects AFTER meta.json names the new one, so a crash mid-conversion leaves the
+// old record whole rather than a listed artifact whose body is gone.
 
 // A key/segment that fails validation. Callers map this to 404 (it only reaches a backend
 // via user-controlled zip sub-paths); it must never surface as a 500.
@@ -73,6 +78,30 @@ const BACKENDS = {
   sqlite: () => import('./sqlite.js'),
 };
 
+// Every method the app calls on a store. A backend that is missing one fails the boot rather
+// than the request that first needs it: the type-change cleanup swallows a failed delete on
+// purpose (a write that already landed must not 500), so a backend with no delete would warn
+// once per conversion forever and never fail a test. flush is left out because it is optional.
+const REQUIRED = [
+  'getBuffer',
+  'get',
+  'head',
+  'put',
+  'listMetas',
+  'move',
+  'copySlug',
+  'delete',
+  'deleteSlug',
+];
+
+export function assertComplete(name, storage) {
+  const missing = REQUIRED.filter((method) => typeof storage?.[method] !== 'function');
+  if (missing.length) {
+    throw new Error(`storage backend "${name}" is missing: ${missing.join(', ')}`);
+  }
+  return storage;
+}
+
 // Instantiate the configured backend and run its boot check (fail-fast, like the
 // ARTIFACTS_API_KEY check) so a misconfigured store crashes at startup, not first request.
 export async function createStorage() {
@@ -90,7 +119,7 @@ export async function createStorage() {
       `storage backend "${name}" could not be loaded — is its dependency installed? (${err.message})`,
     );
   }
-  const storage = await mod.create();
+  const storage = assertComplete(name, await mod.create());
   await storage.init?.();
   return storage;
 }

@@ -78,6 +78,12 @@ export async function create() {
       );
     },
 
+    async delete(key) {
+      // Equality, not a range, so no collation question: this drops one object, and a row that
+      // is not there is a no-op.
+      await q('DELETE FROM artifacts WHERE key = $1', [key]);
+    },
+
     async deleteSlug(slug) {
       await q('DELETE FROM artifacts WHERE key COLLATE "C" >= $1 AND key COLLATE "C" < $2', [`${slug}/`, `${slug}0`]);
     },
