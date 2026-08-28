@@ -508,7 +508,26 @@ expect_code 400 "$code" "renaming a redirect onto its own target refused"
 [ "$(list_field ci-redir-rename target)" = "$BASE/a/ci-redir-gone" ] || fail "the refused rename moved the artifact anyway"
 curl -sf -X DELETE "$BASE/api/artifacts/ci-redir-rename" -H "$AUTH" > /dev/null
 curl -sf -X DELETE "$BASE/api/artifacts/ci-redir-hop-2" -H "$AUTH" > /dev/null
-echo "ok: self-referencing redirects refused at publish, repoint and rename"
+# a duplicate lands on a slug the caller picks, so a target that was somebody else's problem on
+# the original is a loop on the copy. The check runs before any bytes are copied, so the refusal
+# leaves nothing behind at the target name.
+curl -sf -X POST "$BASE/api/artifacts" -H "$AUTH" -H "$JSON" \
+  -d "{\"content\":\"$BASE/a/ci-redir-dup-dst\",\"type\":\"redirect\",\"slug\":\"ci-redir-dup-src\",\"visibility\":\"public\"}" > /dev/null
+code=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/api/artifacts/ci-redir-dup-src/duplicate" -H "$AUTH" -H "$JSON" \
+  -d '{"slug":"ci-redir-dup-dst","visibility":"public"}')
+expect_code 400 "$code" "duplicating a redirect onto its own target refused"
+curl -s -X POST "$BASE/api/artifacts/ci-redir-dup-src/duplicate" -H "$AUTH" -H "$JSON" \
+  -d '{"slug":"ci-redir-dup-dst","visibility":"public"}' \
+  | grep -qF 'cannot point at its own slug' || fail "the duplicate 400 does not say what is wrong"
+code=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/a/ci-redir-dup-dst")
+expect_code 404 "$code" "the refused duplicate published the artifact anyway"
+# a copy onto any other name is still a copy
+curl -sf -X POST "$BASE/api/artifacts/ci-redir-dup-src/duplicate" -H "$AUTH" -H "$JSON" \
+  -d '{"slug":"ci-redir-dup-ok","visibility":"public"}' > /dev/null
+[ "$(list_field ci-redir-dup-ok target)" = "$BASE/a/ci-redir-dup-dst" ] || fail "the copy lost its target"
+curl -sf -X DELETE "$BASE/api/artifacts/ci-redir-dup-ok" -H "$AUTH" > /dev/null
+curl -sf -X DELETE "$BASE/api/artifacts/ci-redir-dup-src" -H "$AUTH" > /dev/null
+echo "ok: self-referencing redirects refused at publish, repoint, rename and duplicate"
 
 # non-http targets are refused at publish time, so they can never reach a Location header
 for bad in 'javascript:alert(1)' 'JaVaScRiPt:alert(1)' 'data:text/html,<script>x</script>' '//evil.example' '/relative/path' 'not a url'; do
@@ -982,6 +1001,9 @@ hopkey=$(printf '%s' "$resp" | sed -n 's/.*"key":"\([^"]*\)".*/\1/p')
 hopid=$(printf '%s' "$resp" | sed -n 's/.*"id":"\([^"]*\)".*/\1/p')
 [ -n "$hopkey" ] || fail "hop key create returned no key"
 HOPAUTH="Authorization: Bearer $hopkey"
+# the create response carries the same fields a list row does, so a client can drop it straight
+# into the key list without a second fetch
+printf '%s' "$resp" | grep -qF '"redirects":0' || fail "the key create response has no redirects field"
 [ "$(key_field "$hopid" redirects)" = "0" ] || fail "a fresh key does not start at 0 redirects"
 for n in 1 2 3; do
   curl -sf -X POST "$BASE/api/artifacts" -H "$HOPAUTH" -H "$JSON" \
@@ -995,15 +1017,28 @@ curl -sf -X POST "$BASE/api/artifacts" -H "$HOPAUTH" -H "$JSON" \
 curl -sf -X PUT "$BASE/api/artifacts/ci-hop-1" -H "$HOPAUTH" -H "$JSON" \
   -d '{"content":"https://example.com/hop-1b","type":"redirect"}' > /dev/null
 [ "$(key_field "$hopid" redirects)" = "3" ] || fail "a replace double-counted"
-# deleting one takes it off the count, so the number tracks what is live
+# deleting one takes it off the count, so the number tracks the stored records
 curl -sf -X DELETE "$BASE/api/artifacts/ci-hop-3" -H "$AUTH" > /dev/null
 [ "$(key_field "$hopid" redirects)" = "2" ] || fail "a delete did not come off the count"
 # the bootstrap key names no key, so its redirects land in nobody's total
 curl -sf -X POST "$BASE/api/artifacts" -H "$AUTH" -H "$JSON" \
   -d '{"content":"https://example.com/hop-boot","type":"redirect","slug":"ci-hop-boot"}' > /dev/null
 [ "$(key_field "$hopid" redirects)" = "2" ] || fail "a bootstrap-key redirect was billed to a managed key"
+# a duplicate is a new hop and belongs to whoever made the copy. Billed to nobody, a key could
+# mint hops all day through /duplicate while its count stood still.
+curl -sf -X POST "$BASE/api/artifacts/ci-hop-1/duplicate" -H "$HOPAUTH" -H "$JSON" \
+  -d '{"slug":"ci-hop-copy"}' > /dev/null
+[ "$(key_field "$hopid" redirects)" = "3" ] || fail "a duplicate was not billed to the key that made it: $(key_field "$hopid" redirects)"
+# a replace by a principal with no key of its own keeps the name already on the record. The
+# replace case above uses the key that published, so it never exercised this: here the bootstrap
+# key repoints the managed key's hop, which is the first move an operator makes on finding a
+# leaked key, and it used to erase the count that showed them the leak.
+curl -sf -X PUT "$BASE/api/artifacts/ci-hop-1" -H "$AUTH" -H "$JSON" \
+  -d '{"content":"https://example.com/hop-1c","type":"redirect"}' > /dev/null
+[ "$(key_field "$hopid" redirects)" = "3" ] || fail "a bootstrap PUT erased the key's attribution: $(key_field "$hopid" redirects)"
 # and the key id never rides out on the artifact list, which every read-scoped key can call
 if curl -s "$BASE/api/artifacts" -H "$AUTH" | grep -q '"keyId"'; then fail "the artifact list leaked keyId"; fi
+curl -sf -X DELETE "$BASE/api/artifacts/ci-hop-copy" -H "$AUTH" > /dev/null
 curl -sf -X DELETE "$BASE/api/artifacts/ci-hop-boot" -H "$AUTH" > /dev/null
 curl -sf -X DELETE "$BASE/api/artifacts/ci-hop-page" -H "$AUTH" > /dev/null
 curl -sf -X DELETE "$BASE/api/artifacts/ci-hop-2" -H "$AUTH" > /dev/null

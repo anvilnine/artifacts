@@ -32,6 +32,25 @@ test('a body body-parser refuses is a 400 that names the problem', () => {
   const answer = clientFacingError(parseFailure());
   assert.equal(answer.status, 400);
   assert.match(answer.message, /JSON/);
+  // `null`, `5`, `"x"` and `true` are all valid JSON, so "invalid JSON" named the wrong thing
+  // for three of the four shapes this branch exists for. What refuses them is strict mode
+  // wanting an object or an array, which is the part a caller can act on.
+  assert.equal(answer.message, 'invalid JSON body: expected a JSON object');
+});
+
+test('an ApiError built with a 5xx says nothing about itself either', () => {
+  // No route builds one today. The branch above hands back whatever message it is given,
+  // whatever the status, so `new ApiError(500, err.message)` would ship an internal string
+  // to the caller the day someone writes it.
+  assert.equal(clientFacingError(new ApiError(500, '/data/secrets/keys.json is unreadable')), null);
+  assert.equal(clientFacingError(new ApiError(503, 'postgres pool exhausted')), null);
+  // A status that is not a status cannot reach res.status() either, which throws on it.
+  assert.equal(clientFacingError(new ApiError(undefined, 'no status')), null);
+  // 4xx keeps working, since that is every ApiError this repo throws.
+  assert.deepEqual(clientFacingError(new ApiError(409, 'slug "x" already exists')), {
+    status: 409,
+    message: 'slug "x" already exists',
+  });
 });
 
 test('a body past the limit is a 413 naming the limits', () => {

@@ -40,6 +40,7 @@ import {
   parseRedirectTarget,
   resolveRedirectTarget,
   pointsAtOwnSlug,
+  storedTargetPointsAtSlug,
   countRedirectsByKey,
 } from './lib/redirect.js';
 import { fillShell } from './lib/shells.js';
@@ -721,12 +722,14 @@ async function storeArtifact(finalSlug, { content, type = 'html', title, descrip
   // carries it in meta for the dashboard row. Cleared on any other type, or an artifact
   // converted away from redirect would keep claiming a destination it no longer has.
   // keyId rides along for the same reason: GET /api/keys counts a key's redirects off the
-  // stored records, so the count follows a replace as well as a first publish. A publish from
-  // the bootstrap key or the dashboard has no key to name, and clears whatever was there.
+  // stored records, so the count follows a replace as well as a first publish. A replace by a
+  // principal with no key of its own leaves the existing attribution alone: a dashboard session
+  // has no keyId at all and the bootstrap key sets it to null, so clearing it here meant that
+  // repointing a leaked key's hop, which is the first thing an operator does on finding one,
+  // erased the count that showed them the key was leaking.
   if (type === 'redirect') {
     meta.target = body;
     if (keyId) meta.keyId = keyId;
-    else delete meta.keyId;
   } else {
     delete meta.target;
     delete meta.keyId;
@@ -786,7 +789,7 @@ async function storeArtifact(finalSlug, { content, type = 'html', title, descrip
 // the request body when provided, else inherits the source's value, so a copy keeps all of
 // the original's setup unless the caller overrides it. The view password cannot be inherited
 // (stored hashed), so a password-visibility copy requires a new password in the body.
-async function duplicateArtifact(sourceSlug, body = {}) {
+async function duplicateArtifact(sourceSlug, body = {}, { keyId = null } = {}) {
   if (!SLUG_RE.test(sourceSlug)) throw new ApiError(404, `slug "${sourceSlug}" not found`);
   // Validated after the fallback, the way it always was here: an empty or absent slug on a copy
   // means "pick one", where the same value on a publish is a 400.
@@ -796,10 +799,10 @@ async function duplicateArtifact(sourceSlug, body = {}) {
   }
   // Both names: the target because the 409 below is a read-then-write, and the source because
   // copySlug walks its directory while a PATCH there may be renaming a scratch file into place.
-  return withMetaChains([sourceSlug, targetSlug], () => copyArtifact(sourceSlug, targetSlug, body));
+  return withMetaChains([sourceSlug, targetSlug], () => copyArtifact(sourceSlug, targetSlug, body, keyId));
 }
 
-async function copyArtifact(sourceSlug, targetSlug, body) {
+async function copyArtifact(sourceSlug, targetSlug, body, keyId) {
   const source = await readMeta(sourceSlug);
   if (!source) throw new ApiError(404, `slug "${sourceSlug}" not found`);
   if (await readMeta(targetSlug)) {
@@ -840,6 +843,39 @@ async function copyArtifact(sourceSlug, targetSlug, body) {
     throw new ApiError(400, 'password is required when visibility is "password"');
   }
 
+  // A copy is a publish, so it answers to the publish rules, and it answers to them here,
+  // before anything is written. The target is read off the original, so a refusal leaves no
+  // bytes to clean up.
+  //
+  // A copy points where the original points, which is what the original's meta says, so this
+  // resolves the same way the serve path does rather than reading the stored bytes first.
+  // Reading the bytes re-imported the drift the resolver exists to remove, and it promoted a
+  // value nothing had validated into meta, where the list API hands it to every read-scoped
+  // key: a target with credentials, published before that rule existed, would have leaked
+  // through a duplicate.
+  let copiedTarget;
+  if (source.type === 'redirect') {
+    const stored = await resolveRedirectTarget({ meta: source, readSource: () => storage.getBuffer(`${sourceSlug}/source.url`) });
+    // Writing the target unvalidated was the one door where the publish rules did not apply.
+    // Refusing beats copying anyway with the target left off: that produced a brand-new
+    // artifact whose row said nothing while its 301 still handed credentials to the target
+    // host. Repoint the original and the copy goes through.
+    try {
+      copiedTarget = parseRedirectTarget(stored, { publishing: true });
+    } catch (err) {
+      throw new ApiError(400, `cannot copy "${sourceSlug}": ${err.message}`);
+    }
+    // The copy lands on a different slug, so a target that was somebody else's problem on the
+    // original is a loop here: duplicating a hop onto the very slug it points at built the
+    // self-reference a direct publish refuses.
+    if (pointsAtOwnSlug(copiedTarget, targetSlug, BASE_URL)) {
+      throw new ApiError(
+        400,
+        `a redirect cannot point at its own slug: "${copiedTarget}" is /a/${targetSlug} on this server`,
+      );
+    }
+  }
+
   // Copy content first; meta.json is written LAST as the commit marker (copySlug skips it).
   await storage.copySlug(sourceSlug, targetSlug);
 
@@ -851,25 +887,12 @@ async function copyArtifact(sourceSlug, targetSlug, body) {
     updatedAt: new Date().toISOString(),
   };
   if (source.type === 'zip' && typeof source.files === 'number') meta.files = source.files;
-  // A copy points where the original points, which is what the original's meta says, so this
-  // resolves the same way the serve path does rather than reading the copied bytes. Reading the
-  // bytes re-imported the drift the resolver exists to remove, and it promoted a value nothing
-  // had validated into meta, where the list API hands it to every read-scoped key: a target with
-  // credentials, published before that rule existed, would have leaked through a duplicate.
-  // Anything the parser refuses is left off the copy rather than written to it.
   if (source.type === 'redirect') {
-    const copied = await resolveRedirectTarget({ meta: source, readSource: () => storage.getBuffer(`${targetSlug}/source.url`) });
-    // A copy is a publish, so it answers to the publish rules. Writing the target unvalidated
-    // was the one door where they did not apply. Refusing beats copying anyway with the target
-    // left off: that produced a brand-new artifact whose row said nothing while its 301 still
-    // handed credentials to the target host, which is the disagreement this whole change exists
-    // to remove. Repoint the original and the copy goes through.
-    try {
-      meta.target = parseRedirectTarget(copied, { publishing: true });
-    } catch (err) {
-      await storage.deleteSlug(targetSlug).catch(() => {}); // drop the bytes copySlug already wrote
-      throw new ApiError(400, `cannot copy "${sourceSlug}": ${err.message}`);
-    }
+    meta.target = copiedTarget;
+    // The copy is a new hop and belongs to whoever made it, not to whoever published the
+    // original. Leaving keyId off meant a key could duplicate its own redirect all day while
+    // GET /api/keys still said one, which is the burst the count exists to show.
+    if (keyId) meta.keyId = keyId;
   }
   if (expiry !== undefined) meta.expiresAt = expiry;
   if (tagList && tagList.length) meta.tags = tagList;
@@ -1066,11 +1089,22 @@ async function applyPatch(slug, patch, newSlug) {
   }
   // A rename is the other way a redirect ends up pointing at itself: hop-a points at /a/hop-b,
   // hop-b is deleted, and renaming hop-a to hop-b closes the loop without any target changing.
-  if (renaming && meta.type === 'redirect' && pointsAtOwnSlug(meta.target, newSlug, BASE_URL)) {
-    throw new ApiError(
-      400,
-      `renaming to "${newSlug}" would point this redirect at itself: it targets "${meta.target}"`,
-    );
+  // The target is resolved rather than read off meta, because a redirect published before
+  // meta.target existed keeps its target in source.url alone: new URL(undefined) then threw
+  // inside the check, which answered false, and the rename went through.
+  if (renaming && meta.type === 'redirect') {
+    const looping = await storedTargetPointsAtSlug({
+      meta,
+      readSource: () => storage.getBuffer(`${slug}/source.url`),
+      slug: newSlug,
+      baseUrl: BASE_URL,
+    });
+    if (looping) {
+      throw new ApiError(
+        400,
+        `renaming to "${newSlug}" would point this redirect at itself: it targets "${looping}"`,
+      );
+    }
   }
 
   const changes = await parsePatch(patch, meta);
@@ -1667,7 +1701,7 @@ app.get('/api/artifacts/:slug/qr', requireAuth('read'), async (req, res, next) =
 
 app.post('/api/artifacts/:slug/duplicate', requireAuth('publish'), async (req, res, next) => {
   try {
-    res.status(201).json(await duplicateArtifact(req.params.slug, req.body));
+    res.status(201).json(await duplicateArtifact(req.params.slug, req.body, { keyId: req.principal.keyId }));
   } catch (err) {
     next(err);
   }
@@ -1838,8 +1872,10 @@ app.post('/api/keys', requireAdmin, async (req, res, next) => {
     await update((a) => {
       a.keys.push(record);
     });
-    // The full token is shown once, here, and never stored in the clear.
-    res.status(201).json({ ...publicKey(record), key: token });
+    // The full token is shown once, here, and never stored in the clear. `redirects: 0` is
+    // there so this row has the same shape as a row from GET /api/keys, which the dashboard
+    // and the CLI both drop straight into their list without a second fetch.
+    res.status(201).json({ ...publicKey(record), redirects: 0, key: token });
   } catch (err) {
     next(err);
   }
