@@ -1036,6 +1036,48 @@ body=$(curl -s -b /tmp/pwjar "$BASE/a/cap-pw?raw=1")
 echo "$body" | grep -q 'pw body' || fail "password unlock cookie did not serve body"
 echo "ok: password mode unlock round-trip"
 
+# --- branding: one config change rebrands every shell, no shell file touched ---
+# The pairs matter as much as the branded assertions: an untouched instance has to keep
+# rendering the built-in wording and colors, which is what makes this upgrade invisible.
+curl -sf -X POST "$BASE/api/artifacts" -H "$AUTH" -H "$JSON" \
+  -d '{"content":"# brand smoke\n\nhi","type":"md","slug":"ci-brand-md","visibility":"public"}' > /dev/null
+curl -s "$BASE/a/does-not-exist-zzz" | grep -q 'Artifact unavailable' || fail "404 page is not on the default branding"
+curl -s "$BASE/a/cap-pw" | grep -q 'Protected artifact' || fail "password page is not on the default branding"
+curl -s "$BASE/a/ci-brand-md?raw=1" | grep -q -- '--link: #c73d1d' || fail "md page is not on the default link color"
+echo "ok: shells render the built-in branding by default"
+
+curl -sf -X PUT "$BASE/api/config" -H "$AUTH" -H "$JSON" \
+  -d '{"branding":{"productName":"Smokebrand","logoUrl":"/brand/logo.svg","faviconUrl":"/brand/f.ico","accentColor":"#0055ff","footerText":"Published with Smokebrand"}}' > /dev/null
+curl -s "$BASE/api/config" -H "$AUTH" | grep -q '"productName":"Smokebrand"' || fail "branding did not persist"
+
+body=$(curl -s "$BASE/a/does-not-exist-zzz")
+echo "$body" | grep -q 'Smokebrand unavailable' || fail "404 page kept the built-in product name"
+echo "$body" | grep -q '#0055ff' || fail "404 page kept the built-in accent color"
+echo "$body" | grep -q 'Published with Smokebrand' || fail "404 page missing the branded footer"
+echo "$body" | grep -q '<img class="mark" src="/brand/logo.svg"' || fail "404 page kept the built-in mark"
+body=$(curl -s "$BASE/a/cap-pw")
+echo "$body" | grep -q 'Protected Smokebrand' || fail "password page kept the built-in product name"
+echo "$body" | grep -q '#0055ff' || fail "password page kept the built-in accent color"
+echo "$body" | grep -q '<link rel="icon" href="/brand/f.ico">' || fail "password page missing the branded favicon"
+body=$(curl -s "$BASE/a/ci-brand-md?raw=1")
+echo "$body" | grep -q -- '--link: #0055ff' || fail "md page kept the built-in link color"
+echo "$body" | grep -q '<link rel="icon" href="/brand/f.ico">' || fail "md page missing the branded favicon"
+curl -s "$BASE/a/ci-brand-md" | grep -q 'Smokebrand' || fail "frame bar missing the product name"
+echo "ok: branding rebrands the 404, password, md and frame shells"
+
+# a refused value -> 400 naming the field, and nothing written
+out=$(curl -s -o /dev/null -w '%{http_code}' -X PUT "$BASE/api/config" -H "$AUTH" -H "$JSON" -d '{"branding":{"accentColor":"red; } body { display: none"}}')
+expect_code 400 "$out" "invalid accentColor rejected"
+curl -s "$BASE/api/config" -H "$AUTH" | grep -q '"accentColor":"#0055ff"' || fail "a refused branding PUT still wrote"
+echo "ok: branding validation"
+
+# back to neutral, so the rest of the suite sees the shipped look
+curl -sf -X PUT "$BASE/api/config" -H "$AUTH" -H "$JSON" \
+  -d '{"branding":{"productName":"","logoUrl":"","faviconUrl":"","accentColor":"","footerText":""}}' > /dev/null
+curl -s "$BASE/a/does-not-exist-zzz" | grep -q 'Artifact unavailable' || fail "branding reset did not restore the default 404 copy"
+curl -sf -X DELETE "$BASE/api/artifacts/ci-brand-md" -H "$AUTH" > /dev/null
+echo "ok: branding reset to the built-in defaults"
+
 curl -sf -X DELETE "$BASE/api/artifacts/cap-one" -H "$AUTH" > /dev/null
 curl -sf -X DELETE "$BASE/api/artifacts/cap-pw" -H "$AUTH" > /dev/null
 

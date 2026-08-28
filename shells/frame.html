@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="robots" content="noindex, nofollow">
-<title>{{TITLE}}</title>
+<title>{{TITLE}}</title>{{FAVICON}}
 {{SOCIAL}}
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -77,11 +77,11 @@
   #reveal:hover { opacity: 1; color: var(--bar-fg); }
 
   body.frame-hidden #bar { display: none; }
-  body.frame-hidden #reveal { display: inline-flex; }
+  body.frame-hidden #reveal { display: inline-flex; }{{BRAND_STYLE}}
 </style>
 </head>
 <body>
-  <div id="bar">
+  <div id="bar">{{BRAND}}
     <span id="title">{{TITLE}}</span>
     {{THEME_BTN}}
     <button id="copy" type="button" title="Copy link to this artifact">Copy link</button>

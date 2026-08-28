@@ -39,6 +39,9 @@ import { qrPng, qrSvg } from './lib/qr.js';
 import { parseRedirectTarget, resolveRedirectTarget } from './lib/redirect.js';
 import { fillShell } from './lib/shells.js';
 import {
+  frameBrandSlots, mdBrandSlots, notFoundBrandSlots, passwordBrandSlots,
+} from './lib/branding.js';
+import {
   dropIfRefused, escapeHtml, parseDescription, parseOgImage, socialTags,
 } from './lib/social.js';
 
@@ -267,8 +270,9 @@ const MD_FONT_STACKS = {
 const MD_WIDTH_PX = { narrow: '640px', normal: '760px', wide: '900px' };
 const MD_SIZE_PX  = { small: '15px', normal: '16px', large: '18px' };
 
-function buildMdHtml(source, meta, mdCfg = config.current.md) {
+function buildMdHtml(source, meta, mdCfg = config.current.md, branding = config.current.branding) {
   return fillShell(MD_SHELL, {
+    ...mdBrandSlots(branding),
     TITLE: escapeHtml(meta.title || meta.slug),
     SOCIAL: socialTags(meta, canonicalUrl(meta)),
     FONT: MD_FONT_STACKS[mdCfg.font],
@@ -284,28 +288,30 @@ function buildMdHtml(source, meta, mdCfg = config.current.md) {
 // loop, 8 MB costs ~780ms. A public md artifact is readable by anyone holding the link,
 // so without a cache any reader can stall the whole process once per request.
 //
-// Keyed on the md config as well as the artifact, so editing the global knobs still takes
-// effect immediately. Writers drop their slug's entries (dropMdRender) rather than relying
+// Keyed on the md config and the branding as well as the artifact, so editing either set of
+// global knobs still takes effect immediately. Writers drop their slug's entries (dropMdRender) rather than relying
 // on updatedAt, which is only millisecond-precise. Bounded by rendered bytes, not entry
 // count, because the entries worth caching are the large ones.
 const MD_CACHE_MAX_BYTES = 48 * 1024 * 1024;
 const mdRenderCache = new Map();
 let mdCacheBytes = 0;
 
-// SLUG_RE allows no '|', so the separator can never appear in the slug half of the key.
-function mdCacheKey(slug, mdCfg) {
-  return `${slug}|${mdCfg.font}:${mdCfg.width}:${mdCfg.size}:${mdCfg.theme}`;
+// SLUG_RE allows no '|', so the separator can never appear in the slug half of the key, which
+// is the half dropMdRender matches on. Branding values may hold one; everything after the first
+// separator is opaque, so that costs nothing.
+function mdCacheKey(slug, mdCfg, branding) {
+  return `${slug}|${mdCfg.font}:${mdCfg.width}:${mdCfg.size}:${mdCfg.theme}|${JSON.stringify(branding)}`;
 }
 
-function renderMd(slug, meta, source, mdCfg = config.current.md) {
-  const key = mdCacheKey(slug, mdCfg);
+function renderMd(slug, meta, source, mdCfg = config.current.md, branding = config.current.branding) {
+  const key = mdCacheKey(slug, mdCfg, branding);
   const hit = mdRenderCache.get(key);
   if (hit !== undefined) {
     mdRenderCache.delete(key); // re-insert so iteration order stays least-recent-first
     mdRenderCache.set(key, hit);
     return hit;
   }
-  const html = buildMdHtml(source, meta, mdCfg);
+  const html = buildMdHtml(source, meta, mdCfg, branding);
   mdRenderCache.set(key, html);
   mdCacheBytes += html.length;
   while (mdCacheBytes > MD_CACHE_MAX_BYTES && mdRenderCache.size > 1) {
@@ -329,6 +335,7 @@ function dropMdRender(slug) {
 // Parent "frame" page: a slim toolbar with the artifact loaded in an iframe.
 function buildFrameHtml(meta, rawUrl) {
   return fillShell(FRAME_SHELL, {
+    ...frameBrandSlots(config.current.branding),
     TITLE: escapeHtml(meta.title || meta.slug),
     SOCIAL: socialTags(meta, canonicalUrl(meta)),
     RAW_URL: escapeHtml(rawUrl),
@@ -341,11 +348,14 @@ function buildFrameHtml(meta, rawUrl) {
 // Unlock prompt for password-mode artifacts. Renders no title and no mode label so it
 // discloses nothing about the artifact to someone who only holds the URL.
 function buildPromptHtml(meta) {
-  return fillShell(PASSWORD_SHELL, { SLUG: escapeHtml(meta.slug) });
+  return fillShell(PASSWORD_SHELL, {
+    ...passwordBrandSlots(config.current.branding),
+    SLUG: escapeHtml(meta.slug),
+  });
 }
 
 function buildNotFoundHtml() {
-  return NOT_FOUND_SHELL;
+  return fillShell(NOT_FOUND_SHELL, notFoundBrandSlots(config.current.branding));
 }
 
 async function readMeta(slug) {
