@@ -8,7 +8,13 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createConfigStore } from '../lib/config.js';
-import { parseAccentColor, parseBrandUrl, parseFooterText, parseProductName } from '../lib/branding.js';
+import {
+  MAX_BRAND_URL_LEN,
+  parseAccentColor,
+  parseBrandUrl,
+  parseFooterText,
+  parseProductName,
+} from '../lib/branding.js';
 
 function memStorage() {
   const files = new Map();
@@ -49,13 +55,14 @@ test('a full branding block round-trips and persists', async () => {
   const updated = await config.update({
     branding: {
       productName: 'Dropkiln',
-      logoUrl: 'https://cdn.example.com/logo.svg',
+      logoUrl: '/a/brand/logo.png',
       faviconUrl: '/favicon.ico',
       accentColor: '#0055ff',
       footerText: 'Published with Dropkiln',
     },
   });
   assert.equal(updated.branding.productName, 'Dropkiln');
+  assert.equal(updated.branding.logoUrl, '/a/brand/logo.png');
   assert.equal(updated.branding.faviconUrl, '/favicon.ico');
   assert.equal(config.current.branding.accentColor, '#0055ff');
 
@@ -110,18 +117,53 @@ test('productName keeps plain text and trims it', () => {
   assert.equal(parseProductName(''), '');
 });
 
-test('brand URLs allow absolute http(s) and root-relative paths only', () => {
-  assert.equal(parseBrandUrl('logoUrl', 'https://cdn.example.com/l.svg'), 'https://cdn.example.com/l.svg');
-  assert.equal(parseBrandUrl('logoUrl', 'http://localhost:3013/l.svg'), 'http://localhost:3013/l.svg');
-  assert.equal(parseBrandUrl('logoUrl', '/assets/l.svg'), '/assets/l.svg');
+// A brand asset is same-origin or inline. The chrome pages carry `img-src 'self' data:`, so an
+// absolute URL used to be accepted here and then refused by the viewer's own browser, and on the
+// 404 that meant no mark at all, because the logo replaces the built-in one.
+test('brand URLs allow a same-origin path or an inline image, nothing remote', () => {
+  assert.equal(parseBrandUrl('logoUrl', '/assets/l.png'), '/assets/l.png');
+  assert.equal(parseBrandUrl('logoUrl', '/a/brand/logo.png'), '/a/brand/logo.png');
+  assert.equal(parseBrandUrl('logoUrl', 'data:image/png;base64,AAAA'), 'data:image/png;base64,AAAA');
   assert.equal(parseBrandUrl('logoUrl', ''), '');
-  for (const bad of ['data:image/png;base64,AAAA', 'assets/l.svg', '//cdn.example.com/l.svg', 'https://u:p@x.com/l.svg', '/l.svg"><script>']) {
+  for (const bad of [
+    'https://cdn.example.com/l.png',
+    'http://localhost:3013/l.png',
+    'assets/l.png',
+    '//cdn.example.com/l.png',
+    'https://u:p@x.com/l.png',
+    '/l.png"><script>',
+  ]) {
     assert.throws(() => parseBrandUrl('logoUrl', bad), /logoUrl/, `accepted ${bad}`);
   }
 });
 
+// An SVG runs script, and nothing on this branch sanitizes one. T2.2.3 and T2.6.10 both name it.
+test('brand URLs refuse an inline SVG and every non-image data URI', () => {
+  for (const bad of [
+    'data:image/svg+xml;base64,AAAA',
+    'data:image/svg+xml,<svg onload=alert(1)>',
+    'data:text/html;base64,AAAA',
+    'data:image/png,AAAA',
+    'data:image/png;base64,AA*AA',
+  ]) {
+    assert.throws(() => parseBrandUrl('logoUrl', bad), /logoUrl/, `accepted ${bad}`);
+  }
+  for (const good of ['png', 'jpeg', 'webp', 'gif']) {
+    assert.equal(
+      parseBrandUrl('faviconUrl', `data:image/${good};base64,AAAA`),
+      `data:image/${good};base64,AAAA`,
+    );
+  }
+});
+
+test('brand URLs hold a small inline image and refuse a big one', () => {
+  const body = 'A'.repeat(MAX_BRAND_URL_LEN - 'data:image/png;base64,'.length);
+  assert.equal(parseBrandUrl('logoUrl', `data:image/png;base64,${body}`).length, MAX_BRAND_URL_LEN);
+  assert.throws(() => parseBrandUrl('logoUrl', `data:image/png;base64,${body}A`), /too long/);
+});
+
 test('accentColor takes hex and rgb/hsl functions, nothing else', () => {
-  for (const good of ['#fff', '#f0502a', '#f0502aff', 'rgb(240, 80, 42)', 'rgba(240,80,42,.35)', 'hsl(14 88% 55%)']) {
+  for (const good of ['#fff', '#f0502a', '#f0502aff', 'rgb(240, 80, 42)', 'rgba(240,80,42,1)', 'hsl(14 88% 55%)', 'hsl(14deg 88% 55% / 100%)']) {
     assert.equal(parseAccentColor(good), good, `refused ${good}`);
   }
   for (const bad of ['rebeccapurple', 'var(--x)', 'url(x)', '#12345', 'rgb(1,2,3);color:red', 'expression(1)']) {
@@ -129,7 +171,79 @@ test('accentColor takes hex and rgb/hsl functions, nothing else', () => {
   }
 });
 
+// The old allowlist checked the characters inside the parentheses, not the shape. Every one of
+// these returned a 200 and then voided the declaration it landed in: served with `rgb(--)` the
+// unlock button computes the UA grey and the body loses its dot grid, because one bad layer
+// takes the whole `background-image` down with it.
+test('accentColor refuses a color function with the wrong argument shape', () => {
+  for (const bad of ['rgb(--)', 'rgb(,,,,)', 'hsl(+)', 'rgba(1,2)', 'hsl(1/2/3/4/5)', 'rgb(1 2 3 4 5)', 'rgb()', 'rgba(1,2,3,4,5)']) {
+    assert.throws(() => parseAccentColor(bad), /accentColor/, `accepted ${bad}`);
+  }
+});
+
+// A see-through accent is invisible: every link, inline code span and blockquote rule computes to
+// nothing, and color-mix multiplies the accent's own alpha, so the 8% glow off a 0.3 accent lands
+// at 0.024 opacity.
+test('accentColor has to be fully opaque', () => {
+  for (const bad of ['#0000', '#00000000', 'rgba(0,0,0,0)', 'rgba(29,78,216,.3)', 'hsla(220,90%,50%,0.3)', 'hsl(220 90% 50% / 30%)']) {
+    assert.throws(() => parseAccentColor(bad), /opaque/, `accepted ${bad}`);
+  }
+});
+
+// docs/api.md lists #rgba as accepted, so the message has to say so too.
+test('the accentColor message names every hex shape it takes', () => {
+  assert.throws(() => parseAccentColor('rebeccapurple'), /#rgb, #rgba, #rrggbb, #rrggbbaa/);
+});
+
 test('footerText collapses whitespace and refuses markup', () => {
   assert.equal(parseFooterText('  a\n  b  '), 'a b');
   assert.throws(() => parseFooterText('<a href=x>y</a>'), /footerText/);
+});
+
+// The case that decides whether an upgrade is invisible: a config.json written before this block
+// existed has no `branding` key at all. The test above it writes a config that is nothing BUT a
+// branding key, which is the opposite case.
+test('a config saved before branding existed upgrades to an empty branding block', async () => {
+  const storage = memStorage();
+  await storage.put('config.json', JSON.stringify({
+    frame: { enabled: false, default: false },
+    md: { font: 'serif', width: 'wide', size: 'large', theme: 'dark' },
+  }));
+  const config = await createConfigStore(storage);
+  assert.deepEqual(config.current.branding, {
+    productName: '',
+    logoUrl: '',
+    faviconUrl: '',
+    accentColor: '',
+    footerText: '',
+  });
+  assert.equal(config.current.frame.enabled, false);
+  assert.equal(config.current.md.font, 'serif');
+  assert.equal(config.current.md.width, 'wide');
+});
+
+// .env.example promises a valid BRAND_* var supplies the value and an invalid one is logged and
+// ignored rather than stopping the boot. Nothing pinned that until now.
+test('BRAND_ env vars supply the values, and a bad one warns and is ignored', async () => {
+  const before = { ...process.env };
+  const warnings = [];
+  const realWarn = console.warn;
+  console.warn = (msg) => warnings.push(String(msg));
+  try {
+    process.env.BRAND_PRODUCT_NAME = 'Dropkiln';
+    process.env.BRAND_FOOTER_TEXT = 'Published with Dropkiln';
+    process.env.BRAND_ACCENT_COLOR = 'rebeccapurple';
+    const config = await createConfigStore(memStorage());
+    assert.equal(config.current.branding.productName, 'Dropkiln');
+    assert.equal(config.current.branding.footerText, 'Published with Dropkiln');
+    assert.equal(config.current.branding.accentColor, '');
+    assert.equal(warnings.length, 1);
+    assert.match(warnings[0], /BRAND_ACCENT_COLOR/);
+  } finally {
+    console.warn = realWarn;
+    for (const key of ['BRAND_PRODUCT_NAME', 'BRAND_FOOTER_TEXT', 'BRAND_ACCENT_COLOR']) {
+      if (before[key] === undefined) delete process.env[key];
+      else process.env[key] = before[key];
+    }
+  }
 });

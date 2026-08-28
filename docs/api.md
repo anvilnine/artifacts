@@ -56,14 +56,24 @@ rendered before the block existed.
 | Field | Accepts | Refused with a 400 |
 |---|---|---|
 | `productName` | Plain text, up to 40 chars. Whitespace collapses. | Not a string, over 40 chars, or containing `<` / `>`. |
-| `logoUrl` | An absolute `http://` or `https://` URL, or a path starting with a single `/`. Up to 2048 chars. | A `data:` or `javascript:` URL, a protocol-relative `//host/x`, a relative `assets/x`, credentials in the URL, or quotes, angle brackets, backslashes or spaces anywhere in it. |
+| `logoUrl` | A same-origin path starting with a single `/`, or a base64 `data:` URI for a `png`, `jpeg`, `webp` or `gif`. Up to 8192 chars. | Any `http://` or `https://` URL, a `data:image/svg+xml` URI, any other `data:` type, a `javascript:` URL, a protocol-relative `//host/x`, a relative `assets/x`, or quotes, angle brackets, backslashes or spaces anywhere in it. |
 | `faviconUrl` | Same rules as `logoUrl`. | Same as `logoUrl`. |
-| `accentColor` | A hex color (`#rgb`, `#rgba`, `#rrggbb`, `#rrggbbaa`) or an `rgb()`, `rgba()`, `hsl()` or `hsla()` color whose parentheses hold only numbers and separators. | Anything else, color names included. The value lands inside a `<style>` block, so the check is an allowlist of shapes rather than a scan for bad characters. |
+| `accentColor` | A fully opaque hex color (`#rgb`, `#rgba`, `#rrggbb`, `#rrggbbaa`) or `rgb()`, `rgba()`, `hsl()`, `hsla()` color. Both argument forms work: `rgb(29, 78, 216)` and `rgb(29 78 216 / 100%)`. | Anything else, color names included, plus any color with an alpha below 1. The value lands inside a `<style>` block, so it is parsed rather than pattern-matched: a shape-only check let `rgb(--)` and `rgba(1,2)` through, and a color the browser cannot parse voids the whole declaration it sits in. |
 | `footerText` | Plain text, up to 160 chars. Whitespace collapses. | Not a string, over 160 chars, or containing `<` / `>`. |
 
 The error message names the field it refused, for example `branding.accentColor must be a hex color
-(#rgb, #rrggbb, #rrggbbaa) or an rgb(), rgba(), hsl() or hsla() color`. A refused field is applied
-nowhere: the whole `PUT` fails, so a bad value never lands half-written.
+(#rgb, #rgba, #rrggbb, #rrggbbaa) or an rgb(), rgba(), hsl() or hsla() color`. A refused field is
+applied nowhere: the whole `PUT` fails, so a bad value never lands half-written.
+
+**Where a brand asset lives.** A logo or favicon has to come from this origin or be inlined,
+because the chrome pages carry `img-src 'self' data:` and a viewer's browser blocks anything else.
+A hotlinked logo is also a third-party request from every page a viewer opens, which T2.6.10 rules
+out. There is no static file route on this server, so until T2.6.10 adds a real upload the three
+working options are: publish the image as a public artifact and point at `/a/<slug>/logo.png`,
+serve the path from whatever reverse proxy or CDN sits in front of this server on the same origin,
+or inline it as a `data:` URI (the 8192-char cap holds a small PNG). SVG is refused as a `data:`
+URI on purpose: an SVG runs script, it would load from our own origin, and nothing on this build
+sanitizes one.
 
 `BRAND_PRODUCT_NAME`, `BRAND_LOGO_URL`, `BRAND_FAVICON_URL`, `BRAND_ACCENT_COLOR` and
 `BRAND_FOOTER_TEXT` supply the values while no config has been saved. A value one of them holds
@@ -75,24 +85,32 @@ Where each field lands:
 
 | Surface | What branding reaches it |
 |---|---|
-| `shells/frame.html` (the viewer frame) | Favicon, a logo and name chip at the left of the bar, and the copy-link tooltip's wording. |
-| `shells/password.html` (the unlock gate) | Favicon, logo above the card, the wording ("Protected artifact" becomes "Protected Dropkiln"), accent color, footer line. |
-| `shells/not-found.html` (the 404 page) | Favicon, the logo in place of the built-in mark, the wording ("Artifact unavailable" becomes "Dropkiln unavailable"), accent color, footer line. |
+| `shells/frame.html` (the viewer frame) | Favicon, and a brand chip at the left of the bar: the logo when there is one, the product name otherwise. |
+| `shells/password.html` (the unlock gate) | Favicon, logo above the card, accent color, footer line. |
+| `shells/not-found.html` (the 404 page) | Favicon, the logo in place of the built-in mark, accent color, footer line. |
 | `shells/md.html` (markdown pages) | Favicon, and the accent color for links, inline code and the blockquote rule. |
 | `shells/jsx.html` (React pages) | Favicon and the error readout's label. |
-| Share-link tags (`og:` / `twitter:`) | `og:site_name` from the product name, and the logo as `og:image` for an artifact that carries none. A relative `logoUrl` is resolved against `BASE_URL`, because an unfurler fetches it from its own host. |
+| Share-link tags (`og:` / `twitter:`) | `og:site_name` from the product name, and the logo as `og:image` for an artifact that carries none. A path `logoUrl` is resolved against `BASE_URL`, because an unfurler fetches it from its own host. A `data:` logo supplies no `og:image`: no unfurler reads one. |
 
-A configured `productName` is used exactly as typed, capitalization included. Nothing lowercases
-it, so "Protected Dropkiln" is what a viewer sees, not "Protected dropkiln".
+`productName` names the product, not the thing the product publishes. It reaches the frame chip,
+`og:site_name`, the footer line and the jsx error label, and it is used exactly as typed,
+capitalization included. It is never substituted into the wording a viewer reads about an item:
+the 404 says "Artifact unavailable" and the gate says "Protected artifact" on every install,
+because "Dropkiln unavailable" reads as "the service is down" rather than "this link is wrong".
 
 `accentColor` takes over every accent role in a shell at once, the two translucent washes
-included, which `color-mix()` derives from the same value. The error reds are not accent roles:
-they say "this failed", and a blue-branded instance should not get a blue error message.
+included, which `color-mix()` derives from the same value. Each shell carries a light and a dark
+value for its accent, and the dark one is derived as `color-mix(in srgb, <accent> 70%, white)`,
+because one value cannot pass contrast on both a white card and a `#0b0d0f` one. The unlock
+button's label is picked the same way, from the accent's luminance: `#0b0d0f` on a light accent,
+`#ffffff` on a dark one. The error reds are not accent roles: they say "this failed", and a
+blue-branded instance should not get a blue error message.
 
 The 404, password, markdown and frame pages render per request, so a `PUT` shows on the next
-view. `html` and `jsx` artifacts are built once, at publish time, and keep the branding they were
-built with until they are republished. Their frame still rebrands, because the frame is rendered
-per request.
+view. `jsx` artifacts are built once, at publish time, and keep the branding they were built with
+until they are republished; their frame still rebrands, because the frame is rendered per request.
+`html` artifacts carry no branding at all: there is no html shell, the bytes you posted are the
+bytes served, so there is nothing stale to republish.
 
 There is no per-artifact branding. A single artifact that needs its own mark uses a watermark
 instead.
