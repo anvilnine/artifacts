@@ -104,6 +104,55 @@ For that last case the `<object>` carries fallback content: a line of text and t
 Download links. Most Android browsers land there, so a reader on Android gets two buttons rather
 than a document on the page.
 
+### Viewer controls
+
+Two per-artifact settings, both on the `pdf` field of `POST` / `PUT` / `PATCH`, in the dashboard
+row menu ("PDF view…" and "PDF download…"), and on the CLI (`artifacts pdf <slug> <setting>`):
+
+- **`mode`**: `standard` (the default), `presentation`, or `minimal`.
+- **`download`**: `true` (the default) or `false`.
+
+```bash
+curl -s -X PATCH https://artifacts.example.com/api/artifacts/q3-report \
+  -H "Authorization: Bearer $ARTIFACTS_API_KEY" -H 'Content-Type: application/json' \
+  -d '{"pdf":{"mode":"presentation","download":false}}'
+```
+
+A patch naming one key leaves the other alone. `{"pdf": null}` hands the artifact back to both
+defaults, the way `{"frame": null}` does. A value the server does not understand, and an unknown
+key, are both a `400` rather than a silent drop. So is `pdf` on an artifact that is not a pdf:
+there is no viewer page for it to apply to.
+
+The three modes:
+
+| Mode | The page |
+|---|---|
+| `standard` | Our toolbar (title, Open, Download) above the document, browser controls untouched. |
+| `presentation` | A whole page at a time on a dark backdrop, with a Full screen button in the toolbar. |
+| `minimal` | The document, edge to edge. No toolbar of ours, and the browser's asked to hide its own. |
+
+An artifact with both defaults stores nothing at all, so `GET /api/artifacts` shows a `pdf` field
+only on an artifact somebody configured.
+
+### What "disable download" actually does
+
+**It is not protection.** With `download: false` the viewer page drops its Open and Download
+buttons and the embedded file's URL asks the browser to hide its own toolbar. That is the whole
+mechanism, and it stops a reader who clicks. It stops nobody else:
+
+- `https://artifacts.example.com/a/{slug}/file.pdf` still answers with the bytes, and so does
+  `/a/{slug}/source`. Both are in the page source of the viewer, and the viewer is the only reason
+  the reader had a URL to begin with.
+- The `#toolbar=0` hint is an old Acrobat open parameter. Chrome's built-in viewer reads it;
+  Firefox and Safari ignore it, so their own toolbars, download button and print button included,
+  are still there.
+- Any browser can print or save a page it has rendered.
+
+Use it to keep a viewer on the page rather than in a downloads folder. Do not use it on a document
+that would hurt you if a reader kept a copy: if the reader can see it, the reader has it. The
+protection that does exist here is [visibility](api.md#visibility), which decides who reaches the
+artifact at all.
+
 ## Zip sites
 
 A zipped static project (HTML + CSS + JS + images) served under `/a/{slug}/`. Upload via the web UI (drop a `.zip`), the [CLI](cli.md) (`artifacts deploy ./dir`), or the [zip endpoint](api.md#zip-sites-multi-file-static-projects) — validation rules and limits are documented there.

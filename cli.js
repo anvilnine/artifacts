@@ -18,6 +18,7 @@ Usage:
   artifacts disable <slug>
   artifacts enable <slug>
   artifacts frame <slug> <on|off|default>
+  artifacts pdf <slug> <standard|presentation|minimal|download-on|download-off|default>
   artifacts visibility <slug> <public|private|password> [--password pw]
   artifacts rotate <slug>
   artifacts expire <slug> <ISO-date|never>
@@ -246,6 +247,21 @@ switch (command) {
     need(1, '<slug>');
     await apiJson('PATCH', `/api/artifacts/${args[0]}`, { disabled: command === 'disable' });
     console.log(`${args[0]} ${command}d`);
+    break;
+  }
+
+  case 'pdf': {
+    need(2, '<slug> <standard|presentation|minimal|download-on|download-off|default>');
+    const modes = ['standard', 'presentation', 'minimal'];
+    const setting = args[1];
+    let value;
+    if (setting === 'default') value = null;
+    else if (setting === 'download-on') value = { download: true };
+    else if (setting === 'download-off') value = { download: false };
+    else if (modes.includes(setting)) value = { mode: setting };
+    else fail(`pdf value must be ${modes.join(', ')}, download-on, download-off, or default`);
+    await apiJson('PATCH', `/api/artifacts/${args[0]}`, { pdf: value });
+    console.log(`${args[0]} pdf ${setting}`);
     break;
   }
 

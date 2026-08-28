@@ -7,7 +7,16 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { parsePdfContent, PDF_MAX_BYTES } from '../lib/pdf.js';
+import {
+  parsePdfContent,
+  parsePdfSettings,
+  pdfSettings,
+  pdfSettingsForMeta,
+  pdfViewerFlags,
+  PDF_DEFAULTS,
+  PDF_MAX_BYTES,
+  PDF_MODES,
+} from '../lib/pdf.js';
 
 // A real one-page PDF, small enough to inline. Built by hand with correct xref offsets, so
 // a browser opens it rather than falling back to its own repair pass.
@@ -70,4 +79,117 @@ test('the size cap is measured on the decoded bytes, not the base64', () => {
 
   const justUnder = tooBig.subarray(0, PDF_MAX_BYTES);
   assert.equal(parsePdfContent(justUnder.toString('base64')).length, PDF_MAX_BYTES);
+});
+
+// --- viewer controls (T2.2.2) -------------------------------------------------
+
+test('an artifact with nothing stored reads as the standard viewer', () => {
+  assert.deepEqual(pdfSettings(undefined), { mode: 'standard', download: true });
+  assert.deepEqual(pdfSettings({ slug: 's', type: 'pdf' }), { mode: 'standard', download: true });
+  assert.deepEqual(pdfSettings({ pdf: PDF_DEFAULTS }), { mode: 'standard', download: true });
+});
+
+test('a stored value that makes no sense falls back to the default for that field alone', () => {
+  // meta.json can be hand-edited and can come from an older build, so reading it is tolerant:
+  // a bad mode does not take the download setting down with it.
+  assert.deepEqual(pdfSettings({ pdf: { mode: 'slideshow', download: false } }), {
+    mode: 'standard',
+    download: false,
+  });
+  assert.deepEqual(pdfSettings({ pdf: { mode: 'minimal', download: 'yes' } }), {
+    mode: 'minimal',
+    download: true,
+  });
+  assert.deepEqual(pdfSettings({ pdf: 'minimal' }), { mode: 'standard', download: true });
+});
+
+test('a patch merges over what is already stored', () => {
+  const current = { mode: 'presentation', download: false };
+  assert.deepEqual(parsePdfSettings({ mode: 'minimal' }, current), {
+    mode: 'minimal',
+    download: false,
+  });
+  assert.deepEqual(parsePdfSettings({ download: true }, current), {
+    mode: 'presentation',
+    download: true,
+  });
+  // null is the reset, the way PATCH {"frame": null} hands an artifact back to the default.
+  assert.deepEqual(parsePdfSettings(null, current), PDF_DEFAULTS);
+  assert.deepEqual(parsePdfSettings({}, current), current);
+});
+
+test('every mode the docs name is accepted and nothing else is', () => {
+  assert.deepEqual(PDF_MODES, ['standard', 'presentation', 'minimal']);
+  for (const mode of PDF_MODES) {
+    assert.equal(parsePdfSettings({ mode }, PDF_DEFAULTS).mode, mode);
+  }
+  for (const bad of ['slides', 'Standard', '', 1, null, undefined]) {
+    assert.throws(() => parsePdfSettings({ mode: bad }, PDF_DEFAULTS), (err) => {
+      assert.equal(err.status, 400);
+      assert.match(err.message, /pdf.mode/);
+      return true;
+    }, `mode ${String(bad)} should be refused`);
+  }
+});
+
+test('a bad shape or an unknown key is a 400 rather than a silent drop', () => {
+  for (const bad of ['minimal', 42, [], true]) {
+    assert.throws(() => parsePdfSettings(bad, PDF_DEFAULTS), (err) => {
+      assert.equal(err.status, 400);
+      return true;
+    }, `${String(bad)} should be refused`);
+  }
+  assert.throws(() => parsePdfSettings({ download: 'no' }, PDF_DEFAULTS), (err) => {
+    assert.equal(err.status, 400);
+    assert.match(err.message, /pdf.download/);
+    return true;
+  });
+  assert.throws(() => parsePdfSettings({ toolbar: false }, PDF_DEFAULTS), (err) => {
+    assert.equal(err.status, 400);
+    assert.match(err.message, /toolbar/);
+    return true;
+  });
+});
+
+test('the default settings are stored as nothing at all', () => {
+  assert.equal(pdfSettingsForMeta({ mode: 'standard', download: true }), undefined);
+  assert.deepEqual(pdfSettingsForMeta({ mode: 'minimal', download: true }), {
+    mode: 'minimal',
+    download: true,
+  });
+  assert.deepEqual(pdfSettingsForMeta({ mode: 'standard', download: false }), {
+    mode: 'standard',
+    download: false,
+  });
+});
+
+test('what the viewer is told, per mode', () => {
+  // The standard view leaves the browser's own PDF toolbar alone; the other two ask for it to
+  // go, and presentation asks for a whole page at a time instead of a fitted width.
+  const standard = pdfViewerFlags({ mode: 'standard', download: true });
+  assert.equal(standard.bar, true);
+  assert.equal(standard.download, true);
+  assert.ok(!standard.hash.includes('toolbar=0'));
+  assert.ok(standard.hash.includes('view=FitH'));
+
+  const minimal = pdfViewerFlags({ mode: 'minimal', download: true });
+  assert.equal(minimal.bar, false); // no toolbar of ours either
+  assert.ok(minimal.hash.includes('toolbar=0'));
+  assert.ok(minimal.hash.includes('navpanes=0'));
+
+  const presentation = pdfViewerFlags({ mode: 'presentation', download: true });
+  assert.equal(presentation.bar, true); // kept, because it holds the full-screen button
+  assert.equal(presentation.fullscreen, true);
+  assert.ok(presentation.hash.includes('view=Fit'));
+  assert.ok(presentation.hash.includes('toolbar=0'));
+});
+
+test('downloads off take the browser toolbar with them, in every mode', () => {
+  // Viewer-level only: /a/<slug>/file.pdf still answers with the bytes. What this removes is
+  // every button on the page that leads to them, which is what the toggle claims to do.
+  for (const mode of PDF_MODES) {
+    const flags = pdfViewerFlags({ mode, download: false });
+    assert.equal(flags.download, false, mode);
+    assert.ok(flags.hash.includes('toolbar=0'), `${mode} keeps the browser toolbar`);
+  }
 });

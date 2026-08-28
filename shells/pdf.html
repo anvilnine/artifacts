@@ -72,6 +72,18 @@
   #stage { flex: 1 1 auto; position: relative; min-height: 0; }
   #doc { width: 100%; height: 100%; border: 0; display: block; }
 
+  /* minimal: the document and nothing else. The bar is left out of the markup, so this only
+     has to take the page background back to plain. */
+  body.mode-minimal { background: var(--bar-bg); }
+
+  /* presentation: a whole page at a time on a dark backdrop, whatever the reader's theme.
+     The bar stays because it holds the full-screen button. */
+  body.mode-presentation { background: #0b0d0f; }
+  body.mode-presentation #bar { background: #101317; color: #edeae4; border-bottom-color: #242b33; }
+  body.mode-presentation .act { border-color: #242b33; color: #9da3a9; }
+  body.mode-presentation .act:hover { background: #1b2026; color: #edeae4; }
+  body.mode-presentation #stage { padding: 0; }
+
   /* Shown by the browser only when it will not render a PDF inline, which is where most
      Android browsers land. Everything the toolbar offers is repeated here, so a reader who
      never sees the document still has a way to open it. */
@@ -91,26 +103,35 @@
 </style>
 </head>
 <body>
-  <div id="bar">
-    <span id="title">{{TITLE}}</span>
-    <a class="act" id="open" href="{{FILE_URL}}" target="_blank" rel="noopener" title="Open the PDF in a new tab">&#8599;&nbsp;<span class="label">Open</span></a>
-    <a class="act" id="download" href="{{DOWNLOAD_URL}}" download title="Download the PDF">&#8681;&nbsp;<span class="label">Download</span></a>
-  </div>
+  {{BAR}}
 
   <div id="stage">
-    <object id="doc" data="{{FILE_URL}}" type="application/pdf" title="{{TITLE}}">
+    <object id="doc" data="{{EMBED_URL}}" type="application/pdf" title="{{TITLE}}">
       <div id="fallback">
-        <p>This browser will not show a PDF on the page. Open it in a new tab or save it instead.</p>
-        <a class="act" href="{{FILE_URL}}" target="_blank" rel="noopener">Open the PDF</a>
-        <a class="act" href="{{DOWNLOAD_URL}}" download>Download the PDF</a>
+        <p>{{FALLBACK_TEXT}}</p>
+        {{FALLBACK_LINKS}}
       </div>
     </object>
   </div>
 
   <script>
+    document.body.className = 'mode-{{MODE}}';
+
     // Inside the viewer frame the toolbar above already names the artifact, so the title here
     // would be the same words twice. Unframed (?raw=1, frame off) it is the only one there is.
-    if (window.parent !== window) document.getElementById('title').textContent = '';
+    var titleEl = document.getElementById('title');
+    if (titleEl && window.parent !== window) titleEl.textContent = '';
+
+    // Presentation mode: hand the whole screen to the document. Inside the viewer frame this
+    // is our own iframe going full screen, which is the element the reader can see.
+    var fs = document.getElementById('fullscreen');
+    if (fs) {
+      fs.addEventListener('click', function () {
+        var target = document.documentElement;
+        if (document.fullscreenElement) document.exitFullscreen();
+        else if (target.requestFullscreen) target.requestFullscreen();
+      });
+    }
 
     // Follow the viewer frame's theme button the way the markdown shell does: the frame posts
     // the choice into this document, and a same-tab change lands through localStorage.

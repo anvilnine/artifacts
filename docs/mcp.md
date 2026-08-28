@@ -29,8 +29,9 @@ Every tool the server registers. `?` marks an optional argument.
 
 `list_artifacts` returns what `GET /api/artifacts` returns: `slug`, `type`, `title`, `createdAt`,
 `updatedAt` and `tags` on every entry, plus whichever of `project`, `expiresAt`, `frame`,
-`visibility`, `disabled`, `files`, `target`, `description`, `ogImage` and `hasPassword` the artifact
-has set. `target` is a redirect's destination, absent on a redirect published before the server
+`visibility`, `disabled`, `files`, `target`, `description`, `ogImage`, `pdf` and `hasPassword` the
+artifact has set. `pdf` is a PDF artifact's viewer settings (`{mode, download}`), present only on
+one somebody configured; set them from the [REST API](api.md) or the CLI. `target` is a redirect's destination, absent on a redirect published before the server
 stored targets on the artifact. No password hashes and no tokens.
 
 `description` and `ogImage` are the link-preview fields: the line and the image a chat app shows

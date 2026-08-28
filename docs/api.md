@@ -5,10 +5,10 @@ Full HTTP reference, including zip-site deploys. ([← back to README](../README
 The `/api/artifacts*` and `/api/config` routes accept **either** an `Authorization: Bearer <key>` (a scoped [managed key](auth.md) or the bootstrap `ARTIFACTS_API_KEY`) **or** a valid admin session cookie (how the dashboard calls them). `/mcp` is bearer-only. Each write route enforces a minimum scope (below). Reads under `/a/` are public unless the artifact's [visibility](#visibility) is set.
 
 ```
-POST   /api/artifacts        {content, type: html|jsx|tsx|md|pdf|redirect, slug?, title?, description?, ogImage?, tags?, project?, expiresAt?, frame?, visibility?, password?} → 201 {slug, url, visibility}   [publish]
+POST   /api/artifacts        {content, type: html|jsx|tsx|md|pdf|redirect, slug?, title?, description?, ogImage?, tags?, project?, expiresAt?, frame?, pdf?, visibility?, password?} → 201 {slug, url, visibility}   [publish]
 POST   /api/artifacts/zip    raw zip body (?slug=&title=&description=&ogImage=&tags=&project=&expiresAt=&visibility=&password=) → 201 {slug, url, files, visibility}   [publish]
-PUT    /api/artifacts/:slug  {content, type, title?, description?, ogImage?, tags?, project?, expiresAt?, frame?, visibility?, password?} → {slug, url, visibility}   [publish]
-PATCH  /api/artifacts/:slug  {slug?, disabled?, expiresAt?, description?, ogImage?, tags?, project?, frame?, visibility?, password?, rotateToken?} → {slug, url, visibility}   [publish]
+PUT    /api/artifacts/:slug  {content, type, title?, description?, ogImage?, tags?, project?, expiresAt?, frame?, pdf?, visibility?, password?} → {slug, url, visibility}   [publish]
+PATCH  /api/artifacts/:slug  {slug?, disabled?, expiresAt?, description?, ogImage?, tags?, project?, frame?, pdf?, visibility?, password?, rotateToken?} → {slug, url, visibility}   [publish]
 DELETE /api/artifacts/:slug                                                  → {deleted}   [full]
 GET    /api/artifacts        list (?tag= and/or ?project= to filter)         → [...]   [read]
 GET    /api/artifacts/:slug/link  mint a fresh share link, no mutation       → {url, visibility}   [read]
@@ -29,6 +29,7 @@ Semantics:
 
 - Body limits: 10 MB JSON, 50 MB zip.
 - `type: "pdf"` takes the file base64-encoded in `content` (a `data:application/pdf;base64,` prefix and wrapped lines are both fine). Max 7 MB measured on the decoded bytes; a body that does not start with `%PDF-` once decoded is a `400`. `GET /a/:slug` is a viewer page around the browser's own PDF viewer, `GET /a/:slug/file.pdf` is the file, and `?download=1` on it sends the same bytes as an attachment. Full behavior in [PDF](formats.md#pdf).
+- PDF viewer controls: the `pdf` field takes `{mode, download}`. `mode` is `standard` (the default), `presentation` or `minimal`; `download` is a boolean, `true` by default. A patch naming one key keeps the other, `{"pdf": null}` restores both defaults, and an unknown key or value is a `400`. So is `pdf` on an artifact that is not a pdf. An artifact left on both defaults stores nothing and shows no `pdf` field in the list. `download: false` is viewer-level only: `/a/:slug/file.pdf` still answers with the bytes. See [What "disable download" actually does](formats.md#what-disable-download-actually-does).
 - `type: "redirect"` publishes a short link instead of a page: `content` is the target, and `GET /a/:slug` answers `301` with `Location: <target>`, `Cache-Control: no-store` and `Referrer-Policy: no-referrer`. The target must be an absolute `http://` or `https://` URL and cannot carry a username or password; anything else is a `400`. What gets stored is the normalized URL, capped at 2048 characters, in `meta.target` (which the 301 follows) and in the artifact body. Redirects are never framed and ignore `?raw=1`, and `GET /a/:slug/source` returns the stored target as `text/plain`. Full behavior, including what an open redirector costs you, in [Redirects](formats.md#redirects).
 - `PUT` without `title` keeps the title already stored, the way it keeps `tags` and `project`. Send `"title": ""` to clear it back to the slug.
 - A write that stores a redirect answers with `target`, the normalized URL it stored, which is not always the string that was sent.

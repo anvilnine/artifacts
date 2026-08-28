@@ -1816,6 +1816,44 @@
             { frame: v === 'auto' ? undefined : v === 'on' });
         });
 
+        // A pdf gets its own viewer controls: how the page presents the document, and whether
+        // the page offers the file. Both are viewer-level only, which the download dialog says
+        // out loud, because /a/<slug>/file.pdf still answers with the bytes either way.
+        if (a.type === 'pdf') {
+          const pdfMode = (a.pdf && a.pdf.mode) || 'standard';
+          const pdfDownload = !(a.pdf && a.pdf.download === false);
+          menuItem(menu, 'PDF view: ' + pdfMode + '…', '', async () => {
+            const v = await dialog({
+              title: 'PDF view for “' + a.slug + '”',
+              body: 'How the viewer page presents the document.',
+              choices: [
+                { value: 'standard', label: 'Standard (toolbar, browser controls)' },
+                { value: 'presentation', label: 'Presentation (one page at a time, full screen)' },
+                { value: 'minimal', label: 'Minimal (document only, no toolbar)' },
+              ],
+              current: pdfMode,
+            });
+            if (v === null || v === pdfMode) return;
+            patchItem(a, { pdf: { mode: v } }, { pdf: { mode: v, download: pdfDownload } });
+          });
+          menuItem(menu, 'PDF download: ' + (pdfDownload ? 'on' : 'off') + '…', '', async () => {
+            const v = await dialog({
+              title: 'PDF download for “' + a.slug + '”',
+              body: 'Off removes the Open and Download buttons from the viewer page and asks the'
+                + " browser to hide its own toolbar. It is not protection: the file's URL still"
+                + ' answers with the bytes to anyone who knows it.',
+              choices: [
+                { value: 'on', label: 'On (offer the file)' },
+                { value: 'off', label: 'Off (viewer buttons removed)' },
+              ],
+              current: pdfDownload ? 'on' : 'off',
+            });
+            if (v === null || (v === 'on') === pdfDownload) return;
+            patchItem(a, { pdf: { download: v === 'on' } },
+              { pdf: { mode: pdfMode, download: v === 'on' } });
+          });
+        }
+
         menuItem(menu, 'Tags…', '', async () => {
           const v = await dialog({
             title: 'Tags for “' + a.slug + '”',

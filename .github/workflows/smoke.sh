@@ -1369,7 +1369,7 @@ echo "ok: pdf bytes round-trip"
 # The viewer page, which is what a visit to the artifact gets. It never carries the bytes,
 # only the two URLs that do.
 raw=$(curl -s "$BASE/a/ci-pdf?raw=1")
-printf '%s' "$raw" | grep -qF 'data="/a/ci-pdf/file.pdf"' || fail "pdf viewer does not embed the file"
+printf '%s' "$raw" | grep -qF 'data="/a/ci-pdf/file.pdf#' || fail "pdf viewer does not embed the file"
 printf '%s' "$raw" | grep -qF 'href="/a/ci-pdf/file.pdf?download=1"' || fail "pdf viewer has no download link"
 printf '%s' "$raw" | grep -qF 'Smoke PDF' || fail "pdf viewer is missing the title"
 curl -s "$BASE/a/ci-pdf" | grep -q '<iframe' || fail "a pdf is not framed like every other type"
@@ -1405,9 +1405,75 @@ expect_code 404 "$code" "private pdf file without a token"
 code=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/a/ci-pdf-priv/source")
 expect_code 404 "$code" "private pdf source without a token"
 curl -sf -X DELETE "$BASE/api/artifacts/ci-pdf-priv" -H "$AUTH" > /dev/null
+echo "ok: pdf visibility gate"
+
+# --- pdf controls: three viewer modes, and the download toggle ---
+# The default is the standard viewer: our toolbar, and the browser's own controls untouched.
+raw=$(curl -s "$BASE/a/ci-pdf?raw=1")
+printf '%s' "$raw" | grep -qF "mode-standard" || fail "a fresh pdf is not in standard mode"
+printf '%s' "$raw" | grep -qF 'id="download"' || fail "standard mode has no download button"
+if printf '%s' "$raw" | grep -qF 'toolbar=0'; then fail "standard mode hides the browser toolbar"; fi
+
+curl -sf -X PATCH "$BASE/api/artifacts/ci-pdf" -H "$AUTH" -H "$JSON" -d '{"pdf":{"mode":"minimal"}}' > /dev/null
+raw=$(curl -s "$BASE/a/ci-pdf?raw=1")
+printf '%s' "$raw" | grep -qF "mode-minimal" || fail "minimal mode did not take"
+if printf '%s' "$raw" | grep -qF 'id="bar"'; then fail "minimal mode still renders our toolbar"; fi
+printf '%s' "$raw" | grep -qF 'toolbar=0' || fail "minimal mode keeps the browser toolbar"
+
+curl -sf -X PATCH "$BASE/api/artifacts/ci-pdf" -H "$AUTH" -H "$JSON" -d '{"pdf":{"mode":"presentation"}}' > /dev/null
+raw=$(curl -s "$BASE/a/ci-pdf?raw=1")
+printf '%s' "$raw" | grep -qF "mode-presentation" || fail "presentation mode did not take"
+printf '%s' "$raw" | grep -qF 'id="fullscreen"' || fail "presentation mode has no full-screen button"
+printf '%s' "$raw" | grep -qF 'view=Fit&' || fail "presentation mode does not fit a whole page"
+echo "ok: pdf modes"
+
+# A patch names one key and leaves the other alone, and the row carries both.
+curl -sf -X PATCH "$BASE/api/artifacts/ci-pdf" -H "$AUTH" -H "$JSON" -d '{"pdf":{"download":false}}' > /dev/null
+curl -s "$BASE/api/artifacts" -H "$AUTH" | grep -qF '"pdf":{"mode":"presentation","download":false}' \
+  || fail "the pdf row does not carry its settings"
+raw=$(curl -s "$BASE/a/ci-pdf?raw=1")
+printf '%s' "$raw" | grep -qF "mode-presentation" || fail "a download patch reset the mode"
+if printf '%s' "$raw" | grep -qF 'id="download"'; then fail "downloads off still shows a download button"; fi
+if printf '%s' "$raw" | grep -qF 'id="open"'; then fail "downloads off still shows an open button"; fi
+# Viewer-level only, and the docs say so: the bytes are still one URL away.
+code=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/a/ci-pdf/file.pdf")
+expect_code 200 "$code" "the file with downloads off"
+
+# null hands the artifact back to the defaults, the way {"frame": null} does.
+curl -sf -X PATCH "$BASE/api/artifacts/ci-pdf" -H "$AUTH" -H "$JSON" -d '{"pdf":null}' > /dev/null
+[ -z "$(list_field ci-pdf pdf)" ] || fail "pdf:null did not clear the stored settings"
+curl -s "$BASE/a/ci-pdf?raw=1" | grep -qF "mode-standard" || fail "pdf:null did not restore the standard viewer"
+echo "ok: pdf download toggle and reset"
+
+# Values the server does not understand are a 400, not a silent drop.
+code=$(curl -s -o /dev/null -w '%{http_code}' -X PATCH "$BASE/api/artifacts/ci-pdf" -H "$AUTH" -H "$JSON" \
+  -d '{"pdf":{"mode":"slides"}}')
+expect_code 400 "$code" "an unknown pdf mode"
+code=$(curl -s -o /dev/null -w '%{http_code}' -X PATCH "$BASE/api/artifacts/ci-pdf" -H "$AUTH" -H "$JSON" \
+  -d '{"pdf":{"toolbar":false}}')
+expect_code 400 "$code" "an unknown pdf setting"
+# Settings on an artifact with no viewer page are refused rather than stored and ignored.
+curl -s -X DELETE "$BASE/api/artifacts/ci-pdf-nothtml" -H "$AUTH" > /dev/null
+curl -sf -X POST "$BASE/api/artifacts" -H "$AUTH" -H "$JSON" \
+  -d '{"content":"<h1>not a pdf</h1>","type":"html","slug":"ci-pdf-nothtml"}' > /dev/null
+code=$(curl -s -o /dev/null -w '%{http_code}' -X PATCH "$BASE/api/artifacts/ci-pdf-nothtml" -H "$AUTH" -H "$JSON" \
+  -d '{"pdf":{"mode":"minimal"}}')
+expect_code 400 "$code" "pdf settings on an html artifact"
+code=$(curl -s -o /dev/null -w '%{http_code}' -X PUT "$BASE/api/artifacts/ci-pdf-nothtml" -H "$AUTH" -H "$JSON" \
+  -d '{"content":"<h1>still not a pdf</h1>","type":"html","pdf":{"mode":"minimal"}}')
+expect_code 400 "$code" "pdf settings on an html publish"
+curl -sf -X DELETE "$BASE/api/artifacts/ci-pdf-nothtml" -H "$AUTH" > /dev/null
+# Set at publish time too, not only by a later patch.
+curl -s -X DELETE "$BASE/api/artifacts/ci-pdf-modes" -H "$AUTH" > /dev/null
+code=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/api/artifacts" -H "$AUTH" -H "$JSON" \
+  -d "{\"content\":\"$PDF_B64\",\"type\":\"pdf\",\"slug\":\"ci-pdf-modes\",\"visibility\":\"public\",\"pdf\":{\"mode\":\"minimal\",\"download\":false}}")
+expect_code 201 "$code" "publish a pdf with viewer settings"
+curl -s "$BASE/a/ci-pdf-modes?raw=1" | grep -qF "mode-minimal" || fail "publish-time pdf settings did not take"
+curl -sf -X DELETE "$BASE/api/artifacts/ci-pdf-modes" -H "$AUTH" > /dev/null
+echo "ok: pdf settings validation"
+
 curl -sf -X DELETE "$BASE/api/artifacts/ci-pdf" -H "$AUTH" > /dev/null
 rm -r "$PDF_DIR"
-echo "ok: pdf visibility gate"
 
 # --- dashboard: the served shell parses and still lines up with its own markup ---
 # Nothing else in CI loads `/`, so a broken inline script in public/index.html used to
@@ -1508,6 +1574,13 @@ node "$CLI_DIR/cli.js" publish "$ZIPDIR/tiny.pdf" --slug ci-cli-pdf --visibility
 node "$CLI_DIR/cli.js" source ci-cli-pdf -o "$ZIPDIR/cli.pdf" > /dev/null
 cmp -s "$ZIPDIR/tiny.pdf" "$ZIPDIR/cli.pdf" || fail "cli round-trip changed the pdf bytes"
 node "$CLI_DIR/cli.js" list | grep 'ci-cli-pdf' | grep -q 'pdf' || fail "cli list does not show the pdf type"
+node "$CLI_DIR/cli.js" pdf ci-cli-pdf presentation > /dev/null
+curl -s "$BASE/a/ci-cli-pdf?raw=1" | grep -qF 'mode-presentation' || fail "cli pdf presentation did not take"
+node "$CLI_DIR/cli.js" pdf ci-cli-pdf download-off > /dev/null
+if curl -s "$BASE/a/ci-cli-pdf?raw=1" | grep -qF 'id="download"'; then fail "cli pdf download-off did not take"; fi
+node "$CLI_DIR/cli.js" pdf ci-cli-pdf default > /dev/null
+curl -s "$BASE/a/ci-cli-pdf?raw=1" | grep -qF 'mode-standard' || fail "cli pdf default did not reset"
+if node "$CLI_DIR/cli.js" pdf ci-cli-pdf slides > /dev/null 2>&1; then fail "cli pdf slides should fail"; fi
 node "$CLI_DIR/cli.js" delete ci-cli-pdf > /dev/null
 echo "ok: cli pdf"
 

@@ -27,6 +27,7 @@ artifacts list [--tag t] [--project p]
 artifacts rename <slug> <new-slug>
 artifacts disable <slug> | enable <slug>
 artifacts frame <slug> <on|off|default>
+artifacts pdf <slug> <standard|presentation|minimal|download-on|download-off|default>
 artifacts visibility <slug> <public|private|password> [--password pw]
 artifacts rotate <slug>          # invalidate every share link already handed out
 artifacts expire <slug> <ISO-date|never>
@@ -43,6 +44,8 @@ artifacts keys revoke <id>
 ```
 
 Type is inferred from the file extension (`.html`, `.jsx`, `.tsx`, `.md`, `.pdf`); pass `--type` to override. A `.pdf` is read as bytes and sent base64-encoded, and `source` writes bytes too, so `artifacts source q3-report -o copy.pdf` gives back the file that went up. A redirect has no extension to infer from, so it needs `--type redirect` and a file holding the target URL: `artifacts publish target.txt --type redirect --slug pricing`. Repoint one the same way with `update`: `artifacts update pricing new-target.txt --type redirect`, which keeps the title and everything else. The target cannot carry a username or password. `deploy` zips a directory for you and posts it to the zip endpoint. `tag` replaces an artifact's tags (`none` clears them); `list --tag` shows only artifacts carrying that tag.
+
+`pdf` sets a PDF artifact's viewer controls, one setting per call: a mode (`standard`, `presentation`, `minimal`), `download-on` / `download-off`, or `default` to reset both. Turning downloads off only removes the viewer's buttons; the file's URL still answers with the bytes. See [PDF](formats.md#pdf).
 
 `qr` prints an SVG of the artifact's permanent URL to stdout, so it pipes into a file or a viewer:
 `artifacts qr pricing > pricing.svg`. `-o out.png` writes a PNG (the extension picks the format,

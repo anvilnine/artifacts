@@ -36,7 +36,13 @@ import { createConfigStore } from './lib/config.js';
 import { ApiError } from './lib/errors.js';
 import { artifactExpired } from './lib/expiry.js';
 import { qrPng, qrSvg } from './lib/qr.js';
-import { parsePdfContent } from './lib/pdf.js';
+import {
+  parsePdfContent,
+  parsePdfSettings,
+  pdfSettings,
+  pdfSettingsForMeta,
+  pdfViewerFlags,
+} from './lib/pdf.js';
 import { parseRedirectTarget, resolveRedirectTarget } from './lib/redirect.js';
 import { fillShell } from './lib/shells.js';
 import {
@@ -297,12 +303,42 @@ function pdfDownloadName(meta) {
 // A viewer page for a pdf artifact, built per request the way the markdown one is. The bytes
 // themselves never pass through here: the page is a shell around an <object> that fetches
 // them, so a 7 MB PDF is streamed by serveObject and not held in a string.
+//
+// The per-artifact controls (mode, download) decide which pieces of the page exist at all
+// rather than hiding them with CSS: a Download button that is only display:none is still a URL
+// in the markup, and the toggle would read as weaker than it is.
 function buildPdfHtml(meta) {
+  const title = escapeHtml(meta.title || meta.slug);
+  const fileUrl = pdfFileUrl(meta.slug);
+  const downloadUrl = `${fileUrl}?download=1`;
+  const flags = pdfViewerFlags(pdfSettings(meta));
+
+  const openBtn = `<a class="act" id="open" href="${fileUrl}" target="_blank" rel="noopener" title="Open the PDF in a new tab">&#8599;&nbsp;<span class="label">Open</span></a>`;
+  const downloadBtn = `<a class="act" id="download" href="${downloadUrl}" download title="Download the PDF">&#8681;&nbsp;<span class="label">Download</span></a>`;
+  const fullscreenBtn = `<button class="act" id="fullscreen" type="button" title="Show the document full screen">&#9974;&nbsp;<span class="label">Full screen</span></button>`;
+
+  const actions = [];
+  if (flags.fullscreen) actions.push(fullscreenBtn);
+  if (flags.download) actions.push(openBtn, downloadBtn);
+  const bar = flags.bar
+    ? `<div id="bar">\n    <span id="title">${title}</span>\n    ${actions.join('\n    ')}\n  </div>`
+    : '';
+
   return fillShell(PDF_SHELL, {
-    TITLE: escapeHtml(meta.title || meta.slug),
+    TITLE: title,
     SOCIAL: socialTags(meta, canonicalUrl(meta)),
-    FILE_URL: pdfFileUrl(meta.slug),
-    DOWNLOAD_URL: `${pdfFileUrl(meta.slug)}?download=1`,
+    MODE: flags.mode,
+    BAR: bar,
+    EMBED_URL: fileUrl + flags.hash,
+    // The <object>'s fallback is what a browser with no PDF viewer of its own shows, which is
+    // where most Android browsers land. With downloads off there is nothing to offer there,
+    // and saying so beats a page that looks broken.
+    FALLBACK_TEXT: flags.download
+      ? 'This browser will not show a PDF on the page. Open it in a new tab or save it instead.'
+      : 'This browser will not show a PDF on the page, and downloads are off for this artifact.',
+    FALLBACK_LINKS: flags.download
+      ? `<a class="act" href="${fileUrl}" target="_blank" rel="noopener">Open the PDF</a>\n        <a class="act" href="${downloadUrl}" download>Download the PDF</a>`
+      : '',
   });
 }
 
@@ -669,12 +705,17 @@ async function saveArtifact(input, opts = {}) {
   return withMetaChain(finalSlug, () => storeArtifact(finalSlug, input, opts));
 }
 
-async function storeArtifact(finalSlug, { content, type = 'html', title, description, ogImage, expiresAt, frame, tags, project, visibility, password }, { replace = false } = {}) {
+async function storeArtifact(finalSlug, { content, type = 'html', title, description, ogImage, expiresAt, frame, tags, project, visibility, password, pdf }, { replace = false } = {}) {
   if (typeof content !== 'string' || !content.trim()) {
     throw new ApiError(400, 'content (non-empty string) is required');
   }
   if (frame !== undefined && typeof frame !== 'boolean') {
     throw new ApiError(400, 'frame must be a boolean');
+  }
+  // Viewer settings for a pdf. Refused on any other type rather than stored and ignored: there
+  // is no page here they could apply to, and a stored value nothing reads is a lie in the row.
+  if (pdf !== undefined && type !== 'pdf') {
+    throw new ApiError(400, 'pdf viewer settings only apply to a pdf artifact');
   }
   if (visibility !== undefined && !VISIBILITIES.includes(visibility)) {
     throw new ApiError(400, 'visibility must be public, private, or password');
@@ -738,6 +779,10 @@ async function storeArtifact(finalSlug, { content, type = 'html', title, descrip
   else delete meta.target;
   if (expiresAt !== undefined) meta.expiresAt = expiry;
   if (frame !== undefined) meta.frame = frame;
+  // A pdf keeps whatever it already had when the field is left out, the way tags and project
+  // do; converting away from pdf drops the settings, since nothing would read them again.
+  if (type !== 'pdf') delete meta.pdf;
+  else if (pdf !== undefined) meta.pdf = pdfSettingsForMeta(parsePdfSettings(pdf, pdfSettings(existing)));
   if (tagList !== undefined) meta.tags = tagList.length ? tagList : undefined;
   if (projectName !== undefined) meta.project = projectName || undefined;
   // Both keep their stored value when the field is absent, the way tags and project do, so a
@@ -882,6 +927,10 @@ async function copyArtifact(sourceSlug, targetSlug, body) {
   if (summary) meta.description = summary;
   if (previewImage) meta.ogImage = previewImage;
   if (frame !== undefined) meta.frame = frame;
+  // A copy keeps the original's viewer settings, the way it keeps the frame. Read through the
+  // same tolerant reader the serve path uses, so a hand-edited value on the source does not
+  // travel into a fresh record.
+  if (source.type === 'pdf') meta.pdf = pdfSettingsForMeta(pdfSettings(source));
   if (visibility === 'password') {
     meta.visibility = 'password';
     meta.password = await hashPassword(body.password);
@@ -914,7 +963,7 @@ function seedTokenEpoch(meta) {
 // (tokenEpoch) are dropped, and hasPassword exposes state without the hash.
 const PUBLIC_META_FIELDS = [
   'slug', 'type', 'title', 'files', 'target', 'description', 'ogImage', 'createdAt', 'updatedAt',
-  'expiresAt', 'frame', 'tags', 'project', 'visibility', 'disabled',
+  'expiresAt', 'frame', 'tags', 'project', 'visibility', 'disabled', 'pdf',
 ];
 function publicMeta(meta) {
   const out = {};
@@ -987,6 +1036,13 @@ async function parsePatch(patch, meta) {
     } else {
       throw new ApiError(400, 'frame must be a boolean or null');
     }
+  }
+
+  if (patch.pdf !== undefined) {
+    if (meta.type !== 'pdf') {
+      throw new ApiError(400, 'pdf viewer settings only apply to a pdf artifact');
+    }
+    changes.pdf = pdfSettingsForMeta(parsePdfSettings(patch.pdf, pdfSettings(meta)));
   }
 
   if (patch.expiresAt !== undefined) {
@@ -1077,6 +1133,7 @@ async function applyPatch(slug, patch, newSlug) {
     if (changes.frame === null) delete meta.frame;
     else meta.frame = changes.frame;
   }
+  if ('pdf' in changes) meta.pdf = changes.pdf;
   if ('expiresAt' in changes) meta.expiresAt = changes.expiresAt;
   if ('tags' in changes) meta.tags = changes.tags;
   if ('project' in changes) meta.project = changes.project;
