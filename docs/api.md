@@ -71,6 +71,29 @@ that this build refuses is logged once at boot and ignored, so a typo in an env 
 the server from starting. In a hand-edited `config.json` the same rule applies per field: a value
 that fails validation falls back to the env var, then to the empty default.
 
+Where each field lands:
+
+| Surface | What branding reaches it |
+|---|---|
+| `shells/frame.html` (the viewer frame) | Favicon, a logo and name chip at the left of the bar, and the copy-link tooltip's wording. |
+| `shells/password.html` (the unlock gate) | Favicon, logo above the card, the wording ("Protected artifact" becomes "Protected Dropkiln"), accent color, footer line. |
+| `shells/not-found.html` (the 404 page) | Favicon, the logo in place of the built-in mark, the wording ("Artifact unavailable" becomes "Dropkiln unavailable"), accent color, footer line. |
+| `shells/md.html` (markdown pages) | Favicon, and the accent color for links, inline code and the blockquote rule. |
+| `shells/jsx.html` (React pages) | Favicon and the error readout's label. |
+| Share-link tags (`og:` / `twitter:`) | `og:site_name` from the product name, and the logo as `og:image` for an artifact that carries none. A relative `logoUrl` is resolved against `BASE_URL`, because an unfurler fetches it from its own host. |
+
+A configured `productName` is used exactly as typed, capitalization included. Nothing lowercases
+it, so "Protected Dropkiln" is what a viewer sees, not "Protected dropkiln".
+
+`accentColor` takes over every accent role in a shell at once, the two translucent washes
+included, which `color-mix()` derives from the same value. The error reds are not accent roles:
+they say "this failed", and a blue-branded instance should not get a blue error message.
+
+The 404, password, markdown and frame pages render per request, so a `PUT` shows on the next
+view. `html` and `jsx` artifacts are built once, at publish time, and keep the branding they were
+built with until they are republished. Their frame still rebrands, because the frame is rendered
+per request.
+
 There is no per-artifact branding. A single artifact that needs its own mark uses a watermark
 instead.
 

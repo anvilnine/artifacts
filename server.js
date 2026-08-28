@@ -39,7 +39,8 @@ import { qrPng, qrSvg } from './lib/qr.js';
 import { parseRedirectTarget, resolveRedirectTarget } from './lib/redirect.js';
 import { fillShell } from './lib/shells.js';
 import {
-  frameBrandSlots, mdBrandSlots, notFoundBrandSlots, passwordBrandSlots,
+  frameBrandSlots, jsxBrandSlots, mdBrandSlots, notFoundBrandSlots, passwordBrandSlots,
+  socialBranding,
 } from './lib/branding.js';
 import {
   dropIfRefused, escapeHtml, parseDescription, parseOgImage, socialTags,
@@ -256,6 +257,7 @@ function buildJsxHtml(source, title) {
   // "{{SOURCE}}" used to steal the source slot. fillShell also keeps `$`-substitution out
   // ($&, $`, $$, …), which a title or a source must carry verbatim.
   return fillShell(JSX_SHELL, {
+    ...jsxBrandSlots(config.current.branding),
     TITLE: escapeHtml(title),
     IMPORT_MAP: JSON.stringify({ imports }, null, 2),
     SOURCE: rewritten,
@@ -274,7 +276,7 @@ function buildMdHtml(source, meta, mdCfg = config.current.md, branding = config.
   return fillShell(MD_SHELL, {
     ...mdBrandSlots(branding),
     TITLE: escapeHtml(meta.title || meta.slug),
-    SOCIAL: socialTags(meta, canonicalUrl(meta)),
+    SOCIAL: socialTags(meta, canonicalUrl(meta), socialBranding(branding, BASE_URL)),
     FONT: MD_FONT_STACKS[mdCfg.font],
     MAXWIDTH: MD_WIDTH_PX[mdCfg.width],
     FONTSIZE: MD_SIZE_PX[mdCfg.size],
@@ -337,7 +339,7 @@ function buildFrameHtml(meta, rawUrl) {
   return fillShell(FRAME_SHELL, {
     ...frameBrandSlots(config.current.branding),
     TITLE: escapeHtml(meta.title || meta.slug),
-    SOCIAL: socialTags(meta, canonicalUrl(meta)),
+    SOCIAL: socialTags(meta, canonicalUrl(meta), socialBranding(config.current.branding, BASE_URL)),
     RAW_URL: escapeHtml(rawUrl),
     THEME_BTN: meta.type === 'md'
       ? '<button id="theme" type="button" title="Cycle theme (auto, light, dark)">Auto</button>'

@@ -1041,9 +1041,13 @@ echo "ok: password mode unlock round-trip"
 # rendering the built-in wording and colors, which is what makes this upgrade invisible.
 curl -sf -X POST "$BASE/api/artifacts" -H "$AUTH" -H "$JSON" \
   -d '{"content":"# brand smoke\n\nhi","type":"md","slug":"ci-brand-md","visibility":"public"}' > /dev/null
+curl -sf -X POST "$BASE/api/artifacts" -H "$AUTH" -H "$JSON" \
+  -d '{"content":"export default function A(){ return <div>brand</div>; }","type":"jsx","slug":"ci-brand-jsx","visibility":"public"}' > /dev/null
 curl -s "$BASE/a/does-not-exist-zzz" | grep -q 'Artifact unavailable' || fail "404 page is not on the default branding"
 curl -s "$BASE/a/cap-pw" | grep -q 'Protected artifact' || fail "password page is not on the default branding"
 curl -s "$BASE/a/ci-brand-md?raw=1" | grep -q -- '--link: #c73d1d' || fail "md page is not on the default link color"
+curl -s "$BASE/a/ci-brand-jsx?raw=1" | grep -qF "'Artifact error: '" || fail "jsx page is not on the default error label"
+if curl -s "$BASE/a/ci-brand-md" | grep -q 'og:site_name'; then fail "og:site_name rendered with no product name set"; fi
 echo "ok: shells render the built-in branding by default"
 
 curl -sf -X PUT "$BASE/api/config" -H "$AUTH" -H "$JSON" \
@@ -1062,8 +1066,24 @@ echo "$body" | grep -q '<link rel="icon" href="/brand/f.ico">' || fail "password
 body=$(curl -s "$BASE/a/ci-brand-md?raw=1")
 echo "$body" | grep -q -- '--link: #0055ff' || fail "md page kept the built-in link color"
 echo "$body" | grep -q '<link rel="icon" href="/brand/f.ico">' || fail "md page missing the branded favicon"
-curl -s "$BASE/a/ci-brand-md" | grep -q 'Smokebrand' || fail "frame bar missing the product name"
-echo "ok: branding rebrands the 404, password, md and frame shells"
+# html and jsx pages are built once, at publish time, so this one is published after the
+# rebrand. An artifact published earlier keeps the branding it was built with until it is
+# republished; its frame, being rendered per request, rebrands either way.
+curl -sf -X POST "$BASE/api/artifacts" -H "$AUTH" -H "$JSON" \
+  -d '{"content":"export default function A(){ return <div>brand</div>; }","type":"jsx","slug":"ci-brand-jsx-2","visibility":"public"}' > /dev/null
+body=$(curl -s "$BASE/a/ci-brand-jsx-2?raw=1")
+echo "$body" | grep -qF '"Smokebrand error: "' || fail "jsx page kept the built-in error label"
+echo "$body" | grep -q '<link rel="icon" href="/brand/f.ico">' || fail "jsx page missing the branded favicon"
+curl -s "$BASE/a/ci-brand-jsx?raw=1" | grep -qF "'Artifact error: '" || fail "an older jsx page changed under it"
+echo "ok: branding rebrands the 404, password, md, jsx and frame shells"
+
+# share-link tags: the site name shows, and the logo stands in for a missing preview image
+body=$(curl -s "$BASE/a/ci-brand-md")
+echo "$body" | grep -q '<meta property="og:site_name" content="Smokebrand">' || fail "share tags missing og:site_name"
+echo "$body" | grep -qF "<meta property=\"og:image\" content=\"$BASE/brand/logo.svg\">" || fail "share tags missing the brand logo fallback"
+echo "$body" | grep -q 'twitter:card" content="summary_large_image"' || fail "share tags kept the small card with an image set"
+echo "$body" | grep -q 'Smokebrand' || fail "frame bar missing the product name"
+echo "ok: branding reaches the share-link tags"
 
 # a refused value -> 400 naming the field, and nothing written
 out=$(curl -s -o /dev/null -w '%{http_code}' -X PUT "$BASE/api/config" -H "$AUTH" -H "$JSON" -d '{"branding":{"accentColor":"red; } body { display: none"}}')
@@ -1076,6 +1096,8 @@ curl -sf -X PUT "$BASE/api/config" -H "$AUTH" -H "$JSON" \
   -d '{"branding":{"productName":"","logoUrl":"","faviconUrl":"","accentColor":"","footerText":""}}' > /dev/null
 curl -s "$BASE/a/does-not-exist-zzz" | grep -q 'Artifact unavailable' || fail "branding reset did not restore the default 404 copy"
 curl -sf -X DELETE "$BASE/api/artifacts/ci-brand-md" -H "$AUTH" > /dev/null
+curl -sf -X DELETE "$BASE/api/artifacts/ci-brand-jsx" -H "$AUTH" > /dev/null
+curl -sf -X DELETE "$BASE/api/artifacts/ci-brand-jsx-2" -H "$AUTH" > /dev/null
 echo "ok: branding reset to the built-in defaults"
 
 curl -sf -X DELETE "$BASE/api/artifacts/cap-one" -H "$AUTH" > /dev/null

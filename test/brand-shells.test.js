@@ -116,3 +116,18 @@ test('branding text is escaped on the way into the page', () => {
   assert.match(notFoundBrandSlots(b).PRODUCT_NAME, /A &amp; B/);
   assert.match(passwordBrandSlots(b).FOOTER, /x &quot; y &amp; z/);
 });
+
+test('the frame tooltip and the jsx error label follow the product name', () => {
+  assert.equal(frameBrandSlots(NONE).PRODUCT_NOUN, 'artifact');
+  assert.equal(jsxBrandSlots(NONE).ERROR_LABEL, "'Artifact error: '");
+
+  const b = brand({ productName: 'Dropkiln' });
+  assert.equal(frameBrandSlots(b).PRODUCT_NOUN, 'Dropkiln');
+  assert.equal(jsxBrandSlots(b).ERROR_LABEL, '"Dropkiln error: "');
+});
+
+test('the jsx error label survives a quote in the product name', () => {
+  // It lands inside a script, so it is JSON-quoted rather than HTML-escaped: an &amp; would
+  // show up as literal text in the readout.
+  assert.equal(jsxBrandSlots(brand({ productName: "O'Brien" })).ERROR_LABEL, '"O\'Brien error: "');
+});
