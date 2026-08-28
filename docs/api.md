@@ -13,8 +13,8 @@ DELETE /api/artifacts/:slug                                                  →
 GET    /api/artifacts        list (?tag= and/or ?project= to filter)         → [...]   [read]
 GET    /api/artifacts/:slug/link  mint a fresh share link, no mutation       → {url, visibility}   [read]
 GET    /api/artifacts/:slug/qr    QR code for the canonical URL (?format=svg|png&scale=&margin=) → image   [read]
-GET    /api/config                                                           → {frame: {enabled, default}, md: {font, width, size, theme}, baseUrl}   [read]
-PUT    /api/config           {frame?: {enabled?, default?}, md?: {font?, width?, size?, theme?}} → updated config   [full]
+GET    /api/config                                                           → {frame: {enabled, default}, md: {font, width, size, theme}, branding: {productName, logoUrl, faviconUrl, accentColor, footerText}, baseUrl}   [read]
+PUT    /api/config           {frame?: {enabled?, default?}, md?: {font?, width?, size?, theme?}, branding?: {productName?, logoUrl?, faviconUrl?, accentColor?, footerText?}} → updated config   [full]
 GET    /a/:slug              rendered artifact, framed when active (public unless private/password)
 GET    /a/:slug?k=<token>    capability-link exchange: sets the unlock cookie, 302s to a clean URL (private/password)
 GET    /a/:slug?raw=1        bare artifact without the frame
@@ -43,8 +43,36 @@ Semantics:
 
 Whether an artifact is framed resolves as `config.frame.enabled && (meta.frame ?? config.frame.default)`:
 
-- **`GET/PUT /api/config`** manage the global config: `{frame: {enabled, default}}` (both booleans) plus the four markdown render settings documented in [Markdown render settings](formats.md#markdown-render-settings). `enabled` is the master switch; `default` applies to items with no per-item value. `PUT` accepts a partial `frame` or `md` object and merges it. The optional `FRAME_ENABLED` / `FRAME_DEFAULT` env vars (both default `true` when unset) supply the values while no config has been saved. The server writes nothing on boot. `config.json` appears the first time a `PUT` is accepted, which keeps the git backend from committing on every startup. It is a reserved key in whatever backend you run, landing at `DATA_DIR/artifacts/config.json` on the local one. A `PUT` writes all six fields at once, so once the server has saved it the env vars stop having any effect. Edit that file by hand and the rule is per field: anything missing or invalid falls back to the env var, then to the built-in default.
+- **`GET/PUT /api/config`** manage the global config: `{frame: {enabled, default}}` (both booleans) plus the four markdown render settings documented in [Markdown render settings](formats.md#markdown-render-settings). `enabled` is the master switch; `default` applies to items with no per-item value. `PUT` accepts a partial `frame`, `md` or `branding` object and merges it. The optional `FRAME_ENABLED` / `FRAME_DEFAULT` env vars (both default `true` when unset) supply the values while no config has been saved. The server writes nothing on boot. `config.json` appears the first time a `PUT` is accepted, which keeps the git backend from committing on every startup. It is a reserved key in whatever backend you run, landing at `DATA_DIR/artifacts/config.json` on the local one. A `PUT` writes every field at once, so once the server has saved it the env vars stop having any effect. Edit that file by hand and the rule is per field: anything missing or invalid falls back to the env var, then to the built-in default.
 - **Per item**, the `frame` field on `POST` / `PUT` / `PATCH` is `true` (always framed), `false` (never framed), or — via `PATCH {"frame": null}` — cleared so the item inherits the global default.
+
+### Branding
+
+The `branding` block is what the viewer-facing shells read instead of carrying a product name and
+brand colors of their own. Every field defaults to an empty string, and an empty string means "keep
+the built-in look", so a server that has never had branding set renders byte for byte what it
+rendered before the block existed.
+
+| Field | Accepts | Refused with a 400 |
+|---|---|---|
+| `productName` | Plain text, up to 40 chars. Whitespace collapses. | Not a string, over 40 chars, or containing `<` / `>`. |
+| `logoUrl` | An absolute `http://` or `https://` URL, or a path starting with a single `/`. Up to 2048 chars. | A `data:` or `javascript:` URL, a protocol-relative `//host/x`, a relative `assets/x`, credentials in the URL, or quotes, angle brackets, backslashes or spaces anywhere in it. |
+| `faviconUrl` | Same rules as `logoUrl`. | Same as `logoUrl`. |
+| `accentColor` | A hex color (`#rgb`, `#rgba`, `#rrggbb`, `#rrggbbaa`) or an `rgb()`, `rgba()`, `hsl()` or `hsla()` color whose parentheses hold only numbers and separators. | Anything else, color names included. The value lands inside a `<style>` block, so the check is an allowlist of shapes rather than a scan for bad characters. |
+| `footerText` | Plain text, up to 160 chars. Whitespace collapses. | Not a string, over 160 chars, or containing `<` / `>`. |
+
+The error message names the field it refused, for example `branding.accentColor must be a hex color
+(#rgb, #rrggbb, #rrggbbaa) or an rgb(), rgba(), hsl() or hsla() color`. A refused field is applied
+nowhere: the whole `PUT` fails, so a bad value never lands half-written.
+
+`BRAND_PRODUCT_NAME`, `BRAND_LOGO_URL`, `BRAND_FAVICON_URL`, `BRAND_ACCENT_COLOR` and
+`BRAND_FOOTER_TEXT` supply the values while no config has been saved. A value one of them holds
+that this build refuses is logged once at boot and ignored, so a typo in an env var does not stop
+the server from starting. In a hand-edited `config.json` the same rule applies per field: a value
+that fails validation falls back to the env var, then to the empty default.
+
+There is no per-artifact branding. A single artifact that needs its own mark uses a watermark
+instead.
 
 `GET /api/config` also returns `baseUrl`, the `BASE_URL` the server builds artifact links from. It is not config and `PUT` ignores it: the dashboard needs it because the origin an operator opens the dashboard on is not always the origin artifact links use.
 
