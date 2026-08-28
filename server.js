@@ -33,7 +33,7 @@ import {
 } from './lib/auth.js';
 import { SOURCE_EXT, dropStaleObjects } from './lib/artifact-files.js';
 import { createConfigStore } from './lib/config.js';
-import { ApiError } from './lib/errors.js';
+import { ApiError, clientFacingError } from './lib/errors.js';
 import { artifactExpired } from './lib/expiry.js';
 import { qrPng, qrSvg } from './lib/qr.js';
 import { parseRedirectTarget, resolveRedirectTarget } from './lib/redirect.js';
@@ -2187,14 +2187,13 @@ app.get('/', (req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'index.html'));
 });
 
+// Which errors get to name themselves lives in lib/errors.js so a test can hand it the shapes
+// body-parser throws. A caller error is answered and not logged: a malformed body is a typo on
+// the other end, and a stack trace per typo buries the logs that matter.
 app.use((err, req, res, next) => {
-  if (err instanceof ApiError) {
-    return res.status(err.status).json({ error: err.message });
-  }
-  if (err?.type === 'entity.too.large') {
-    return res.status(413).json({
-      error: 'body too large (10mb json / 50mb zip / 16kb on credential routes)',
-    });
+  const answer = clientFacingError(err);
+  if (answer) {
+    return res.status(answer.status).json({ error: answer.message });
   }
   console.error(err);
   res.status(500).json({ error: 'internal server error' });

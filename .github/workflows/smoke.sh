@@ -36,6 +36,29 @@ list_field() { # list_field <slug> <field>
 code=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/api/artifacts" -H "$JSON" -d '{"content":"<h1>x</h1>","type":"html"}')
 expect_code 401 "$code" "unauth publish"
 
+# a body body-parser refuses -> 400 that names the format, not a 500. express.json() is in
+# strict mode, so a bare `null`, `"x"` or `5` is refused before any route runs. Answering 500
+# told the caller "the server broke" for a typo, and a retry loop keyed on 5xx retried a
+# request that can never succeed.
+for badbody in 'null' '"x"' '5' '{"content":'; do
+  code=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/api/artifacts" -H "$AUTH" -H "$JSON" -d "$badbody")
+  expect_code 400 "$code" "malformed body refused: $badbody"
+done
+curl -s -X POST "$BASE/api/artifacts" -H "$AUTH" -H "$JSON" -d 'null' | grep -qF 'invalid JSON body' \
+  || fail "the 400 does not name the problem"
+# ...while a body the parser accepts and the route refuses still answers on the route's own
+# terms, so the new parser branch did not swallow the messages every other 400 carries
+curl -s -X POST "$BASE/api/artifacts" -H "$AUTH" -H "$JSON" -d '{"type":"html"}' | grep -qF 'content (non-empty string) is required' \
+  || fail "a valid body with a bad field lost its own message"
+# nothing about the server leaks either way
+if curl -s -X POST "$BASE/api/artifacts" -H "$AUTH" -H "$JSON" -d 'null' | grep -qi 'syntaxerror\|at position\|/data/'; then
+  fail "the 400 leaked the parser's internals"
+fi
+echo "ok: a malformed body answers 400 naming the problem"
+# The other half of that handler, a real internal error answering a bare 500 with nothing about
+# itself, has no trigger from outside a healthy server: every reachable throw is an ApiError.
+# It is covered in test/errors.test.js rather than faked here.
+
 # missing artifact -> branded HTML 404
 notfound_headers=$(mktemp)
 notfound_body=$(mktemp)

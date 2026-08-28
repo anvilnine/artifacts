@@ -26,7 +26,7 @@ The `[read|publish|full]` tag on each route is the minimum key scope required (`
 
 Semantics:
 
-- Body limits: 10 MB JSON, 50 MB zip.
+- Body limits: 10 MB JSON, 50 MB zip. Over the limit is a `413`. A body the JSON parser refuses is a `400` with `{"error":"invalid JSON body"}`, which includes a bare `null`, `"x"` or `5`: the parser is in strict mode, so only an object or an array counts as a body. Every other failure is a `500` with `{"error":"internal server error"}` and nothing else, so a 5xx always means the server, never your request.
 - `type: "redirect"` publishes a short link instead of a page: `content` is the target, and `GET /a/:slug` answers `301` with `Location: <target>`, `Cache-Control: no-store` and `Referrer-Policy: no-referrer`. The target must be an absolute `http://` or `https://` URL and cannot carry a username or password; anything else is a `400`. What gets stored is the normalized URL, capped at 2048 characters, in `meta.target` (which the 301 follows) and in the artifact body. Redirects are never framed and ignore `?raw=1`, and `GET /a/:slug/source` returns the stored target as `text/plain`. Full behavior, including what an open redirector costs you, in [Redirects](formats.md#redirects).
 - `PUT` without `title` keeps the title already stored, the way it keeps `tags` and `project`. Send `"title": ""` to clear it back to the slug.
 - A write that stores a redirect answers with `target`, the normalized URL it stored, which is not always the string that was sent.
