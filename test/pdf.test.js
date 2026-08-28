@@ -64,20 +64,46 @@ test('an empty or non-string body is refused', () => {
   }
 });
 
+test('a truncated or corrupted upload is refused', () => {
+  // The magic number only proves the first five bytes. Half an upload still starts with
+  // %PDF-, stores, and then renders nothing, with nothing anywhere saying why. Every PDF ends
+  // with %%EOF, so a tail with no marker in it is the signal that bytes are missing.
+  const whole = Buffer.from(TINY_PDF_B64, 'base64');
+  const halfway = whole.subarray(0, Math.floor(whole.length / 2));
+  // Base64 cut short: what a dropped chunk of an upload decodes to.
+  const cutShort = TINY_PDF_B64.slice(0, 60);
+  // One character dropped from the middle, which shifts every byte after it. Node's decoder
+  // skips characters it cannot use instead of throwing, so nothing before this said a word.
+  const shifted = TINY_PDF_B64.slice(0, 40) + TINY_PDF_B64.slice(41);
+  for (const bad of [halfway.toString('base64'), cutShort, shifted]) {
+    assert.throws(() => parsePdfContent(bad), (err) => {
+      assert.equal(err.status, 400);
+      assert.match(err.message, /truncated/);
+      return true;
+    }, `${bad.slice(0, 20)} should be refused`);
+  }
+});
+
 test('the size cap is measured on the decoded bytes, not the base64', () => {
   // Base64 is 4 bytes per 3, so a body one byte over the cap is well under the JSON body
   // limit that would otherwise catch it. Measuring the encoded string instead would refuse
   // PDFs a quarter smaller than the documented cap.
   const head = Buffer.from('%PDF-1.4\n');
-  const tooBig = Buffer.concat([head, Buffer.alloc(PDF_MAX_BYTES - head.length + 1, 0x20)]);
+  const tail = Buffer.from('\n%%EOF\n'); // else the truncation check answers first
+  const pad = Buffer.alloc(PDF_MAX_BYTES + 1 - head.length - tail.length, 0x20);
+  const tooBig = Buffer.concat([head, pad, tail]);
   assert.equal(tooBig.length, PDF_MAX_BYTES + 1);
   assert.throws(() => parsePdfContent(tooBig.toString('base64')), (err) => {
     assert.equal(err.status, 400);
     assert.match(err.message, /too large/);
+    // The cap in MB as well as in bytes: the express body limit answers first for anything
+    // much bigger than this, and its message names neither, so this one has to be readable.
+    assert.match(err.message, /7 MB/);
     return true;
   });
 
-  const justUnder = tooBig.subarray(0, PDF_MAX_BYTES);
+  const justUnder = Buffer.concat([tooBig.subarray(0, PDF_MAX_BYTES - tail.length), tail]);
+  assert.equal(justUnder.length, PDF_MAX_BYTES);
   assert.equal(parsePdfContent(justUnder.toString('base64')).length, PDF_MAX_BYTES);
 });
 
@@ -172,10 +198,13 @@ test('what the viewer is told, per mode', () => {
   assert.ok(!standard.hash.includes('toolbar=0'));
   assert.ok(standard.hash.includes('view=FitH'));
 
+  // minimal drops our toolbar, and with downloads on the browser's own is the only way left
+  // to reach the file, so it stays. Taking both away made "PDF download: on" a claim the page
+  // could not keep.
   const minimal = pdfViewerFlags({ mode: 'minimal', download: true });
-  assert.equal(minimal.bar, false); // no toolbar of ours either
-  assert.ok(minimal.hash.includes('toolbar=0'));
-  assert.ok(minimal.hash.includes('navpanes=0'));
+  assert.equal(minimal.bar, false); // no toolbar of ours
+  assert.ok(!minimal.hash.includes('toolbar=0'));
+  assert.ok(!minimal.hash.includes('navpanes=0'));
 
   const presentation = pdfViewerFlags({ mode: 'presentation', download: true });
   assert.equal(presentation.bar, true); // kept, because it holds the full-screen button

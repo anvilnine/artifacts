@@ -25,7 +25,7 @@ Every tool the server registers. `?` marks an optional argument.
 | `list_artifacts` | `tag?`, `project?` | JSON list |
 | `delete_artifact` | `slug` | confirmation |
 
-`type` is `html` (the default), `jsx`, `tsx`, `md`, or `redirect`. No MCP tool publishes a **pdf**, for the reason zip sites have none: the payload is binary, and base64 for a multi-megabyte file would fill a client's context with nothing an agent can read. Use the [CLI](cli.md) (`artifacts publish q3.pdf`) or the [REST endpoint](api.md). A pdf published elsewhere still lists, renames, expires and deletes through these tools like any other artifact.
+`type` is `html` (the default), `jsx`, `tsx`, `md`, `pdf`, or `redirect`. **pdf** is accepted but is a poor fit here, for the reason zip sites have no tool at all: the payload is binary, and base64 for a multi-megabyte file fills a client's context with nothing an agent can read. Use the [CLI](cli.md) (`artifacts publish q3.pdf`) or the [REST endpoint](api.md) to put the bytes up. The enum carries `pdf` so that a deliberate change of type is expressible in both directions, not as an invitation to paste megabytes. A pdf published elsewhere lists, renames, expires and deletes through these tools like any other artifact.
 
 `list_artifacts` returns what `GET /api/artifacts` returns: `slug`, `type`, `title`, `createdAt`,
 `updatedAt` and `tags` on every entry, plus whichever of `project`, `expiresAt`, `frame`,
@@ -44,13 +44,16 @@ author's own HTML. Details in [Link previews](formats.md#link-previews).
 frame should check the server config before the artifact.
 
 `update_artifact` rewrites the artifact rather than patching it, and `type` falls back to `html`
-instead of keeping what is there. Pass it on every update of a `jsx`, `tsx`, `md` or `redirect`
-artifact, or the artifact comes back as HTML and the files the old type owned are deleted. `title`,
+instead of keeping what is there. Pass it on every update of a `jsx`, `tsx`, `md`, `pdf` or
+`redirect` artifact, or the artifact comes back as HTML and the files the old type owned are
+deleted. A **pdf** is the one type that refuses the call rather than doing that: its bytes cannot
+be rebuilt from anything in a client's context, so `update_artifact` with no `type` on a pdf is an
+error telling you to name one. `title`,
 `frame`, `tags`, `project`, `visibility`, `description` and `ogImage` all keep their current value
 when omitted, and take the values documented on the matching `set_artifact_*` row. To change one
 field and touch nothing else, use that row's tool instead of `update_artifact`.
 
-No MCP tool for zip sites or PDFs, because both payloads are binary. Use the [CLI](cli.md), the [zip endpoint](api.md#zip-sites-multi-file-static-projects), or the [PDF publish call](formats.md#pdf).
+No MCP tool for zip sites, because the payload is a binary archive. Use the [CLI](cli.md) or the [zip endpoint](api.md#zip-sites-multi-file-static-projects). PDFs are better sent the same way, through the [CLI](cli.md) or the [PDF publish call](formats.md#pdf), even though the type is in the enum.
 
 **New artifacts default to `private`** (set `DEFAULT_VISIBILITY=public` on the server to change this). For a `private` or `password` artifact the returned URL is a capability link (`?k=<token>`) that is immediately viewable, so hand that whole URL out. Pass `visibility: "public"` to publish a bare link instead. See [visibility](api.md#visibility).
 

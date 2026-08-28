@@ -79,11 +79,25 @@ Three URLs per artifact:
 uploaded bytes for every other type. Nothing else under the slug resolves: any other sub-path is a
 404.
 
+`?download=` takes a truthy value. `?download=1` and `?download=yes` attach; `?download=0`,
+`?download=false` and a bare `?download=` render inline like no parameter at all.
+
 Rules:
 
-- A body that does not decode to bytes starting with `%PDF-` is a 400 at publish time.
+- The type check is two markers, both at publish time, both a 400. The decoded body has to start
+  with the 5 bytes `%PDF-`, and it has to carry `%%EOF` somewhere in its last 1 KB, which is what
+  catches a truncated upload: base64 cut short still decodes and still starts with `%PDF-`. Past
+  those two the file is taken as given. Nothing here parses the document, so a PDF that is corrupt
+  in the middle, encrypted, or built by something that writes broken xref tables publishes fine and
+  is the caller's problem.
 - Max 7 MB per PDF, measured on the decoded bytes. The publish body parser stops at 10 MB of JSON
-  and base64 costs 4 bytes for every 3, so 7 MB of PDF is about 9.33 MB of request.
+  and base64 costs 4 bytes for every 3, so 7 MB of PDF is about 9.33 MB of request. Above roughly
+  7.5 MB decoded the body parser answers first, with its own `body too large` message that names
+  neither PDFs nor the cap; the dashboard checks the size before it uploads for that reason.
+- A `PUT` of a PDF has to name `type` (`"pdf"` to send new bytes, another type to convert it).
+  Omitting `type` on any other artifact rewrites it as html; on a PDF that would delete bytes
+  nothing can rebuild, so it is refused instead. `PUT` with no `pdf` field keeps the stored viewer
+  settings; `{"pdf": null}` clears them.
 - A `data:application/pdf;base64,` prefix and the line breaks `base64` writes are both accepted, so
   a browser's `FileReader.readAsDataURL` output goes straight in.
 - Everything else works the same as any other type: rename, tags, project, expiry, visibility,
@@ -101,8 +115,13 @@ replace the one the browser already ships. The tradeoff is that the toolbar look
 Chrome, Firefox and Safari, and that a browser with no built-in PDF viewer shows nothing.
 
 For that last case the `<object>` carries fallback content: a line of text and the same Open and
-Download links. Most Android browsers land there, so a reader on Android gets two buttons rather
-than a document on the page.
+Download links. A browser that refuses `application/pdf` outright shows it on its own. A browser
+that accepts the type, takes the space and then paints nothing never reaches the children, so the
+shell also watches for that: if the `<object>` has not fired its load event 1.5 seconds after the
+page finishes loading, the script moves the fallback out of the object and drops the object. That
+covers the blank-frame case measured in headless WebKit, and the one Chrome on Android has shown
+historically. Which browsers land where is not something this repo has measured across the field,
+so treat the fallback as the safety net rather than a list.
 
 ### Viewer controls
 
@@ -128,8 +147,17 @@ The three modes:
 | Mode | The page |
 |---|---|
 | `standard` | Our toolbar (title, Open, Download) above the document, browser controls untouched. |
-| `presentation` | A whole page at a time on a dark backdrop, with a Full screen button in the toolbar. |
-| `minimal` | The document, edge to edge. No toolbar of ours, and the browser's asked to hide its own. |
+| `presentation` | A whole page at a time on a dark backdrop, with a Full screen button in the toolbar. The browser's own toolbar is asked to go, so slides are not framed by chrome. |
+| `minimal` | The document, edge to edge. No toolbar of ours; the browser's is left alone, because with ours gone it is the only way left to reach the file. |
+
+Which of them hides the browser's own controls comes down to two things: `presentation` always
+asks for them to go, and `download: false` asks in every mode (the next section covers that half).
+So `standard` with downloads off is the document alone, and `minimal` with downloads on still has
+the browser's toolbar over it.
+
+A bar of ours with nothing in it is never drawn. `standard` with downloads off has no buttons left,
+and inside the viewer frame the title is already in the frame's own bar, so the mode renders the
+document with no bar rather than an empty strip.
 
 An artifact with both defaults stores nothing at all, so `GET /api/artifacts` shows a `pdf` field
 only on an artifact somebody configured.

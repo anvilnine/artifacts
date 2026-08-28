@@ -542,6 +542,19 @@ code=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/a/ci-conv")
 expect_code 301 "$code" "the conversion walk's redirect hop"
 [ "$(curl -s "$BASE/a/ci-conv/source")" = 'https://example.com/step-redirect' ] \
   || fail "redirect conversion lost source.url"
+# The pdf hop, both ways. A pdf is the one type whose file lives on a sub-path of its own, so
+# the direction out of it has to take that path away and the direction into it has to serve it.
+# The base64 is inline because the pdf block that holds PDF_B64 runs later in this file.
+convert_to pdf 'JVBERi0xLjQKMSAwIG9iago8PC9UeXBlL0NhdGFsb2cvUGFnZXMgMiAwIFI+PgplbmRvYmoKMiAwIG9iago8PC9UeXBlL1BhZ2VzL0tpZHNbMyAwIFJdL0NvdW50IDE+PgplbmRvYmoKMyAwIG9iago8PC9UeXBlL1BhZ2UvUGFyZW50IDIgMCBSL01lZGlhQm94WzAgMCAzMDAgMjAwXS9Db250ZW50cyA0IDAgUi9SZXNvdXJjZXM8PC9Gb250PDwvRjEgNSAwIFI+Pj4+Pj4KZW5kb2JqCjQgMCBvYmoKPDwvTGVuZ3RoIDQxPj5zdHJlYW0KQlQgL0YxIDI0IFRmIDMwIDEwMCBUZCAoc21va2UgcGRmKSBUaiBFVAplbmRzdHJlYW0KZW5kb2JqCjUgMCBvYmoKPDwvVHlwZS9Gb250L1N1YnR5cGUvVHlwZTEvQmFzZUZvbnQvSGVsdmV0aWNhPj4KZW5kb2JqCnhyZWYKMCA2CjAwMDAwMDAwMDAgNjU1MzUgZiAKMDAwMDAwMDAwOSAwMDAwMCBuIAowMDAwMDAwMDU0IDAwMDAwIG4gCjAwMDAwMDAxMDUgMDAwMDAgbiAKMDAwMDAwMDIxNyAwMDAwMCBuIAowMDAwMDAwMzA0IDAwMDAwIG4gCnRyYWlsZXIKPDwvU2l6ZSA2L1Jvb3QgMSAwIFI+PgpzdGFydHhyZWYKMzY3CiUlRU9GCg=='
+curl -s "$BASE/a/ci-conv?raw=1" | grep -qF 'data="/a/ci-conv/file.pdf#' || fail "pdf conversion lost the viewer page"
+code=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/a/ci-conv/file.pdf")
+expect_code 200 "$code" "the conversion walk's pdf hop"
+curl -s "$BASE/a/ci-conv/source" | head -c 5 | grep -q '%PDF-' || fail "pdf conversion lost source.pdf"
+# Out of pdf: the sub-path goes with it, and the redirect target the hop before is long gone.
+convert_to md '# step md again'
+code=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/a/ci-conv/file.pdf")
+expect_code 404 "$code" "the pdf sub-path after converting away"
+[ "$(curl -s "$BASE/a/ci-conv/source")" = '# step md again' ] || fail "the hop out of pdf lost source.md"
 convert_to html '<h1>step html again</h1>'
 curl -s "$BASE/a/ci-conv?raw=1" | grep -q 'step html again' || fail "html conversion lost index.html"
 curl -s "$BASE/a/ci-conv/source" | grep -q 'step html again' || fail "html conversion lost source.html"
@@ -1397,6 +1410,36 @@ code=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/api/artifacts" -H "
   -d "{\"content\":\"$notpdf\",\"type\":\"pdf\",\"slug\":\"ci-pdf-bad\"}")
 expect_code 400 "$code" "a pdf body that is not a pdf"
 
+# So is a body that starts like a PDF and then stops. Half an upload passes the magic number,
+# so the %%EOF marker in the tail is what catches it; without that check both of these stored
+# with a 201 and rendered nothing.
+half=$(printf '%s' "$PDF_B64" | cut -c1-60)
+code=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/api/artifacts" -H "$AUTH" -H "$JSON" \
+  -d "{\"content\":\"$half\",\"type\":\"pdf\",\"slug\":\"ci-pdf-cut\"}")
+expect_code 400 "$code" "a pdf body that stops halfway"
+err=$(curl -s -X POST "$BASE/api/artifacts" -H "$AUTH" -H "$JSON" \
+  -d "{\"content\":\"$half\",\"type\":\"pdf\",\"slug\":\"ci-pdf-cut\"}")
+printf '%s' "$err" | grep -q 'truncated' || fail "a truncated pdf does not say so: $err"
+
+# The direct-download switch takes a truthy value. A bare or falsy one used to attach, which
+# made ?download=0 mean "yes, download".
+for q in 'download=' 'download=0' 'download=false'; do
+  dl_headers=$(mktemp)
+  curl -s -D "$dl_headers" -o /dev/null "$BASE/a/ci-pdf/file.pdf?$q"
+  if grep -qi '^Content-Disposition' "$dl_headers"; then fail "?$q sent an attachment"; fi
+  rm "$dl_headers"
+done
+echo "ok: only a truthy ?download attaches"
+
+# /source is the one source route served as its own type rather than forced to text/plain, so
+# it carries the same headers the file route does.
+src_headers=$(mktemp)
+curl -s -D "$src_headers" -o /dev/null "$BASE/a/ci-pdf/source"
+grep -qi '^Content-Security-Policy:' "$src_headers" || fail "pdf source carries no CSP"
+grep -qi '^X-Content-Type-Options: nosniff' "$src_headers" || fail "pdf source is not nosniff"
+rm "$src_headers"
+echo "ok: pdf source headers"
+
 # The visibility gate covers the new sub-path: a private pdf leaks neither page nor bytes.
 curl -sf -X POST "$BASE/api/artifacts" -H "$AUTH" -H "$JSON" \
   -d "{\"content\":\"$PDF_B64\",\"type\":\"pdf\",\"slug\":\"ci-pdf-priv\",\"visibility\":\"private\"}" > /dev/null
@@ -1404,7 +1447,37 @@ code=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/a/ci-pdf-priv/file.pdf")
 expect_code 404 "$code" "private pdf file without a token"
 code=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/a/ci-pdf-priv/source")
 expect_code 404 "$code" "private pdf source without a token"
+# A wrong token is the same 404, not a hint that the slug exists.
+code=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/a/ci-pdf-priv/file.pdf?k=notatoken")
+expect_code 404 "$code" "private pdf file with a wrong token"
+code=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/a/ci-pdf-priv/source?k=notatoken")
+expect_code 404 "$code" "private pdf source with a wrong token"
 curl -sf -X DELETE "$BASE/api/artifacts/ci-pdf-priv" -H "$AUTH" > /dev/null
+
+# Every other gate covers the same two sub-paths. Locked before expired, so a password
+# artifact past its date still answers 404 rather than leaking that it is there at all.
+curl -sf -X POST "$BASE/api/artifacts" -H "$AUTH" -H "$JSON" \
+  -d "{\"content\":\"$PDF_B64\",\"type\":\"pdf\",\"slug\":\"ci-pdf-pw\",\"visibility\":\"password\",\"password\":\"letmein\"}" > /dev/null
+code=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/a/ci-pdf-pw/file.pdf")
+expect_code 404 "$code" "password pdf file before unlocking"
+code=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/a/ci-pdf-pw/source")
+expect_code 404 "$code" "password pdf source before unlocking"
+curl -sf -X DELETE "$BASE/api/artifacts/ci-pdf-pw" -H "$AUTH" > /dev/null
+
+curl -sf -X POST "$BASE/api/artifacts" -H "$AUTH" -H "$JSON" \
+  -d "{\"content\":\"$PDF_B64\",\"type\":\"pdf\",\"slug\":\"ci-pdf-gate\",\"visibility\":\"public\"}" > /dev/null
+curl -sf -X PATCH "$BASE/api/artifacts/ci-pdf-gate" -H "$AUTH" -H "$JSON" -d '{"disabled":true}' > /dev/null
+code=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/a/ci-pdf-gate/file.pdf")
+expect_code 404 "$code" "disabled pdf file"
+code=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/a/ci-pdf-gate/source")
+expect_code 404 "$code" "disabled pdf source"
+curl -sf -X PATCH "$BASE/api/artifacts/ci-pdf-gate" -H "$AUTH" -H "$JSON" \
+  -d '{"disabled":false,"expiresAt":"2020-01-01"}' > /dev/null
+code=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/a/ci-pdf-gate/file.pdf")
+expect_code 410 "$code" "expired pdf file"
+code=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/a/ci-pdf-gate/source")
+expect_code 410 "$code" "expired pdf source"
+curl -sf -X DELETE "$BASE/api/artifacts/ci-pdf-gate" -H "$AUTH" > /dev/null
 echo "ok: pdf visibility gate"
 
 # --- pdf controls: three viewer modes, and the download toggle ---
@@ -1418,7 +1491,9 @@ curl -sf -X PATCH "$BASE/api/artifacts/ci-pdf" -H "$AUTH" -H "$JSON" -d '{"pdf":
 raw=$(curl -s "$BASE/a/ci-pdf?raw=1")
 printf '%s' "$raw" | grep -qF "mode-minimal" || fail "minimal mode did not take"
 if printf '%s' "$raw" | grep -qF 'id="bar"'; then fail "minimal mode still renders our toolbar"; fi
-printf '%s' "$raw" | grep -qF 'toolbar=0' || fail "minimal mode keeps the browser toolbar"
+# With our bar gone and downloads on, the browser's own toolbar is the only way left to the
+# file, so minimal leaves it alone. The block further down covers that both ways.
+if printf '%s' "$raw" | grep -qF 'toolbar=0'; then fail "minimal mode hides the browser toolbar too"; fi
 
 curl -sf -X PATCH "$BASE/api/artifacts/ci-pdf" -H "$AUTH" -H "$JSON" -d '{"pdf":{"mode":"presentation"}}' > /dev/null
 raw=$(curl -s "$BASE/a/ci-pdf?raw=1")
@@ -1471,6 +1546,94 @@ expect_code 201 "$code" "publish a pdf with viewer settings"
 curl -s "$BASE/a/ci-pdf-modes?raw=1" | grep -qF "mode-minimal" || fail "publish-time pdf settings did not take"
 curl -sf -X DELETE "$BASE/api/artifacts/ci-pdf-modes" -H "$AUTH" > /dev/null
 echo "ok: pdf settings validation"
+
+# A bar of ours with nothing in it is not drawn. standard + downloads off has no buttons left,
+# and inside the frame the title is already in the frame's bar, so what rendered was a 44px
+# empty strip. minimal is the other way round: our bar is gone, so the browser's own toolbar
+# has to stay or downloads-on has no way to reach the file.
+curl -sf -X PATCH "$BASE/api/artifacts/ci-pdf" -H "$AUTH" -H "$JSON" \
+  -d '{"pdf":{"mode":"standard","download":false}}' > /dev/null
+raw=$(curl -s "$BASE/a/ci-pdf?raw=1")
+if printf '%s' "$raw" | grep -qF 'id="bar"'; then fail "an empty pdf toolbar is still rendered"; fi
+curl -sf -X PATCH "$BASE/api/artifacts/ci-pdf" -H "$AUTH" -H "$JSON" \
+  -d '{"pdf":{"mode":"minimal","download":true}}' > /dev/null
+raw=$(curl -s "$BASE/a/ci-pdf?raw=1")
+if printf '%s' "$raw" | grep -qF 'toolbar=0'; then fail "minimal with downloads on hides the browser toolbar"; fi
+curl -sf -X PATCH "$BASE/api/artifacts/ci-pdf" -H "$AUTH" -H "$JSON" -d '{"pdf":null}' > /dev/null
+echo "ok: no empty pdf toolbar, and minimal keeps the browser's"
+
+# The toolbar buttons name themselves. Under 480px the CSS drops the label text, which takes it
+# out of the accessible name, and the glyph is all a screen reader had left.
+raw=$(curl -s "$BASE/a/ci-pdf?raw=1")
+printf '%s' "$raw" | grep -qF 'aria-label="Open the PDF in a new tab"' || fail "the Open button has no accessible name"
+printf '%s' "$raw" | grep -qF 'aria-label="Download the PDF"' || fail "the Download button has no accessible name"
+# The open parameters are joined with "&", which has to be escaped inside an attribute.
+curl -sf -X PATCH "$BASE/api/artifacts/ci-pdf" -H "$AUTH" -H "$JSON" -d '{"pdf":{"mode":"presentation"}}' > /dev/null
+raw=$(curl -s "$BASE/a/ci-pdf?raw=1")
+printf '%s' "$raw" | grep -qF 'file.pdf#view=Fit&amp;toolbar=0' || fail "the embed url is not escaped"
+printf '%s' "$raw" | grep -qF 'aria-label="Show the document full screen"' || fail "the Full screen button has no accessible name"
+curl -sf -X PATCH "$BASE/api/artifacts/ci-pdf" -H "$AUTH" -H "$JSON" -d '{"pdf":null}' > /dev/null
+echo "ok: pdf toolbar accessible names and escaping"
+
+# The <object>'s fallback: what a browser that will not render a PDF shows, and what the shell's
+# probe swaps in when a browser takes the type and paints nothing. With downloads off there are
+# no links to offer, so the markup says that instead of shipping the URLs the toggle removed.
+raw=$(curl -s "$BASE/a/ci-pdf?raw=1")
+printf '%s' "$raw" | grep -qF 'id="fallback"' || fail "the pdf viewer has no fallback"
+printf '%s' "$raw" | grep -qF '>Open the PDF</a>' || fail "the fallback has no open link"
+printf '%s' "$raw" | grep -qF '>Download the PDF</a>' || fail "the fallback has no download link"
+printf '%s' "$raw" | grep -qF "this.dataset.loaded" || fail "the fallback probe is missing"
+curl -sf -X PATCH "$BASE/api/artifacts/ci-pdf" -H "$AUTH" -H "$JSON" -d '{"pdf":{"download":false}}' > /dev/null
+raw=$(curl -s "$BASE/a/ci-pdf?raw=1")
+printf '%s' "$raw" | grep -qF 'id="fallback"' || fail "downloads off dropped the fallback itself"
+if printf '%s' "$raw" | grep -qF '>Open the PDF</a>'; then fail "downloads off kept the fallback open link"; fi
+if printf '%s' "$raw" | grep -qF '>Download the PDF</a>'; then fail "downloads off kept the fallback download link"; fi
+curl -sf -X PATCH "$BASE/api/artifacts/ci-pdf" -H "$AUTH" -H "$JSON" -d '{"pdf":null}' > /dev/null
+echo "ok: pdf object fallback"
+
+# A PUT replaces the bytes, and a PUT that names no type is refused rather than converting the
+# artifact to html and deleting the file: for every other type the caller still holds the source,
+# and for this one the bytes are gone.
+curl -sf -X PUT "$BASE/api/artifacts/ci-pdf" -H "$AUTH" -H "$JSON" \
+  -d "{\"content\":\"$PDF_B64\",\"type\":\"pdf\",\"title\":\"Smoke PDF replaced\"}" > /dev/null
+[ "$(list_field ci-pdf title)" = 'Smoke PDF replaced' ] || fail "a pdf PUT did not replace the artifact"
+code=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/a/ci-pdf/file.pdf")
+expect_code 200 "$code" "the file after a pdf PUT"
+code=$(curl -s -o /dev/null -w '%{http_code}' -X PUT "$BASE/api/artifacts/ci-pdf" -H "$AUTH" -H "$JSON" \
+  -d '{"content":"<h1>silently html</h1>"}')
+expect_code 400 "$code" "a pdf PUT with no type"
+[ "$(list_field ci-pdf type)" = 'pdf' ] || fail "the refused PUT changed the type anyway"
+code=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/a/ci-pdf/file.pdf")
+expect_code 200 "$code" "the file after the refused PUT"
+echo "ok: pdf put and the no-type refusal"
+
+# A copy of a pdf gets its own bytes and keeps the source's viewer settings, and takes an
+# override in the body the way every other setting on the endpoint does. A value the server
+# does not understand is a 400 here too, not a 201 that quietly kept the source's.
+curl -sf -X PATCH "$BASE/api/artifacts/ci-pdf" -H "$AUTH" -H "$JSON" \
+  -d '{"pdf":{"mode":"presentation","download":false}}' > /dev/null
+curl -s -X DELETE "$BASE/api/artifacts/ci-pdf-copy" -H "$AUTH" > /dev/null
+code=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/api/artifacts/ci-pdf/duplicate" -H "$AUTH" -H "$JSON" \
+  -d '{"slug":"ci-pdf-copy","visibility":"public"}')
+expect_code 201 "$code" "duplicate a pdf"
+[ "$(list_field ci-pdf-copy type)" = 'pdf' ] || fail "the copy is not listed as a pdf"
+curl -s "$BASE/api/artifacts" -H "$AUTH" | grep -qF '"pdf":{"mode":"presentation","download":false}' \
+  || fail "the copy did not keep the source's viewer settings"
+curl -s -D "$PDF_DIR/copy.h" -o "$PDF_DIR/copy.pdf" "$BASE/a/ci-pdf-copy/file.pdf" > /dev/null
+grep -qi '^Content-Type: application/pdf' "$PDF_DIR/copy.h" || fail "the copy does not serve its own file"
+cmp -s "$PDF_DIR/tiny.pdf" "$PDF_DIR/copy.pdf" || fail "the copy's bytes came back changed"
+curl -sf -X DELETE "$BASE/api/artifacts/ci-pdf-copy" -H "$AUTH" > /dev/null
+code=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/api/artifacts/ci-pdf/duplicate" -H "$AUTH" -H "$JSON" \
+  -d '{"slug":"ci-pdf-copy2","pdf":{"mode":"bogus"}}')
+expect_code 400 "$code" "duplicate with a pdf mode the server does not know"
+code=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/api/artifacts/ci-pdf/duplicate" -H "$AUTH" -H "$JSON" \
+  -d '{"slug":"ci-pdf-copy2","pdf":{"mode":"minimal"},"visibility":"public"}')
+expect_code 201 "$code" "duplicate with a pdf override"
+curl -s "$BASE/api/artifacts" -H "$AUTH" | grep -qF '"pdf":{"mode":"minimal","download":false}' \
+  || fail "the duplicate override did not take"
+curl -sf -X DELETE "$BASE/api/artifacts/ci-pdf-copy2" -H "$AUTH" > /dev/null
+curl -sf -X PATCH "$BASE/api/artifacts/ci-pdf" -H "$AUTH" -H "$JSON" -d '{"pdf":null}' > /dev/null
+echo "ok: duplicate a pdf"
 
 curl -sf -X DELETE "$BASE/api/artifacts/ci-pdf" -H "$AUTH" > /dev/null
 rm -r "$PDF_DIR"

@@ -84,9 +84,10 @@
   body.mode-presentation .act:hover { background: #1b2026; color: #edeae4; }
   body.mode-presentation #stage { padding: 0; }
 
-  /* Shown by the browser only when it will not render a PDF inline, which is where most
-     Android browsers land. Everything the toolbar offers is repeated here, so a reader who
-     never sees the document still has a way to open it. */
+  /* Shown by the browser when it refuses application/pdf outright, and moved out of the
+     <object> by the probe below when a browser takes the type and then paints nothing.
+     Everything the toolbar offers is repeated here, so a reader who never sees the document
+     still has a way to open it. */
   #fallback {
     display: flex; flex-direction: column; align-items: center; justify-content: center;
     gap: 12px; height: 100%; padding: 32px 20px; text-align: center;
@@ -106,7 +107,11 @@
   {{BAR}}
 
   <div id="stage">
-    <object id="doc" data="{{EMBED_URL}}" type="application/pdf" title="{{TITLE}}">
+    <!-- onload as an attribute, not a listener added below: the file can finish loading
+         before the parser reaches the script at the end of the body, and a listener added
+         after the event has fired would read as a browser that painted nothing. -->
+    <object id="doc" data="{{EMBED_URL}}" type="application/pdf" title="{{TITLE}}"
+            onload="this.dataset.loaded = '1'">
       <div id="fallback">
         <p>{{FALLBACK_TEXT}}</p>
         {{FALLBACK_LINKS}}
@@ -122,6 +127,28 @@
     var titleEl = document.getElementById('title');
     if (titleEl && window.parent !== window) titleEl.textContent = '';
 
+    // A browser that will not render a PDF is supposed to show the <object>'s children, and
+    // some do. Others accept application/pdf, reserve the whole box, paint nothing in it, and
+    // never reach the children, which leaves the reader a blank white page under a toolbar.
+    // The load event is what tells the two apart: a browser that rendered the file fires it,
+    // one that only took the space does not. The wait starts after the page itself has
+    // finished loading, so a slow download is not mistaken for a blank frame.
+    (function () {
+      var obj = document.getElementById('doc');
+      var stage = document.getElementById('stage');
+      var fallback = document.getElementById('fallback');
+      if (!obj || !stage || !fallback) return;
+      function probe() {
+        setTimeout(function () {
+          if (obj.dataset.loaded) return;
+          stage.appendChild(fallback); // out of the object, where it will actually be drawn
+          obj.remove();
+        }, 1500);
+      }
+      if (document.readyState === 'complete') probe();
+      else window.addEventListener('load', probe);
+    })();
+
     // Presentation mode: hand the whole screen to the document. Inside the viewer frame this
     // is our own iframe going full screen, which is the element the reader can see.
     var fs = document.getElementById('fullscreen');
@@ -130,6 +157,15 @@
         var target = document.documentElement;
         if (document.fullscreenElement) document.exitFullscreen();
         else if (target.requestFullscreen) target.requestFullscreen();
+      });
+      // The same button leaves full screen, so it has to say so. Driven by the event rather
+      // than the click, because Escape and the browser's own control also end it.
+      document.addEventListener('fullscreenchange', function () {
+        var on = !!document.fullscreenElement;
+        var label = fs.querySelector('.label');
+        fs.title = on ? 'Leave full screen' : 'Show the document full screen';
+        fs.setAttribute('aria-label', fs.title);
+        if (label) label.textContent = on ? 'Exit' : 'Full screen';
       });
     }
 

@@ -109,7 +109,7 @@ function fail(message) {
 function inferType(file) {
   if (opts.type) return opts.type;
   const type = EXT_TYPES[path.extname(file).toLowerCase()];
-  if (!type) fail(`cannot infer type from "${file}" — pass --type html|jsx|tsx|md|pdf|redirect`);
+  if (!type) fail(`cannot infer type from "${file}": pass --type html|jsx|tsx|md|pdf|redirect`);
   return type;
 }
 
