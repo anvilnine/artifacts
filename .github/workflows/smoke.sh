@@ -475,6 +475,41 @@ code=$(curl -s -o /dev/null -w '%{http_code}' -X PUT "$BASE/api/artifacts/ci-red
 expect_code 400 "$code" "repointing at credentials refused"
 echo "ok: redirect target credentials refused"
 
+# a redirect pointing at its own slug loops until the visitor's browser gives up. The server
+# never follows a target, so nothing amplifies, but the link is dead and only the publisher can
+# fix it, so it is refused on the way in. Every shape that reaches the same 301 counts: the bare
+# path, the trailing slash, a query, and the other scheme (a proxy terminates TLS and the origin
+# behind it answers on the other one).
+for self in "$BASE/a/ci-redir-self" "$BASE/a/ci-redir-self/" "$BASE/a/ci-redir-self?x=1"; do
+  code=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/api/artifacts" -H "$AUTH" -H "$JSON" \
+    -d "{\"content\":\"$self\",\"type\":\"redirect\",\"slug\":\"ci-redir-self\"}")
+  expect_code 400 "$code" "self-referencing redirect refused: $self"
+done
+curl -s -X POST "$BASE/api/artifacts" -H "$AUTH" -H "$JSON" \
+  -d "{\"content\":\"$BASE/a/ci-redir-self\",\"type\":\"redirect\",\"slug\":\"ci-redir-self\"}" \
+  | grep -qF 'cannot point at its own slug' || fail "the self-reference 400 does not say what is wrong"
+# a target on this server that reaches a different slug is somebody else's problem, not a loop
+curl -sf -X POST "$BASE/api/artifacts" -H "$AUTH" -H "$JSON" \
+  -d "{\"content\":\"$BASE/a/ci-redir\",\"type\":\"redirect\",\"slug\":\"ci-redir-hop\",\"visibility\":\"public\"}" > /dev/null
+# ...and so is repointing an existing one at itself
+code=$(curl -s -o /dev/null -w '%{http_code}' -X PUT "$BASE/api/artifacts/ci-redir-hop" -H "$AUTH" -H "$JSON" \
+  -d "{\"content\":\"$BASE/a/ci-redir-hop\",\"type\":\"redirect\"}")
+expect_code 400 "$code" "repointing a redirect at itself refused"
+# the rename closes the same loop with no target changing: ci-redir-hop points at ci-redir, so
+# renaming it to ci-redir would be a self-reference if the name were free
+code=$(curl -s -o /dev/null -w '%{http_code}' -X PATCH "$BASE/api/artifacts/ci-redir-hop" -H "$AUTH" -H "$JSON" \
+  -d '{"slug":"ci-redir-hop-2"}')
+expect_code 200 "$code" "a rename away from the target still works"
+curl -sf -X POST "$BASE/api/artifacts" -H "$AUTH" -H "$JSON" \
+  -d "{\"content\":\"$BASE/a/ci-redir-gone\",\"type\":\"redirect\",\"slug\":\"ci-redir-rename\",\"visibility\":\"public\"}" > /dev/null
+code=$(curl -s -o /dev/null -w '%{http_code}' -X PATCH "$BASE/api/artifacts/ci-redir-rename" -H "$AUTH" -H "$JSON" \
+  -d '{"slug":"ci-redir-gone"}')
+expect_code 400 "$code" "renaming a redirect onto its own target refused"
+[ "$(list_field ci-redir-rename target)" = "$BASE/a/ci-redir-gone" ] || fail "the refused rename moved the artifact anyway"
+curl -sf -X DELETE "$BASE/api/artifacts/ci-redir-rename" -H "$AUTH" > /dev/null
+curl -sf -X DELETE "$BASE/api/artifacts/ci-redir-hop-2" -H "$AUTH" > /dev/null
+echo "ok: self-referencing redirects refused at publish, repoint and rename"
+
 # non-http targets are refused at publish time, so they can never reach a Location header
 for bad in 'javascript:alert(1)' 'JaVaScRiPt:alert(1)' 'data:text/html,<script>x</script>' '//evil.example' '/relative/path' 'not a url'; do
   code=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/api/artifacts" -H "$AUTH" -H "$JSON" \
@@ -928,6 +963,53 @@ code=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/api/artifacts" -H "$READAUT
 expect_code 401 "$code" "revoked key refused"
 curl -sf -X DELETE "$BASE/api/keys/$fullid" -H "$AUTH" > /dev/null
 echo "ok: managed key lifecycle"
+
+# --- how many redirects one key has minted. Nothing caps it: a cap changes what an existing
+# key is allowed to do, which is the operator's call. The count is what tells them to make it,
+# so a leaked publish-scoped key that starts hosting phishing hops shows as a number that does
+# not match what the key is for. ---
+key_field() { # key_field <key-id> <field>
+  curl -s "$BASE/api/keys" -H "$AUTH" | node -e '
+    let s = "";
+    process.stdin.on("data", (d) => { s += d; }).on("end", () => {
+      const row = JSON.parse(s).find((k) => k.id === process.argv[1]);
+      const v = row ? row[process.argv[2]] : undefined;
+      process.stdout.write(v === undefined ? "" : String(v));
+    });' "$1" "$2"
+}
+resp=$(curl -s -X POST "$BASE/api/keys" -H "$AUTH" -H "$JSON" -d '{"name":"ci-hop-key","scopes":["publish"]}')
+hopkey=$(printf '%s' "$resp" | sed -n 's/.*"key":"\([^"]*\)".*/\1/p')
+hopid=$(printf '%s' "$resp" | sed -n 's/.*"id":"\([^"]*\)".*/\1/p')
+[ -n "$hopkey" ] || fail "hop key create returned no key"
+HOPAUTH="Authorization: Bearer $hopkey"
+[ "$(key_field "$hopid" redirects)" = "0" ] || fail "a fresh key does not start at 0 redirects"
+for n in 1 2 3; do
+  curl -sf -X POST "$BASE/api/artifacts" -H "$HOPAUTH" -H "$JSON" \
+    -d "{\"content\":\"https://example.com/hop-$n\",\"type\":\"redirect\",\"slug\":\"ci-hop-$n\"}" > /dev/null
+done
+# a page is not a hop, so it must not move the number
+curl -sf -X POST "$BASE/api/artifacts" -H "$HOPAUTH" -H "$JSON" \
+  -d '{"content":"<h1>page</h1>","type":"html","slug":"ci-hop-page"}' > /dev/null
+[ "$(key_field "$hopid" redirects)" = "3" ] || fail "redirect count wrong: $(key_field "$hopid" redirects)"
+# a replace is the same artifact, not a new hop
+curl -sf -X PUT "$BASE/api/artifacts/ci-hop-1" -H "$HOPAUTH" -H "$JSON" \
+  -d '{"content":"https://example.com/hop-1b","type":"redirect"}' > /dev/null
+[ "$(key_field "$hopid" redirects)" = "3" ] || fail "a replace double-counted"
+# deleting one takes it off the count, so the number tracks what is live
+curl -sf -X DELETE "$BASE/api/artifacts/ci-hop-3" -H "$AUTH" > /dev/null
+[ "$(key_field "$hopid" redirects)" = "2" ] || fail "a delete did not come off the count"
+# the bootstrap key names no key, so its redirects land in nobody's total
+curl -sf -X POST "$BASE/api/artifacts" -H "$AUTH" -H "$JSON" \
+  -d '{"content":"https://example.com/hop-boot","type":"redirect","slug":"ci-hop-boot"}' > /dev/null
+[ "$(key_field "$hopid" redirects)" = "2" ] || fail "a bootstrap-key redirect was billed to a managed key"
+# and the key id never rides out on the artifact list, which every read-scoped key can call
+if curl -s "$BASE/api/artifacts" -H "$AUTH" | grep -q '"keyId"'; then fail "the artifact list leaked keyId"; fi
+curl -sf -X DELETE "$BASE/api/artifacts/ci-hop-boot" -H "$AUTH" > /dev/null
+curl -sf -X DELETE "$BASE/api/artifacts/ci-hop-page" -H "$AUTH" > /dev/null
+curl -sf -X DELETE "$BASE/api/artifacts/ci-hop-2" -H "$AUTH" > /dev/null
+curl -sf -X DELETE "$BASE/api/artifacts/ci-hop-1" -H "$AUTH" > /dev/null
+curl -sf -X DELETE "$BASE/api/keys/$hopid" -H "$AUTH" > /dev/null
+echo "ok: per-key redirect count"
 
 # --- admin session: the cookie the dashboard runs on. Placed before the login burst below,
 # which spends the per-IP failure budget for the next 15 minutes. ---

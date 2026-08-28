@@ -67,10 +67,16 @@ artifacts keys revoke <id>
 
 | Method | Path | Body / result |
 |---|---|---|
-| `GET` | `/api/keys` | list (no secrets) |
+| `GET` | `/api/keys` | list (no secrets), each row with a `redirects` count |
 | `POST` | `/api/keys` | `{ name, scopes?, expiresAt? }` → key shown once in `key` |
 | `PATCH` | `/api/keys/:id` | `{ disabled: true\|false }` |
 | `DELETE` | `/api/keys/:id` | revoke |
+
+`redirects` is how many live [redirect artifacts](formats.md#redirects) that key has published,
+which is the number to look at if a key leaks and you want to know whether it started hosting
+phishing hops. Redirects published with the bootstrap `ARTIFACTS_API_KEY` or from a dashboard
+session are in nobody's count. Nothing is capped. The key screen and `artifacts keys list` print
+the count on the key's line, and leave it off a key that has published none.
 
 A key that answers `401` for no obvious reason may have a broken record in `auth.json`, which a
 hand edit or a crash mid-write can leave behind. The server skips a record with no hash or no

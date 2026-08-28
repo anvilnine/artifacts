@@ -2046,6 +2046,9 @@
     const bits = [k.prefix + '…'];
     if (k.expiresAt) bits.push('expires ' + k.expiresAt.slice(0, 10));
     bits.push(k.lastUsedAt ? ('used ' + k.lastUsedAt.slice(0, 10)) : 'never used');
+    // Only when there are any. A key that has minted no redirects is the normal case, and
+    // "0 redirects" on every row is noise around the one row where the number matters.
+    if (k.redirects) bits.push(k.redirects + (k.redirects === 1 ? ' redirect' : ' redirects'));
     // A broken record is missing the hash or the scopes the bearer path reads, or carries an
     // expiresAt nothing can read. Either way it answers 401 no matter what: enabling it would
     // change nothing, and revoking it is the whole fix.

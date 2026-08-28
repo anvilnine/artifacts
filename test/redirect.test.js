@@ -10,6 +10,8 @@ import assert from 'node:assert/strict';
 import {
   parseRedirectTarget,
   resolveRedirectTarget,
+  pointsAtOwnSlug,
+  countRedirectsByKey,
   MAX_REDIRECT_TARGET_LEN,
 } from '../lib/redirect.js';
 
@@ -121,4 +123,58 @@ test('the resolver returns a parsed target, so a caller cannot ship a raw stored
   // CRLF cannot survive: new URL strips it, so no caller can split a header with a stored value.
   const target = await resolveRedirectTarget({ meta: { target: 'https://example.com/x\r\nX-Injected: 1' }, readSource: async () => null });
   assert.doesNotMatch(target, /[\r\n]/);
+});
+
+// --- self-referencing targets, and how many redirects a key has published ---
+
+test('a target pointing at its own slug on this server is a self-reference', () => {
+  const base = 'https://links.example.com';
+  for (const target of [
+    'https://links.example.com/a/hop',
+    'https://links.example.com/a/hop/',
+    'https://links.example.com/a/hop?x=1',
+    'https://links.example.com/a/hop#top',
+    // express decodes the slug out of the path, so an encoded one reaches the same artifact
+    'https://links.example.com/a/%68op',
+    // the scheme is not what makes it this server: a proxy terminates TLS and the origin
+    // behind it still answers on the other one
+    'http://links.example.com/a/hop',
+  ]) {
+    assert.equal(pointsAtOwnSlug(target, 'hop', base), true, `${target} should be a self-reference`);
+  }
+});
+
+test('a target that reaches somewhere else is not a self-reference', () => {
+  const base = 'https://links.example.com';
+  for (const target of [
+    'https://links.example.com/a/other', // another slug, which may not even exist
+    'https://links.example.com/a/hop/source', // serves the target as text, no loop
+    'https://links.example.com/hop', // not an artifact path
+    'https://example.com/a/hop', // another host that happens to use the same layout
+    'https://links.example.com:8443/a/hop', // another port is another server
+    'not a url',
+  ]) {
+    assert.equal(pointsAtOwnSlug(target, 'hop', base), false, `${target} should pass`);
+  }
+});
+
+test('a self-reference check with nothing to compare against refuses nothing', () => {
+  assert.equal(pointsAtOwnSlug('https://links.example.com/a/hop', 'hop', ''), false);
+  assert.equal(pointsAtOwnSlug('https://links.example.com/a/hop', '', 'https://links.example.com'), false);
+  assert.equal(pointsAtOwnSlug('https://links.example.com/a/hop', 'hop', 'not a url'), false);
+});
+
+test('redirects are counted per key, and nothing else is', () => {
+  const counts = countRedirectsByKey([
+    { slug: 'a', type: 'redirect', keyId: 'k1' },
+    { slug: 'b', type: 'redirect', keyId: 'k1' },
+    { slug: 'c', type: 'redirect', keyId: 'k2' },
+    { slug: 'd', type: 'html', keyId: 'k1' }, // not a redirect
+    { slug: 'e', type: 'redirect' }, // published by the bootstrap key or a session
+    { slug: 'f', type: 'redirect', keyId: 42 }, // a hand edit, not a key id
+  ]);
+  assert.equal(counts.get('k1'), 2);
+  assert.equal(counts.get('k2'), 1);
+  assert.equal(counts.get('k3'), undefined);
+  assert.equal(counts.size, 2);
 });
