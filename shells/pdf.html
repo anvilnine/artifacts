@@ -1,0 +1,134 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<title>{{TITLE}}</title>
+{{SOCIAL}}
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  :root {
+    color-scheme: light dark;
+    --bar-bg: #ffffff;
+    --bar-fg: #1f2328;
+    --bar-muted: #59636e;
+    --bar-border: #d8d2cc;
+    --bar-hover: #f0ece7;
+    --page-bg: #f0ece7;
+    --link: #c73d1d;
+  }
+  /* Dark = Anvil Nine "Molten Steel", the same tokens the viewer frame and the markdown
+     shell use, so a PDF page reads like the rest of the chrome. */
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bar-bg: #101317; --bar-fg: #edeae4; --bar-muted: #9da3a9;
+      --bar-border: #242b33; --bar-hover: #1b2026;
+      --page-bg: #0b0d0f; --link: #ff7550;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bar-bg: #101317; --bar-fg: #edeae4; --bar-muted: #9da3a9;
+    --bar-border: #242b33; --bar-hover: #1b2026;
+    --page-bg: #0b0d0f; --link: #ff7550;
+  }
+  :root[data-theme="light"] {
+    --bar-bg: #ffffff; --bar-fg: #1f2328; --bar-muted: #59636e;
+    --bar-border: #d8d2cc; --bar-hover: #f0ece7;
+    --page-bg: #f0ece7; --link: #c73d1d;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; }
+  body {
+    display: flex; flex-direction: column;
+    background: var(--page-bg); color: var(--bar-fg);
+    font-family: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  }
+
+  #bar {
+    flex: 0 0 auto;
+    display: flex; align-items: center; gap: 8px;
+    height: 44px; padding: 0 12px;
+    background: var(--bar-bg); color: var(--bar-fg);
+    border-bottom: 1px solid var(--bar-border);
+  }
+  #title {
+    flex: 1 1 auto; min-width: 0;
+    font-size: 14px; font-weight: 600;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .act {
+    flex: 0 0 auto;
+    display: inline-flex; align-items: center; gap: 5px;
+    padding: 5px 10px; border-radius: 6px;
+    border: 1px solid var(--bar-border); background: transparent;
+    color: var(--bar-muted); font-size: 13px; font-family: inherit;
+    text-decoration: none; cursor: pointer;
+  }
+  .act:hover { background: var(--bar-hover); color: var(--bar-fg); }
+
+  #stage { flex: 1 1 auto; position: relative; min-height: 0; }
+  #doc { width: 100%; height: 100%; border: 0; display: block; }
+
+  /* Shown by the browser only when it will not render a PDF inline, which is where most
+     Android browsers land. Everything the toolbar offers is repeated here, so a reader who
+     never sees the document still has a way to open it. */
+  #fallback {
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    gap: 12px; height: 100%; padding: 32px 20px; text-align: center;
+  }
+  #fallback p { margin: 0; max-width: 34ch; color: var(--bar-muted); font-size: 14px; line-height: 1.5; }
+  #fallback .act { border-color: var(--link); color: var(--link); }
+
+  /* Under about 480px the title alone fills the bar, so the labels drop to their icons. */
+  @media (max-width: 480px) {
+    #title { font-size: 13px; }
+    .act { padding: 5px 8px; }
+    .act .label { display: none; }
+  }
+</style>
+</head>
+<body>
+  <div id="bar">
+    <span id="title">{{TITLE}}</span>
+    <a class="act" id="open" href="{{FILE_URL}}" target="_blank" rel="noopener" title="Open the PDF in a new tab">&#8599;&nbsp;<span class="label">Open</span></a>
+    <a class="act" id="download" href="{{DOWNLOAD_URL}}" download title="Download the PDF">&#8681;&nbsp;<span class="label">Download</span></a>
+  </div>
+
+  <div id="stage">
+    <object id="doc" data="{{FILE_URL}}" type="application/pdf" title="{{TITLE}}">
+      <div id="fallback">
+        <p>This browser will not show a PDF on the page. Open it in a new tab or save it instead.</p>
+        <a class="act" href="{{FILE_URL}}" target="_blank" rel="noopener">Open the PDF</a>
+        <a class="act" href="{{DOWNLOAD_URL}}" download>Download the PDF</a>
+      </div>
+    </object>
+  </div>
+
+  <script>
+    // Inside the viewer frame the toolbar above already names the artifact, so the title here
+    // would be the same words twice. Unframed (?raw=1, frame off) it is the only one there is.
+    if (window.parent !== window) document.getElementById('title').textContent = '';
+
+    // Follow the viewer frame's theme button the way the markdown shell does: the frame posts
+    // the choice into this document, and a same-tab change lands through localStorage.
+    (function () {
+      var root = document.documentElement;
+      function apply(t) {
+        if (t === 'dark' || t === 'light') root.setAttribute('data-theme', t);
+        else root.removeAttribute('data-theme');
+      }
+      try { apply(localStorage.getItem('artifactTheme')); } catch (e) {}
+      window.addEventListener('message', function (e) {
+        if (e.origin !== window.location.origin) return;
+        if (e.data && e.data.artifactTheme) apply(e.data.artifactTheme);
+      });
+      window.addEventListener('storage', function (e) {
+        if (e.key === 'artifactTheme') apply(e.newValue);
+      });
+    })();
+  </script>
+</body>
+</html>

@@ -5,7 +5,7 @@
 </p>
 
 <p align="center">
-  POST HTML, a React component, Markdown, or a zipped static site. Get back an unguessable URL on your own domain.
+  POST HTML, a React component, Markdown, a PDF, or a zipped static site. Get back an unguessable URL on your own domain.
 </p>
 
 <p align="center">
@@ -41,7 +41,7 @@ It runs as one container with a single admin account and, by default, no databas
 
 ## Features
 
-- **Content types.** HTML, JSX/TSX (a single React component, no build step), Markdown, and zipped static sites.
+- **Content types.** HTML, JSX/TSX (a single React component, no build step), Markdown, PDF, and zipped static sites.
 - **Agent-native, human-friendly.** A built-in MCP server lets Claude Code, Codex, or any MCP client publish with one tool call. Humans get a drag-and-drop web UI at `/` (behind an admin login) and a [CLI](docs/cli.md).
 - **Two-tier auth.** An admin logs into the dashboard with a password; CLI and MCP carry scoped, revocable [API keys](docs/auth.md) (`read` / `publish` / `full`) with optional expiry, so you never share one master secret.
 - **Private by default, with per-artifact visibility.** A new artifact is `private`, shared through a signed capability link (`?k=…`) you can rotate to revoke. Switch any artifact to `public` (anyone with the bare link) or password-protected. Nothing is discoverable by default: unguessable slugs, `noindex` everywhere. See [visibility](docs/api.md#visibility).

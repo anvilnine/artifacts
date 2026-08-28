@@ -6,7 +6,7 @@ import assert from 'node:assert/strict';
 
 import { dropStaleObjects, ownedKeys, staleKeys, SOURCE_EXT } from '../lib/artifact-files.js';
 
-const TYPES = ['html', 'jsx', 'tsx', 'md', 'redirect'];
+const TYPES = ['html', 'jsx', 'tsx', 'md', 'redirect', 'pdf'];
 
 // Minimal stand-in for storage/*.js: dropStaleObjects only calls delete, so recording the keys
 // it asks for is the whole contract. `fails` makes that delete throw, which is the branch that
@@ -30,6 +30,9 @@ test('each type owns the objects the serve path reads back', () => {
   // bakes an index.html.
   assert.deepEqual(ownedKeys('s', 'md'), ['s/source.md']);
   assert.deepEqual(ownedKeys('s', 'redirect'), ['s/source.url']);
+  // A pdf is served straight from its stored bytes and its viewer page is built per request,
+  // so it owns the source object and nothing else.
+  assert.deepEqual(ownedKeys('s', 'pdf'), ['s/source.pdf']);
 });
 
 test('a write that does not change the type drops nothing', () => {
@@ -44,7 +47,7 @@ test('a first publish has no old type, so it drops nothing', () => {
   }
 });
 
-// The invariant, walked across all twenty ordered pairs: what the conversion drops plus what
+// The invariant, walked across all thirty ordered pairs: what the conversion drops plus what
 // the new type owns covers everything the old type owned, and nothing the new type still needs
 // is on the drop list.
 test('every direction drops exactly what the new type stops using', () => {

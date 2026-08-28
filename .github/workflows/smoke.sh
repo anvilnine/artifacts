@@ -1344,6 +1344,71 @@ rm "$qr_body"
 curl -sf -X DELETE "$BASE/api/artifacts/ci-qr" -H "$AUTH" > /dev/null
 echo "ok: qr for a disabled artifact"
 
+# --- pdf artifacts: the file, the viewer page, and the download link ---
+# One real one-page PDF, base64 the way the API takes it. Inline rather than generated, so
+# this block needs no PDF tooling on the runner.
+PDF_B64='JVBERi0xLjQKMSAwIG9iago8PC9UeXBlL0NhdGFsb2cvUGFnZXMgMiAwIFI+PgplbmRvYmoKMiAwIG9iago8PC9UeXBlL1BhZ2VzL0tpZHNbMyAwIFJdL0NvdW50IDE+PgplbmRvYmoKMyAwIG9iago8PC9UeXBlL1BhZ2UvUGFyZW50IDIgMCBSL01lZGlhQm94WzAgMCAzMDAgMjAwXS9Db250ZW50cyA0IDAgUi9SZXNvdXJjZXM8PC9Gb250PDwvRjEgNSAwIFI+Pj4+Pj4KZW5kb2JqCjQgMCBvYmoKPDwvTGVuZ3RoIDQxPj5zdHJlYW0KQlQgL0YxIDI0IFRmIDMwIDEwMCBUZCAoc21va2UgcGRmKSBUaiBFVAplbmRzdHJlYW0KZW5kb2JqCjUgMCBvYmoKPDwvVHlwZS9Gb250L1N1YnR5cGUvVHlwZTEvQmFzZUZvbnQvSGVsdmV0aWNhPj4KZW5kb2JqCnhyZWYKMCA2CjAwMDAwMDAwMDAgNjU1MzUgZiAKMDAwMDAwMDAwOSAwMDAwMCBuIAowMDAwMDAwMDU0IDAwMDAwIG4gCjAwMDAwMDAxMDUgMDAwMDAgbiAKMDAwMDAwMDIxNyAwMDAwMCBuIAowMDAwMDAwMzA0IDAwMDAwIG4gCnRyYWlsZXIKPDwvU2l6ZSA2L1Jvb3QgMSAwIFI+PgpzdGFydHhyZWYKMzY3CiUlRU9GCg=='
+PDF_DIR=$(mktemp -d)
+printf '%s' "$PDF_B64" | base64 -d > "$PDF_DIR/tiny.pdf" 2>/dev/null || \
+  printf '%s' "$PDF_B64" | base64 -D > "$PDF_DIR/tiny.pdf"
+head -c 5 "$PDF_DIR/tiny.pdf" | grep -q '%PDF-' || fail "the smoke fixture did not decode to a pdf"
+
+curl -s -X DELETE "$BASE/api/artifacts/ci-pdf" -H "$AUTH" > /dev/null
+code=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/api/artifacts" -H "$AUTH" -H "$JSON" \
+  -d "{\"content\":\"$PDF_B64\",\"type\":\"pdf\",\"slug\":\"ci-pdf\",\"title\":\"Smoke PDF\",\"visibility\":\"public\"}")
+expect_code 201 "$code" "publish pdf"
+
+# The file itself: same bytes back, served as a pdf and byte-rangeable like any other object.
+pdf_headers=$(mktemp)
+curl -s -D "$pdf_headers" -o "$PDF_DIR/served.pdf" "$BASE/a/ci-pdf/file.pdf" > /dev/null
+grep -qi '^Content-Type: application/pdf' "$pdf_headers" || fail "pdf file is not application/pdf"
+cmp -s "$PDF_DIR/tiny.pdf" "$PDF_DIR/served.pdf" || fail "pdf bytes came back changed"
+rm "$pdf_headers"
+echo "ok: pdf bytes round-trip"
+
+# The viewer page, which is what a visit to the artifact gets. It never carries the bytes,
+# only the two URLs that do.
+raw=$(curl -s "$BASE/a/ci-pdf?raw=1")
+printf '%s' "$raw" | grep -qF 'data="/a/ci-pdf/file.pdf"' || fail "pdf viewer does not embed the file"
+printf '%s' "$raw" | grep -qF 'href="/a/ci-pdf/file.pdf?download=1"' || fail "pdf viewer has no download link"
+printf '%s' "$raw" | grep -qF 'Smoke PDF' || fail "pdf viewer is missing the title"
+curl -s "$BASE/a/ci-pdf" | grep -q '<iframe' || fail "a pdf is not framed like every other type"
+echo "ok: pdf viewer page"
+
+# The direct-download variant, and /source, which hands over the file that was uploaded.
+dl_headers=$(mktemp)
+curl -s -D "$dl_headers" -o "$PDF_DIR/dl.pdf" "$BASE/a/ci-pdf/file.pdf?download=1" > /dev/null
+grep -qi '^Content-Disposition: attachment; filename="ci-pdf.pdf"' "$dl_headers" \
+  || fail "?download=1 is not an attachment"
+cmp -s "$PDF_DIR/tiny.pdf" "$PDF_DIR/dl.pdf" || fail "the download variant changed the bytes"
+curl -s -D "$dl_headers" -o "$PDF_DIR/src.pdf" "$BASE/a/ci-pdf/source" > /dev/null
+grep -qi '^Content-Type: application/pdf' "$dl_headers" || fail "pdf source is not application/pdf"
+cmp -s "$PDF_DIR/tiny.pdf" "$PDF_DIR/src.pdf" || fail "pdf source changed the bytes"
+rm "$dl_headers"
+echo "ok: pdf download and source"
+
+# A pdf owns exactly one sub-path, so nothing else under the slug resolves.
+code=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/a/ci-pdf/anything-else")
+expect_code 404 "$code" "pdf subpath"
+
+# A body that is not a PDF is refused at publish time, whatever it decoded from.
+notpdf=$(printf '<h1>not a pdf</h1>' | base64 | tr -d '\n')
+code=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/api/artifacts" -H "$AUTH" -H "$JSON" \
+  -d "{\"content\":\"$notpdf\",\"type\":\"pdf\",\"slug\":\"ci-pdf-bad\"}")
+expect_code 400 "$code" "a pdf body that is not a pdf"
+
+# The visibility gate covers the new sub-path: a private pdf leaks neither page nor bytes.
+curl -sf -X POST "$BASE/api/artifacts" -H "$AUTH" -H "$JSON" \
+  -d "{\"content\":\"$PDF_B64\",\"type\":\"pdf\",\"slug\":\"ci-pdf-priv\",\"visibility\":\"private\"}" > /dev/null
+code=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/a/ci-pdf-priv/file.pdf")
+expect_code 404 "$code" "private pdf file without a token"
+code=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/a/ci-pdf-priv/source")
+expect_code 404 "$code" "private pdf source without a token"
+curl -sf -X DELETE "$BASE/api/artifacts/ci-pdf-priv" -H "$AUTH" > /dev/null
+curl -sf -X DELETE "$BASE/api/artifacts/ci-pdf" -H "$AUTH" > /dev/null
+rm -r "$PDF_DIR"
+echo "ok: pdf visibility gate"
+
 # --- dashboard: the served shell parses and still lines up with its own markup ---
 # Nothing else in CI loads `/`, so a broken inline script in public/index.html used to
 # ship green. No browser here; see the header of dashboard-check.mjs for what that
@@ -1434,5 +1499,16 @@ node "$CLI_DIR/cli.js" delete ci-cli-2 > /dev/null
 node "$CLI_DIR/cli.js" delete ci-cli-zip > /dev/null
 code=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/a/ci-cli-2")
 expect_code 404 "$code" "cli delete"
+
+# The CLI infers pdf from the extension, sends the file base64-encoded, and reads `source`
+# back as bytes rather than text.
+printf '%s' "$PDF_B64" | base64 -d > "$ZIPDIR/tiny.pdf" 2>/dev/null || \
+  printf '%s' "$PDF_B64" | base64 -D > "$ZIPDIR/tiny.pdf"
+node "$CLI_DIR/cli.js" publish "$ZIPDIR/tiny.pdf" --slug ci-cli-pdf --visibility public > /dev/null
+node "$CLI_DIR/cli.js" source ci-cli-pdf -o "$ZIPDIR/cli.pdf" > /dev/null
+cmp -s "$ZIPDIR/tiny.pdf" "$ZIPDIR/cli.pdf" || fail "cli round-trip changed the pdf bytes"
+node "$CLI_DIR/cli.js" list | grep 'ci-cli-pdf' | grep -q 'pdf' || fail "cli list does not show the pdf type"
+node "$CLI_DIR/cli.js" delete ci-cli-pdf > /dev/null
+echo "ok: cli pdf"
 
 echo "all smoke tests passed"

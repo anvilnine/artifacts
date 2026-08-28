@@ -36,6 +36,7 @@ import { createConfigStore } from './lib/config.js';
 import { ApiError } from './lib/errors.js';
 import { artifactExpired } from './lib/expiry.js';
 import { qrPng, qrSvg } from './lib/qr.js';
+import { parsePdfContent } from './lib/pdf.js';
 import { parseRedirectTarget, resolveRedirectTarget } from './lib/redirect.js';
 import { fillShell } from './lib/shells.js';
 import {
@@ -135,6 +136,7 @@ function frameActive(meta) {
 const JSX_SHELL = await fs.readFile(path.join(__dirname, 'shells', 'jsx.html'), 'utf8');
 const MD_SHELL = await fs.readFile(path.join(__dirname, 'shells', 'md.html'), 'utf8');
 const FRAME_SHELL = await fs.readFile(path.join(__dirname, 'shells', 'frame.html'), 'utf8');
+const PDF_SHELL = await fs.readFile(path.join(__dirname, 'shells', 'pdf.html'), 'utf8');
 const PASSWORD_SHELL = await fs.readFile(path.join(__dirname, 'shells', 'password.html'), 'utf8');
 const NOT_FOUND_SHELL = await fs.readFile(path.join(__dirname, 'shells', 'not-found.html'), 'utf8');
 
@@ -276,6 +278,31 @@ function buildMdHtml(source, meta, mdCfg = config.current.md) {
     FONTSIZE: MD_SIZE_PX[mdCfg.size],
     THEME: mdCfg.theme,
     CONTENT: marked.parse(source),
+  });
+}
+
+// The two URLs a pdf artifact's viewer points at. Absolute paths, not relative ones: inside
+// the viewer frame the shell is loaded from /a/<slug>?raw=1, where a relative "file.pdf"
+// would resolve to /a/file.pdf.
+function pdfFileUrl(slug) {
+  return `/a/${slug}/file.pdf`;
+}
+
+// The filename a download lands on. Built from the slug, which SLUG_RE holds to lowercase
+// letters, digits and hyphens, so nothing here can close the quoted header value early.
+function pdfDownloadName(meta) {
+  return `${meta.slug}.pdf`;
+}
+
+// A viewer page for a pdf artifact, built per request the way the markdown one is. The bytes
+// themselves never pass through here: the page is a shell around an <object> that fetches
+// them, so a 7 MB PDF is streamed by serveObject and not held in a string.
+function buildPdfHtml(meta) {
+  return fillShell(PDF_SHELL, {
+    TITLE: escapeHtml(meta.title || meta.slug),
+    SOCIAL: socialTags(meta, canonicalUrl(meta)),
+    FILE_URL: pdfFileUrl(meta.slug),
+    DOWNLOAD_URL: `${pdfFileUrl(meta.slug)}?download=1`,
   });
 }
 
@@ -684,13 +711,17 @@ async function storeArtifact(finalSlug, { content, type = 'html', title, descrip
   else if (type === 'jsx' || type === 'tsx') html = buildJsxHtml(content, finalTitle);
   // md renders at serve time from source.md; nothing baked here.
   // redirect stores the normalized target and nothing else; the serve path reads it back.
-  const body = type === 'redirect' ? parseRedirectTarget(content, { publishing: true }) : content;
+  // pdf is the one type whose body is not text: `content` carries base64 and what gets stored
+  // is the decoded Buffer, so the bytes a reader downloads are the bytes that were uploaded.
+  let body = content;
+  if (type === 'redirect') body = parseRedirectTarget(content, { publishing: true });
+  else if (type === 'pdf') body = parsePdfContent(content);
 
   if (html !== undefined) {
     await storage.put(`${finalSlug}/index.html`, html, { contentType: 'text/html; charset=utf-8' });
   }
   await storage.put(`${finalSlug}/source.${SOURCE_EXT[type]}`, body, {
-    contentType: 'text/plain; charset=utf-8',
+    contentType: type === 'pdf' ? 'application/pdf' : 'text/plain; charset=utf-8',
   });
   const meta = {
     ...existing,
@@ -1418,6 +1449,13 @@ app.get('/a/:slug', async (req, res) => {
     res.set('Cache-Control', 'no-cache'); // reflect global config changes on next view
     return res.type('html').send(renderMd(slug, meta, buf.toString('utf8'), config.current.md));
   }
+  if (meta.type === 'pdf') {
+    // The viewer page, not the file. The bytes live one path down at /a/<slug>/file.pdf,
+    // which is what the shell's <object> loads and what a direct link points at.
+    if (!(await storage.head(`${slug}/source.pdf`).catch(() => null))) return notFound(res);
+    res.set('Cache-Control', 'no-cache'); // the page reflects a settings change on next view
+    return res.type('html').send(buildPdfHtml(meta));
+  }
   serveObject(req, res, `${slug}/index.html`);
 });
 
@@ -1439,6 +1477,14 @@ app.get('/a/:slug/source', async (req, res, next) => {
     if (target === null) return notFound(res);
     return res.type('text/plain; charset=utf-8').send(target);
   }
+  // A pdf's source is the file that was uploaded, so it answers with the PDF itself rather
+  // than the text/plain every other type gets. As an attachment: the point of /source is to
+  // hand the bytes over, and Content-Disposition also keeps the response from being rendered
+  // by a plugin on the artifact origin.
+  if (meta.type === 'pdf') {
+    res.set('Content-Disposition', `attachment; filename="${pdfDownloadName(meta)}"`);
+    return serveObject(req, res, `${slug}/source.pdf`);
+  }
   // meta.type comes off disk unvalidated, and a bare SOURCE_EXT lookup walks the prototype, so a
   // hand-edited "constructor" built a key out of a function body. Same guard ownedKeys uses.
   if (!Object.hasOwn(SOURCE_EXT, meta.type)) return notFound(res);
@@ -1454,6 +1500,17 @@ app.get('/a/:slug/*', async (req, res) => {
   if (!meta || meta.disabled) return notFound(res);
   if (!artifactUnlocked(req, meta)) return notFound(res);
   if (isExpired(meta)) return res.status(410).type('text/plain').send('artifact expired');
+  // A pdf artifact owns one sub-path: the file its viewer loads. `?download=1` sends the same
+  // bytes as an attachment, which is the direct-download link the viewer's Download button and
+  // anything else that wants the file point at.
+  if (meta.type === 'pdf') {
+    if (req.params[0] !== 'file.pdf') return notFound(res);
+    res.set(ARTIFACT_HEADERS);
+    if (req.query.download !== undefined) {
+      res.set('Content-Disposition', `attachment; filename="${pdfDownloadName(meta)}"`);
+    }
+    return serveObject(req, res, `${slug}/source.pdf`);
+  }
   if (meta.type !== 'zip') return notFound(res);
   res.set(ARTIFACT_HEADERS);
 

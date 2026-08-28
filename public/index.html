@@ -559,6 +559,7 @@
                   <option value="jsx">jsx</option>
                   <option value="tsx">tsx</option>
                   <option value="md">md</option>
+                  <option value="pdf">pdf</option>
                   <option value="redirect">redirect</option>
                 </select>
               </label>
@@ -601,6 +602,9 @@
             </div>
             <label class="f" id="contentField"><span id="contentLabel">Content</span>
               <textarea id="content" placeholder="Paste HTML, a React component with a default export, or Markdown…" spellcheck="false"></textarea>
+            </label>
+            <label class="f" id="pdfField" style="display:none">PDF file
+              <input id="pdfFile" type="file" accept=".pdf,application/pdf">
             </label>
             <div class="browse" id="browseRow">or <a href="#" id="browseLink">browse files</a> to upload instead</div>
             <div class="foot"><button id="publish">Publish</button></div>
@@ -676,9 +680,9 @@
 
   <div id="drop">
     <strong>Drop files to publish</strong> &nbsp;·&nbsp; or click to browse
-    <div class="hint">.html · .jsx · .tsx · .md · .zip. Published instantly, link copied to your clipboard.</div>
+    <div class="hint">.html · .jsx · .tsx · .md · .pdf · .zip. Published instantly, link copied to your clipboard.</div>
   </div>
-  <input id="file" type="file" accept=".html,.htm,.jsx,.tsx,.md,.markdown,.zip" multiple hidden>
+  <input id="file" type="file" accept=".html,.htm,.jsx,.tsx,.md,.markdown,.pdf,.zip" multiple hidden>
 
   <div id="results"></div>
 
@@ -723,6 +727,7 @@
     html: 'html', htm: 'html',
     jsx: 'jsx', tsx: 'tsx',
     md: 'md', markdown: 'md',
+    pdf: 'pdf',
   };
 
   // ---- login / setup ----
@@ -834,15 +839,29 @@
     return { ok: res.ok, status: res.status, data };
   }
 
+  // A PDF goes up base64-encoded in the same `content` field the text types use. FileReader
+  // rather than btoa(): btoa needs the whole file as one string of char codes, which blows the
+  // call stack somewhere around a megabyte. The server strips the data: prefix.
+  function readDataUrl(file) {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(reader.result);
+      reader.onerror = () => reject(reader.error);
+      reader.readAsDataURL(file);
+    });
+  }
+
   async function publishFile(file) {
     const ext = (file.name.split('.').pop() || '').toLowerCase();
     const type = TYPE_BY_EXT[ext];
     if (!type && ext !== 'zip') {
-      return addResult(file.name, 'Unsupported type .' + ext + ' (html/jsx/tsx/md/zip only)', false);
+      return addResult(file.name, 'Unsupported type .' + ext + ' (html/jsx/tsx/md/pdf/zip only)', false);
     }
 
     const isZip = ext === 'zip';
-    const payload = isZip ? await file.arrayBuffer() : await file.text();
+    const payload = isZip ? await file.arrayBuffer()
+      : type === 'pdf' ? await readDataUrl(file)
+      : await file.text();
     const send = (slug) => isZip
       ? publishZip(payload, slug, file.name)
       : publish({ content: payload, type, slug, title: file.name });
@@ -902,18 +921,30 @@
   // a Location header and never reaches the frame branch.
   const CONTENT_PLACEHOLDER = $('content').placeholder;
   function syncComposeType() {
-    const redirect = $('type').value === 'redirect';
+    const kind = $('type').value;
+    const redirect = kind === 'redirect';
+    // A PDF is bytes, so there is nothing to paste: the content box gives way to a file
+    // picker, and the drop zone below would only publish the same file a second time.
+    const pdf = kind === 'pdf';
     $('contentLabel').textContent = redirect ? 'Target URL' : 'Content';
     $('content').placeholder = redirect ? 'https://example.com/where-it-goes' : CONTENT_PLACEHOLDER;
     $('content').classList.toggle('oneline', redirect);
+    $('contentField').style.display = pdf ? 'none' : '';
+    $('pdfField').style.display = pdf ? '' : 'none';
     $('frameField').style.display = redirect ? 'none' : '';
-    $('browseRow').style.display = redirect ? 'none' : '';
+    $('browseRow').style.display = redirect || pdf ? 'none' : '';
   }
   $('type').addEventListener('change', syncComposeType);
 
   $('publish').addEventListener('click', () => busy($('publish'), duplicateSource ? 'Copying…' : 'Publishing…', async () => {
     if (duplicateSource) return doDuplicate();
     const body = { content: $('content').value, type: $('type').value };
+    if (body.type === 'pdf') {
+      const picked = $('pdfFile').files[0];
+      if (!picked) { toast('Choose a PDF file.', true); return; }
+      body.content = await readDataUrl(picked); // the server strips the data: prefix
+      if (!$('title').value) body.title = picked.name;
+    }
     if ($('slug').value) body.slug = $('slug').value;
     if ($('title').value) body.title = $('title').value;
     // Frame is hidden for a redirect, so never send a stale value the select still holds.
@@ -931,6 +962,7 @@
       addResult('pasted ' + body.type, r.data.url, true);
       navigator.clipboard.writeText(r.data.url).catch(() => {});
       $('content').value = '';
+      $('pdfFile').value = '';
       composeTags.setTags([]);
       $('project').value = '';
       $('password').value = '';
@@ -1008,6 +1040,7 @@
   function setDuplicateUI(on) {
     $('typeField').style.display = on ? 'none' : '';
     $('contentField').style.display = on ? 'none' : '';
+    if (on) $('pdfField').style.display = 'none'; // a copy brings its own bytes
     $('browseRow').style.display = on ? 'none' : '';
     $('publish').textContent = on ? 'Create copy' : 'Publish';
     $('composeTitle').textContent = on ? 'Duplicate artifact' : 'New artifact';

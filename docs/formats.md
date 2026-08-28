@@ -53,6 +53,57 @@ export default function Demo() {
 
 Note: rendering uses esm.sh + Tailwind CDN, so artifacts need internet to render and take ~1–3 s on first load.
 
+## PDF
+
+Upload a PDF and it gets a viewer page of its own at `/a/{slug}`, plus two direct links to the
+file. The bytes go up base64-encoded in the same `content` field every other type uses:
+
+```bash
+curl -s -X POST https://artifacts.example.com/api/artifacts \
+  -H "Authorization: Bearer $ARTIFACTS_API_KEY" -H 'Content-Type: application/json' \
+  -d "{\"type\":\"pdf\",\"slug\":\"q3-report\",\"content\":\"$(base64 < q3.pdf | tr -d '\n')\"}"
+```
+
+The CLI infers the type from the extension, so `artifacts publish q3.pdf` does the same thing, and
+the dashboard takes a dropped `.pdf` or a file picked from the New artifact form.
+
+Three URLs per artifact:
+
+| URL | What it serves |
+|---|---|
+| `/a/{slug}` | the viewer page (framed like every other type; `?raw=1` for the bare one) |
+| `/a/{slug}/file.pdf` | the PDF itself, `application/pdf`, rendered inline |
+| `/a/{slug}/file.pdf?download=1` | the same bytes with `Content-Disposition: attachment` |
+
+`GET /a/{slug}/source` also hands over the file, as an attachment, the way `/source` returns the
+uploaded bytes for every other type. Nothing else under the slug resolves: any other sub-path is a
+404.
+
+Rules:
+
+- A body that does not decode to bytes starting with `%PDF-` is a 400 at publish time.
+- Max 7 MB per PDF, measured on the decoded bytes. The publish body parser stops at 10 MB of JSON
+  and base64 costs 4 bytes for every 3, so 7 MB of PDF is about 9.33 MB of request.
+- A `data:application/pdf;base64,` prefix and the line breaks `base64` writes are both accepted, so
+  a browser's `FileReader.readAsDataURL` output goes straight in.
+- Everything else works the same as any other type: rename, tags, project, expiry, visibility,
+  disable, duplicate, QR codes, link previews.
+
+### The viewer, and what it does not do
+
+The viewer page is a thin shell: a toolbar with Open and Download, and an `<object>` that points at
+`/a/{slug}/file.pdf`. The rendering is the browser's own PDF viewer, which is where the page
+controls come from (page navigation, zoom, rotate, print, save).
+
+This is a deliberate v1. Bundling [pdf.js](https://mozilla.github.io/pdf.js/) would mean vendoring
+about 1.7 MB of minified JavaScript into a repo with no build step, plus a hand-written toolbar to
+replace the one the browser already ships. The tradeoff is that the toolbar looks different in
+Chrome, Firefox and Safari, and that a browser with no built-in PDF viewer shows nothing.
+
+For that last case the `<object>` carries fallback content: a line of text and the same Open and
+Download links. Most Android browsers land there, so a reader on Android gets two buttons rather
+than a document on the page.
+
 ## Zip sites
 
 A zipped static project (HTML + CSS + JS + images) served under `/a/{slug}/`. Upload via the web UI (drop a `.zip`), the [CLI](cli.md) (`artifacts deploy ./dir`), or the [zip endpoint](api.md#zip-sites-multi-file-static-projects) — validation rules and limits are documented there.

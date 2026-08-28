@@ -20,7 +20,7 @@ export ARTIFACTS_API_KEY=...
 ## Commands
 
 ```
-artifacts publish <file> [--slug s] [--title t] [--tags a,b] [--project p] [--description d] [--og-image url] [--expires ISO] [--type html|jsx|tsx|md|redirect] [--frame on|off] [--visibility public|private|password] [--password pw]
+artifacts publish <file> [--slug s] [--title t] [--tags a,b] [--project p] [--description d] [--og-image url] [--expires ISO] [--type html|jsx|tsx|md|pdf|redirect] [--frame on|off] [--visibility public|private|password] [--password pw]
 artifacts deploy <dir|zip> [--slug s] [--title t] [--tags a,b] [--project p] [--description d] [--og-image url] [--expires ISO] [--visibility public|private|password] [--password pw]
 artifacts update <slug> <file> [--title t] [--tags a,b] [--project p] [--description d] [--og-image url]
 artifacts list [--tag t] [--project p]
@@ -42,7 +42,7 @@ artifacts keys create <name> [--scopes read,publish,full] [--expires ISO]
 artifacts keys revoke <id>
 ```
 
-Type is inferred from the file extension (`.html`, `.jsx`, `.tsx`, `.md`); pass `--type` to override. A redirect has no extension to infer from, so it needs `--type redirect` and a file holding the target URL: `artifacts publish target.txt --type redirect --slug pricing`. Repoint one the same way with `update`: `artifacts update pricing new-target.txt --type redirect`, which keeps the title and everything else. The target cannot carry a username or password. `deploy` zips a directory for you and posts it to the zip endpoint. `tag` replaces an artifact's tags (`none` clears them); `list --tag` shows only artifacts carrying that tag.
+Type is inferred from the file extension (`.html`, `.jsx`, `.tsx`, `.md`, `.pdf`); pass `--type` to override. A `.pdf` is read as bytes and sent base64-encoded, and `source` writes bytes too, so `artifacts source q3-report -o copy.pdf` gives back the file that went up. A redirect has no extension to infer from, so it needs `--type redirect` and a file holding the target URL: `artifacts publish target.txt --type redirect --slug pricing`. Repoint one the same way with `update`: `artifacts update pricing new-target.txt --type redirect`, which keeps the title and everything else. The target cannot carry a username or password. `deploy` zips a directory for you and posts it to the zip endpoint. `tag` replaces an artifact's tags (`none` clears them); `list --tag` shows only artifacts carrying that tag.
 
 `qr` prints an SVG of the artifact's permanent URL to stdout, so it pipes into a file or a viewer:
 `artifacts qr pricing > pricing.svg`. `-o out.png` writes a PNG (the extension picks the format,

@@ -5,7 +5,7 @@ Full HTTP reference, including zip-site deploys. ([← back to README](../README
 The `/api/artifacts*` and `/api/config` routes accept **either** an `Authorization: Bearer <key>` (a scoped [managed key](auth.md) or the bootstrap `ARTIFACTS_API_KEY`) **or** a valid admin session cookie (how the dashboard calls them). `/mcp` is bearer-only. Each write route enforces a minimum scope (below). Reads under `/a/` are public unless the artifact's [visibility](#visibility) is set.
 
 ```
-POST   /api/artifacts        {content, type: html|jsx|tsx|md|redirect, slug?, title?, description?, ogImage?, tags?, project?, expiresAt?, frame?, visibility?, password?} → 201 {slug, url, visibility}   [publish]
+POST   /api/artifacts        {content, type: html|jsx|tsx|md|pdf|redirect, slug?, title?, description?, ogImage?, tags?, project?, expiresAt?, frame?, visibility?, password?} → 201 {slug, url, visibility}   [publish]
 POST   /api/artifacts/zip    raw zip body (?slug=&title=&description=&ogImage=&tags=&project=&expiresAt=&visibility=&password=) → 201 {slug, url, files, visibility}   [publish]
 PUT    /api/artifacts/:slug  {content, type, title?, description?, ogImage?, tags?, project?, expiresAt?, frame?, visibility?, password?} → {slug, url, visibility}   [publish]
 PATCH  /api/artifacts/:slug  {slug?, disabled?, expiresAt?, description?, ogImage?, tags?, project?, frame?, visibility?, password?, rotateToken?} → {slug, url, visibility}   [publish]
@@ -18,7 +18,8 @@ PUT    /api/config           {frame?: {enabled?, default?}, md?: {font?, width?,
 GET    /a/:slug              rendered artifact, framed when active (public unless private/password)
 GET    /a/:slug?k=<token>    capability-link exchange: sets the unlock cookie, 302s to a clean URL (private/password)
 GET    /a/:slug?raw=1        bare artifact without the frame
-GET    /a/:slug/source       original uploaded source, text/plain (for a redirect, the stored target)
+GET    /a/:slug/source       original uploaded source, text/plain (for a redirect, the stored target; for a pdf, the file as an attachment)
+GET    /a/:slug/file.pdf     a pdf artifact's file, application/pdf (?download=1 for an attachment)
 POST   /a/:slug/unlock       {password} → sets a per-slug unlock cookie (password mode only)
 ```
 
@@ -27,6 +28,7 @@ The `[read|publish|full]` tag on each route is the minimum key scope required (`
 Semantics:
 
 - Body limits: 10 MB JSON, 50 MB zip.
+- `type: "pdf"` takes the file base64-encoded in `content` (a `data:application/pdf;base64,` prefix and wrapped lines are both fine). Max 7 MB measured on the decoded bytes; a body that does not start with `%PDF-` once decoded is a `400`. `GET /a/:slug` is a viewer page around the browser's own PDF viewer, `GET /a/:slug/file.pdf` is the file, and `?download=1` on it sends the same bytes as an attachment. Full behavior in [PDF](formats.md#pdf).
 - `type: "redirect"` publishes a short link instead of a page: `content` is the target, and `GET /a/:slug` answers `301` with `Location: <target>`, `Cache-Control: no-store` and `Referrer-Policy: no-referrer`. The target must be an absolute `http://` or `https://` URL and cannot carry a username or password; anything else is a `400`. What gets stored is the normalized URL, capped at 2048 characters, in `meta.target` (which the 301 follows) and in the artifact body. Redirects are never framed and ignore `?raw=1`, and `GET /a/:slug/source` returns the stored target as `text/plain`. Full behavior, including what an open redirector costs you, in [Redirects](formats.md#redirects).
 - `PUT` without `title` keeps the title already stored, the way it keeps `tags` and `project`. Send `"title": ""` to clear it back to the slug.
 - A write that stores a redirect answers with `target`, the normalized URL it stored, which is not always the string that was sent.
