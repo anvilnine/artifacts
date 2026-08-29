@@ -369,6 +369,8 @@ function buildPdfHtml(meta) {
     SOCIAL: socialTags(meta, canonicalUrl(meta)),
     MODE: flags.mode,
     BAR: bar,
+    // '1' or ''. The shell reads it as a boolean, and only after it knows it is framed.
+    HIDE_BAR_IN_FRAME: flags.hideBarInFrame ? '1' : '',
     // Escaped because the open parameters are joined with "&", which is a bare ampersand
     // inside an attribute otherwise.
     EMBED_URL: escapeHtml(fileUrl + flags.hash),

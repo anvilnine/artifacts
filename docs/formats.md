@@ -146,7 +146,7 @@ The three modes:
 
 | Mode | The page |
 |---|---|
-| `standard` | Our toolbar (title, Open, Download) above the document, browser controls untouched. |
+| `standard` | Our toolbar (title, Open, Download) above the document, browser controls untouched. Inside the viewer frame this toolbar is dropped: see below. |
 | `presentation` | A whole page at a time on a dark backdrop, with a Full screen button in the toolbar. The browser's side panel is asked to go; its toolbar stays, because that toolbar is the page counter and the prev/next of a multi-page deck. Chrome hides it in full screen, which is where a deck is read. |
 | `minimal` | The document, edge to edge. No toolbar of ours; the browser's is left alone, because with ours gone it is the only way left to reach the file. |
 
@@ -165,6 +165,18 @@ scroll wheel. If page navigation matters more than the buttons, leave `download`
 A bar of ours with nothing in it is never drawn. `standard` with downloads off has no buttons left,
 and inside the viewer frame the title is already in the frame's own bar, so the mode renders the
 document with no bar rather than an empty strip.
+
+**Inside the viewer frame, `standard` drops our toolbar entirely.** Framed, a PDF used to arrive
+under three stacked bars: the frame's own (44px), ours (44px) and the browser's PDF toolbar
+(56px), about 144px at 1200px wide before the document started. Ours was the one earning least.
+Its title is already blank there, because the frame's bar above says the same words, so what was
+left was Open and Download over a browser toolbar that already carries download and print. It now
+goes, and the framed view is two bars, about 100px.
+
+Nothing is taken away. Unframed (`?raw=1`, or the frame off) our bar is the only one there is and
+it renders in full. `presentation` keeps its bar framed or not, because the Full screen button
+lives nowhere else. `minimal` never had one. And a browser that refuses to render the PDF still
+gets Open and Download from the fallback in the middle of the page.
 
 An artifact with both defaults stores nothing at all, so `GET /api/artifacts` shows a `pdf` field
 only on an artifact somebody configured.

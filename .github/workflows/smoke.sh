@@ -1773,6 +1773,11 @@ raw=$(curl -s "$BASE/a/ci-pdf?raw=1")
 printf '%s' "$raw" | grep -qF "mode-standard" || fail "a fresh pdf is not in standard mode"
 printf '%s' "$raw" | grep -qF 'id="download"' || fail "standard mode has no download button"
 if printf '%s' "$raw" | grep -qF 'toolbar=0'; then fail "standard mode hides the browser toolbar"; fi
+# The bar is still in the markup and still holds both buttons: unframed it is the only one on
+# the page. The shell removes it only after it finds it is inside the viewer frame.
+printf '%s' "$raw" | grep -qF 'id="bar"' || fail "standard mode lost its bar unframed"
+printf '%s' "$raw" | grep -qF 'id="open"' || fail "standard mode lost its open button"
+printf '%s' "$raw" | grep -qF "framed && '1'" || fail "standard mode does not drop its bar when framed"
 
 curl -sf -X PATCH "$BASE/api/artifacts/ci-pdf" -H "$AUTH" -H "$JSON" -d '{"pdf":{"mode":"minimal"}}' > /dev/null
 raw=$(curl -s "$BASE/a/ci-pdf?raw=1")
@@ -1787,6 +1792,11 @@ raw=$(curl -s "$BASE/a/ci-pdf?raw=1")
 printf '%s' "$raw" | grep -qF "mode-presentation" || fail "presentation mode did not take"
 printf '%s' "$raw" | grep -qF 'id="fullscreen"' || fail "presentation mode has no full-screen button"
 printf '%s' "$raw" | grep -qF 'view=Fit&' || fail "presentation mode does not fit a whole page"
+# T2.2.6: framed standard mode drops our bar, because the frame's bar above and the browser's
+# toolbar below already carry everything it held. The shell decides that at load time, so what
+# the server sends is the switch. presentation keeps its bar for the full-screen button.
+printf '%s' "$raw" | grep -qF "framed && ''" || fail "presentation mode gives up its bar"
+
 # T2.2.5: the browser's toolbar is the page counter and the prev/next of a deck, so presentation
 # leaves it up and only asks the side panel to go. Nothing here can build its own: an <object>
 # holding a PDF exposes no current page.
