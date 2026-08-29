@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="robots" content="noindex, nofollow">
-<title>{{DOC_TITLE}}</title>{{FAVICON}}
+<title>artifacts</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Archivo:wght@700;800&family=Inter:wght@400;500&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
@@ -522,15 +522,19 @@
     .act { min-height: 44px; }
     .chip { padding: 8px 14px; }
   }
-  @media (prefers-reduced-motion: reduce) { * { transition: none !important; animation: none !important; } }{{BRAND_STYLE}}
+  @media (prefers-reduced-motion: reduce) { * { transition: none !important; animation: none !important; } }
 </style>
 </head>
 <body>
 
 <div id="lock">
   <div class="card" id="lockCard">
-    {{LOCK_MARK}}
-    <h1>{{PRODUCT}}</h1>
+    <svg class="mark" viewBox="0 0 76 76" aria-hidden="true">
+      <path d="M14 20h44v8H40v6c8 1 14 4 14 9v3H22v-3c0-5 6-8 14-9v-6H24c-6 0-10-4-10-8z"></path>
+      <rect x="26" y="48" width="24" height="6"></rect>
+      <rect x="20" y="56" width="36" height="6"></rect>
+    </svg>
+    <h1>artifacts</h1>
     <p id="lockSub">Sign in</p>
     <label for="lockUser">Username</label>
     <input id="lockUser" type="text" autocomplete="username" autofocus>
@@ -544,9 +548,13 @@
 <div id="app">
   <header>
     <div class="brand">
-      {{HEADER_MARK}}
+      <svg class="mark" viewBox="0 0 76 76" aria-hidden="true">
+        <path d="M14 20h44v8H40v6c8 1 14 4 14 9v3H22v-3c0-5 6-8 14-9v-6H24c-6 0-10-4-10-8z"></path>
+        <rect x="26" y="48" width="24" height="6"></rect>
+        <rect x="20" y="56" width="36" height="6"></rect>
+      </svg>
       <div>
-        <span class="wordmark">{{PRODUCT}}</span>
+        <span class="wordmark">artifacts</span>
         <span class="tagline">drop, publish, share</span>
       </div>
     </div>

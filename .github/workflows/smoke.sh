@@ -153,7 +153,10 @@ echo "ok: branded artifact-expired page"
 # a sub-path read keeps the plain body for a machine and gives a person the card. curl sends
 # Accept: */*, a browser navigation sends text/html.
 curl -s "$BASE/a/ci-smoke/source" | grep -q '^artifact expired$' || fail "expired source body changed for a machine"
-curl -s -H 'Accept: text/html' "$BASE/a/ci-smoke/source" | grep -q 'Artifact expired' || fail "expired source has no card for a browser"
+card=$(mktemp)
+curl -s -H 'Accept: text/html' -o "$card" "$BASE/a/ci-smoke/source"
+grep -q 'Artifact expired' "$card" || fail "expired source has no card for a browser"
+rm "$card"
 code=$(curl -s -o /dev/null -w '%{http_code}' -H 'Accept: text/html' "$BASE/a/ci-smoke/source")
 expect_code 410 "$code" "expired source keeps its status for a browser"
 echo "ok: expiry sub-path splits by Accept"
@@ -929,7 +932,10 @@ echo "ok: zip tags"
 code=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/a/ci-zip/nope.html")
 expect_code 404 "$code" "zip miss, no 404.html in zip"
 curl -s "$BASE/a/ci-zip/nope.html" | grep -q '^not found$' || fail "zip miss body changed"
-curl -s -H 'Accept: text/html' "$BASE/a/ci-zip/nope.html" | grep -q 'Artifact unavailable' || fail "zip miss has no card for a browser"
+zipmiss=$(mktemp)
+curl -s -H 'Accept: text/html' -o "$zipmiss" "$BASE/a/ci-zip/nope.html"
+grep -q 'Artifact unavailable' "$zipmiss" || fail "zip miss has no card for a browser"
+rm "$zipmiss"
 echo "ok: zip miss falls back to plain not-found"
 
 # zip site with a 404.html: every miss under the site serves that page, still status 404
@@ -1977,15 +1983,61 @@ msg=$(curl -s -X PUT "$BASE/api/config" -H "$AUTH" -H "$JSON" -d '{"branding":{"
 echo "$msg" | grep -q 'branding.logoUrl' || fail "a refused branding value no longer names its field"
 echo "ok: a branding refusal names its field"
 
-# the settings panel ships the five inputs and an error slot per field
-for id in brandName brandLogo brandFavicon brandAccent brandFooter; do
-  curl -s "$BASE/" | grep -q "id=\"$id\"" || fail "settings panel has no $id input"
+# the settings panel ships the five inputs and an error slot per field.
+#
+# The console is ~113 kB, and this script runs under `set -o pipefail`. `curl | grep -q` on a
+# body that big is a race: grep matches, exits, and curl dies of SIGPIPE with 141, which
+# pipefail then reads as a failed check. Every page-sized assertion below fetches once into a
+# file and greps the file, which is also 16 fewer requests.
+console=$(mktemp)
+curl -s -o "$console" "$BASE/"
+for id in brandName brandLogo brandFavicon brandAccent brandFooter brandAccentPick; do
+  grep -q "id=\"$id\"" "$console" || fail "settings panel has no $id input"
 done
 for id in brandErrProductName brandErrLogoUrl brandErrFaviconUrl brandErrAccentColor brandErrFooterText; do
-  curl -s "$BASE/" | grep -q "id=\"$id\"" || fail "settings panel has no $id error slot"
+  grep -q "id=\"$id\"" "$console" || fail "settings panel has no $id error slot"
 done
-curl -s "$BASE/" | grep -q 'id="brandAccentPick"' || fail "settings panel has no accent picker"
 echo "ok: settings panel branding inputs"
+
+# the console reads the same block every viewer page does. Unbranded first: the built-in mark,
+# the built-in title, and the empty favicon answer the route has always given.
+curl -s -o "$console" "$BASE/"
+grep -q '<title>artifacts</title>' "$console" || fail "unbranded console lost its title"
+grep -q '<svg class="mark"' "$console" || fail "unbranded console lost the built-in mark"
+if grep -q 'rel="icon"' "$console"; then fail "unbranded console invented a favicon"; fi
+code=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/favicon.ico")
+expect_code 204 "$code" "unbranded favicon.ico"
+curl -sf -X PUT "$BASE/api/config" -H "$AUTH" -H "$JSON" \
+  -d '{"branding":{"productName":"Consolebrand","logoUrl":"/a/ci-brand-logo/logo.png","faviconUrl":"/a/ci-brand-logo/f.png","accentColor":"#0055ff"}}' > /dev/null
+curl -s -o "$console" "$BASE/"
+grep -q '<title>Consolebrand</title>' "$console" || fail "console title is not branded"
+grep -q '<h1>Consolebrand</h1>' "$console" || fail "lock heading is not branded"
+grep -q '<span class="wordmark">Consolebrand</span>' "$console" || fail "wordmark is not branded"
+grep -q '<link rel="icon" href="/a/ci-brand-logo/f.png">' "$console" || fail "console favicon tag missing"
+grep -q '<img class="mark" src="/a/ci-brand-logo/logo.png"' "$console" || fail "console mark is not the logo"
+if grep -q '<svg class="mark"' "$console"; then fail "the built-in mark survived a logo"; fi
+grep -q -- '--molten: #0055ff;' "$console" || fail "console accent did not land"
+# the well-known path follows the branding too, for anything that does not read the head first
+code=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/favicon.ico")
+expect_code 302 "$code" "branded favicon.ico redirects"
+curl -s -D - -o /dev/null "$BASE/favicon.ico" | grep -qi '^location: /a/ci-brand-logo/f.png' \
+  || fail "branded favicon.ico points somewhere else"
+# an inline favicon is decoded rather than redirected
+curl -sf -X PUT "$BASE/api/config" -H "$AUTH" -H "$JSON" \
+  -d '{"branding":{"faviconUrl":"data:image/png;base64,aGVsbG8="}}' > /dev/null
+curl -s -D - -o /dev/null "$BASE/favicon.ico" | grep -qi '^content-type: image/png' \
+  || fail "an inline favicon is not served as an image"
+curl -s "$BASE/favicon.ico" | grep -q '^hello$' || fail "inline favicon bytes did not decode"
+# back to unbranded, and the console is the page it was before any of this
+curl -sf -X PUT "$BASE/api/config" -H "$AUTH" -H "$JSON" \
+  -d '{"branding":{"productName":"","logoUrl":"","faviconUrl":"","accentColor":"","footerText":""}}' > /dev/null
+curl -s -o "$console" "$BASE/"
+grep -q '<title>artifacts</title>' "$console" || fail "console did not go back to unbranded"
+grep -q '<svg class="mark"' "$console" || fail "the built-in mark did not come back"
+rm "$console"
+code=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/favicon.ico")
+expect_code 204 "$code" "favicon.ico back to empty"
+echo "ok: the console follows the branding block"
 node "$CLI_DIR/cli.js" frame ci-cli-2 off > /dev/null
 if curl -s "$BASE/a/ci-cli-2" | grep -q '<iframe'; then fail "cli frame off still framed"; fi
 echo "ok: cli frame off"

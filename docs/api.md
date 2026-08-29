@@ -108,6 +108,7 @@ Where each field lands:
 | `shells/not-found.html` (the 404 and 410 pages) | Favicon, the logo in place of the built-in mark, accent color, footer line. One card renders both: a miss and an expired artifact differ only in the status number and the copy. |
 | `shells/md.html` (markdown pages) | Favicon, and the accent color for links, inline code and the blockquote rule. |
 | `shells/jsx.html` (React pages) | Favicon and the error readout's label. |
+| The dashboard (`public/index.html`) | Favicon, the tab title, the logo in place of the anvil mark on the sign-in card and in the header, the product name in place of the wordmark, and the accent for every interactive color the console uses. `/favicon.ico` follows too: a path redirects there, an inline image is decoded and served, and an unbranded install keeps the empty 204 the route always gave. |
 | Share-link tags (`og:` / `twitter:`) | `og:site_name` from the product name, and the logo as `og:image` for an artifact that carries none. A path `logoUrl` is resolved against `BASE_URL`, because an unfurler fetches it from its own host. A `data:` logo supplies no `og:image`: no unfurler reads one. |
 
 `productName` names the product, not the thing the product publishes. It reaches the frame chip,

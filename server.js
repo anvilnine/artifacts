@@ -60,6 +60,7 @@ import {
   EXPIRED_TEXT,
 } from './lib/status-page.js';
 import {
+  dashboardBrandSlots, dashboardFavicon,
   frameBrandSlots, jsxBrandSlots, mdBrandSlots, notFoundBrandSlots, passwordBrandSlots,
   socialBranding,
 } from './lib/branding.js';
@@ -163,6 +164,8 @@ const FRAME_SHELL = await fs.readFile(path.join(__dirname, 'shells', 'frame.html
 const PDF_SHELL = await fs.readFile(path.join(__dirname, 'shells', 'pdf.html'), 'utf8');
 const PASSWORD_SHELL = await fs.readFile(path.join(__dirname, 'shells', 'password.html'), 'utf8');
 const NOT_FOUND_SHELL = await fs.readFile(path.join(__dirname, 'shells', 'not-found.html'), 'utf8');
+// The console is a shell like any other now: read once, branding filled per request.
+const DASHBOARD_SHELL = await fs.readFile(path.join(__dirname, 'public', 'index.html'), 'utf8');
 
 // Per-artifact visibility. Absent meta.visibility === 'public' (today's behavior:
 // anyone with the unguessable link views). 'private' and 'password' are gated at
@@ -2497,7 +2500,13 @@ app.all('/mcp', (req, res) => {
 // ---------------------------------------------------------------------------
 
 app.get('/favicon.ico', (req, res) => {
-  res.status(204).end();
+  const icon = dashboardFavicon(config.current.branding);
+  if (!icon) return res.status(204).end();
+  // no-cache, because a browser that cached the 204 or an old icon would otherwise sit on it
+  // for the rest of the session after the operator changes the branding.
+  res.set('Cache-Control', 'no-cache');
+  if (icon.redirect) return res.redirect(302, icon.redirect);
+  res.type(icon.contentType).send(icon.body);
 });
 
 app.get('/robots.txt', (req, res) => {
@@ -2510,7 +2519,9 @@ app.get('/healthz', (req, res) => {
 
 app.get('/', (req, res) => {
   res.set(APP_HEADERS);
-  res.sendFile(path.join(__dirname, 'public', 'index.html'));
+  // no-cache so a branding change shows on the next load rather than after a hard refresh.
+  res.set('Cache-Control', 'no-cache');
+  res.type('html').send(fillShell(DASHBOARD_SHELL, dashboardBrandSlots(config.current.branding)));
 });
 
 // Which errors get to name themselves lives in lib/errors.js so a test can hand it the shapes
