@@ -279,6 +279,16 @@ The app rate-limits its two unauthenticated credential routes (`POST /api/auth/l
 `POST /a/:slug/unlock`) in memory: 10 failures per window per client IP, failures only.
 This is defense-in-depth, not a substitute for an edge limiter — run one.
 
+The write routes under `/api/artifacts` carry a third limit, on how many **large** bodies one
+client IP may send: 20 a minute, counting only requests declaring 256 kB or more (or declining
+to declare a length at all). Over that is a `429` with `Retry-After`. Every request counts,
+not only the ones that fail, because what the limit caps is the memory the body costs, and a
+successful publish costs it too. It is checked above the body parser, so a caller past the
+budget is refused before anything is buffered. An ordinary write is a few kB and never touches
+it: the dashboard's one-field `PATCH`, a redirect, a markdown page, a small HTML artifact.
+A publish from a CLI or from CI is one large body, sometimes a handful. Raise or lower it with
+`publishLimiter` in `server.js` if your CI publishes in bigger batches than that.
+
 **Behind cloudflared (recommended).** Every request reaches the origin from loopback, so
 set `TRUST_PROXY=cloudflare` to key limits on `CF-Connecting-IP`. This is safe **only
 because the tunnel is the sole ingress** — the origin has no open ports, so no client can

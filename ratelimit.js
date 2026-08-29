@@ -19,6 +19,12 @@ export function createRateLimiter({ windowMs, max, sweepMs = 60_000, maxEntries 
     }
   }
 
+  function record(key, now = Date.now()) {
+    const e = hits.get(key);
+    if (e && e.resetAt > now) e.count++;
+    else hits.set(key, { count: 1, resetAt: now + windowMs });
+  }
+
   return {
     check(key, now = Date.now()) {
       sweep(now);
@@ -28,10 +34,11 @@ export function createRateLimiter({ windowMs, max, sweepMs = 60_000, maxEntries 
       }
       return { limited: false, retryAfter: 0 };
     },
-    fail(key, now = Date.now()) {
-      const e = hits.get(key);
-      if (e && e.resetAt > now) e.count++;
-      else hits.set(key, { count: 1, resetAt: now + windowMs });
-    },
+    // One counter, two names. The login and unlock gates spend budget only on a failure, so
+    // `fail` reads right there. The publish gate spends it on every large body, because what it
+    // is capping is the memory the body costs, which a request that goes on to succeed costs
+    // too; `count` says that without pretending a publish failed.
+    fail: record,
+    count: record,
   };
 }

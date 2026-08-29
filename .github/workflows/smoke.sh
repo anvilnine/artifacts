@@ -2005,4 +2005,37 @@ if node "$CLI_DIR/cli.js" pdf ci-cli-pdf slides > /dev/null 2>&1; then fail "cli
 node "$CLI_DIR/cli.js" delete ci-cli-pdf > /dev/null
 echo "ok: cli pdf"
 
+# --- publish rate limit (T2.2.4) ---
+# Body parsing runs before routing, so a large JSON body is buffered before requireAuth sees
+# the request. Measured on a fresh process: 40 concurrent 9.33 MB bodies with no Authorization
+# header took RSS from 42 MB to 551 MB, every one of them answering 401. The publish routes now
+# cap how many large bodies one client IP can send per minute, checked above the parser, so a
+# caller past the budget costs a header read and nothing else.
+#
+# Last in the file on purpose: the flood spends this IP's large-body budget for the rest of the
+# minute, and everything above publishes from the same address.
+bigbody=$(mktemp)
+node -e 'process.stdout.write(JSON.stringify({content:"x".repeat(400000),type:"html"}))' > "$bigbody"
+floodcodes=$(mktemp)
+floodheaders=$(mktemp)
+for n in $(seq 1 25); do
+  curl -s -o /dev/null -w '%{http_code}\n' -X POST "$BASE/api/artifacts" -H "$JSON" \
+    --data-binary "@$bigbody" >> "$floodcodes" &
+done
+wait
+refused=$(grep -c '^429$' "$floodcodes" || true)
+[ "$refused" -gt 0 ] || fail "an unauthenticated flood of large bodies was never refused: $(sort "$floodcodes" | uniq -c | tr '\n' ' ')"
+echo "ok: an unauthenticated flood of large bodies is refused ($refused of 25 answered 429)"
+# and the refusal says when to come back
+curl -s -D "$floodheaders" -o /dev/null -X POST "$BASE/api/artifacts" -H "$JSON" \
+  --data-binary "@$bigbody"
+grep -qi '^Retry-After:' "$floodheaders" || fail "the 429 does not say when to retry"
+echo "ok: the publish 429 carries Retry-After"
+# A normal publish is a few kB and never touches the budget, even now that this IP has spent it.
+code=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/api/artifacts" -H "$AUTH" -H "$JSON" \
+  -d '{"content":"<h1>after the flood</h1>","type":"html","slug":"ci-flood","visibility":"public"}')
+expect_code 201 "$code" "an ordinary publish after the flood"
+curl -sf -X DELETE "$BASE/api/artifacts/ci-flood" -H "$AUTH" > /dev/null
+rm "$bigbody" "$floodcodes" "$floodheaders"
+
 echo "all smoke tests passed"

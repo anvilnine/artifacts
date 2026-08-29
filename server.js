@@ -1299,6 +1299,48 @@ async function removeArtifact(slug) {
 const app = express();
 app.disable('x-powered-by');
 
+// A publish body may be 10 MB, and body parsing runs before routing, so the server buffered one
+// before requireAuth ever saw the request. Measured on a fresh process: 40 concurrent 9.33 MB
+// bodies with no Authorization header took RSS from 42 MB to 551 MB, every one of them
+// answering 401, and roughly 12 to 32 MB of RSS per request in flight. PDFs make a 9 to 10 MB
+// body an ordinary request rather than an odd one.
+//
+// So the publish routes get a budget, spent per client IP, and only by bodies big enough to be
+// worth counting. A small body is a few kB and the parser is not the problem: the dashboard's
+// one-field PATCH, a redirect, a short markdown page, and the smoke suite's couple of hundred
+// writes all sit under the line and never touch it. A publish from a CLI or from CI is one
+// large body, sometimes a handful; 20 a minute from one address is well past that and well
+// under what the flood needs. The gate runs above the parser, so a caller past the budget costs
+// a header read and nothing else.
+//
+// This is one process, like the other two limiters. It pairs with a CDN or edge limit
+// (docs/deploy.md); it does not replace one.
+const BIG_BODY_BYTES = 256 * 1024;
+const publishLimiter = createRateLimiter({ windowMs: 60_000, max: 20 });
+
+// The body's declared size. A request that will not say (chunked) counts as big: the parser
+// buffers whatever arrives, which is the whole thing the gate is for. No length and no
+// transfer-encoding means no body.
+function declaredBodySize(req) {
+  const len = Number(req.headers['content-length']);
+  if (Number.isFinite(len)) return len;
+  return req.headers['transfer-encoding'] ? Number.POSITIVE_INFINITY : 0;
+}
+
+app.use((req, res, next) => {
+  const writing = req.method === 'POST' || req.method === 'PUT' || req.method === 'PATCH';
+  if (!writing || !req.path.startsWith('/api/artifacts')) return next();
+  if (declaredBodySize(req) < BIG_BODY_BYTES) return next();
+  const key = clientIp(req);
+  const gate = publishLimiter.check(key);
+  if (gate.limited) {
+    res.set('Retry-After', String(gate.retryAfter));
+    return res.status(429).json({ error: 'too many large publishes, try again later' });
+  }
+  publishLimiter.count(key);
+  next();
+});
+
 // Body parsing runs before routing, so an unauthenticated caller could make the server
 // parse 10 MB of JSON on /api/auth/login before the rate limiter ever looked at them.
 // Credential routes take a username, a password, or a slug — 16 kB is generous — so they
