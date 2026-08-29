@@ -38,6 +38,9 @@ artifacts delete <slug>
 artifacts source <slug> [-o file]
 artifacts qr <slug> [--png] [--scale n] [--margin n] [-o file]
 artifacts config [--frame-enabled true|false] [--frame-default true|false]
+                 [--brand-name <text|none>] [--brand-logo <path|data-uri|none>]
+                 [--brand-favicon <path|data-uri|none>] [--brand-accent <color|none>]
+                 [--brand-footer <text|none>]
 artifacts keys list
 artifacts keys create <name> [--scopes read,publish,full] [--expires ISO]
 artifacts keys revoke <id>
@@ -110,6 +113,8 @@ A **project** groups artifacts built for the same thing (one project per artifac
 Artifacts can render inside a slim top **frame** (title + copy-link + a hide toggle), like Claude/Gemini/ChatGPT artifacts. It's controlled at three levels:
 
 - **Globally** — `artifacts config --frame-enabled true|false` (master switch) and `--frame-default true|false` (default for items with no setting). Run `artifacts config` with no flags to print the current config.
+
+The same verb carries the five branding flags. A flag you leave out is not sent, so one run can set one field without disturbing the rest, and `none` clears a field. A logo or favicon has to be a path on the server or a `data:` image URI: remote URLs are refused, because the viewer pages only load images from their own origin and a hotlinked logo would be a third-party request from every page someone opens. Full field rules in [the API reference](api.md#branding).
 - **Per item** — `artifacts frame <slug> on|off|default` (`default` clears the override so the item inherits the global default). `publish --frame on|off` sets it at creation time.
 
 Add `?raw=1` to any artifact URL to view it without the frame (this is the URL the frame's iframe loads).
@@ -140,6 +145,9 @@ artifacts preview hello --description "Q3 numbers, one page"   # link preview te
 artifacts preview hello --og-image none                        # drop the preview image
 
 artifacts config --frame-enabled true --frame-default true   # turn the frame on globally
+artifacts config --brand-name Dropkiln --brand-accent '#0055ff'
+artifacts config --brand-logo /a/brand-kit/logo.png          # a path here, or a data: URI
+artifacts config --brand-footer none                         # clear one field
 artifacts frame hello off                                     # no frame for this one artifact
 artifacts frame hello default                                 # back to inheriting the default
 ```

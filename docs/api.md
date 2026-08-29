@@ -82,6 +82,17 @@ or inline it as a `data:` URI (the 8192-char cap holds a small PNG). SVG is refu
 URI on purpose: an SVG runs script, it would load from our own origin, and nothing on this build
 sanitizes one.
 
+Three ways to set the block, all writing the same `PUT /api/config`:
+
+- **The dashboard.** Settings has a Branding section with the five fields. The accent gets a color
+  picker beside its text box, because the field also takes `rgb()` and `hsl()` and a picker can
+  only write hex. A refused value shows the server's own message under the input it names. Blank
+  clears a field.
+- **The CLI.** `artifacts config --brand-name`, `--brand-logo`, `--brand-favicon`,
+  `--brand-accent`, `--brand-footer`. Pass `none` to clear one. Flags you leave out are not sent,
+  so setting one field leaves the other four alone.
+- **`PUT /api/config`** with a partial `branding` object, which is what the other two do.
+
 `BRAND_PRODUCT_NAME`, `BRAND_LOGO_URL`, `BRAND_FAVICON_URL`, `BRAND_ACCENT_COLOR` and
 `BRAND_FOOTER_TEXT` supply the values while no config has been saved. A value one of them holds
 that this build refuses is logged once at boot and ignored, so a typo in an env var does not stop

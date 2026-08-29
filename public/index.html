@@ -208,12 +208,13 @@
   .form { display: flex; flex-direction: column; gap: 12px; }
   .form .row { display: flex; gap: 10px; flex-wrap: wrap; }
   .form .row > * { flex: 1; min-width: 120px; }
-  .form label.f {
+  .form label.f, .settings label.f {
     display: flex; flex-direction: column; gap: 5px;
     font-family: var(--f-mono); font-size: 11px; font-weight: 500; letter-spacing: .08em; text-transform: uppercase;
     color: var(--taupe);
   }
   .form label.f > input, .form label.f > select, .form label.f > textarea { width: 100%; }
+  .settings label.f > input, .settings label.f > select { width: 100%; }
   .form textarea { min-height: 150px; font-family: var(--f-mono); font-size: 13px; resize: vertical; }
   /* A redirect target is one line, so the paste box shrinks instead of leaving 150px of void. */
   .form textarea.oneline { min-height: 44px; }
@@ -225,6 +226,26 @@
   .settings .desc { color: var(--taupe-dim); font-size: 12px; display: block; margin-top: 2px; }
   .settings input[type=checkbox] { margin-top: 1px; }
   .settings .foot { display: flex; align-items: center; gap: 12px; margin-top: 2px; }
+  .settings h4 {
+    margin: 6px 0 0; font-size: 12px; font-weight: 700; color: var(--cream); letter-spacing: .02em;
+  }
+  /* An accent takes rgb() and hsl() as well as hex, so the picker sits next to a text field
+     rather than replacing it: the picker can only say #rrggbb. */
+  .settings .colorrow { display: flex; gap: 8px; align-items: center; }
+  .settings .colorrow input[type=color] { width: 44px; flex: none; padding: 2px; height: 34px; }
+  .settings .colorrow input[type=text] { flex: 1; min-width: 0; }
+  /* The server's own message, under the field it named. Lowercase and unspaced, because the
+     label above it is uppercase mono and an error is a sentence. */
+  .settings .fielderr {
+    color: var(--brick); font-family: var(--f-sans); font-size: 12px;
+    text-transform: none; letter-spacing: 0; font-weight: 400; line-height: 1.4;
+  }
+  .settings .fielderr:empty { display: none; }
+  /* A hint under an input is a sentence, not a label, so it drops the label's uppercase mono. */
+  .settings label.f > .desc {
+    font-family: var(--f-sans); text-transform: none; letter-spacing: 0; font-weight: 400;
+    line-height: 1.4; margin-top: 0;
+  }
   .saved { color: var(--rose); font-size: 13px; }
 
   /* ---- api keys panel ---- */
@@ -646,6 +667,33 @@
             </label>
             <label class="f">Default theme
               <select id="mdTheme"><option value="auto">Auto</option><option value="light">Light</option><option value="dark">Dark</option></select>
+            </label>
+            <h4>Branding</h4>
+            <span class="desc">Leave a field blank to keep the built-in look. These reach the viewer frame, the unlock gate, the 404 and 410 pages, markdown and React pages, and link previews.</span>
+            <label class="f">Product name
+              <input type="text" id="brandName" maxlength="40" placeholder="Artifact" autocomplete="off">
+              <span class="fielderr" id="brandErrProductName"></span>
+            </label>
+            <label class="f">Logo
+              <input type="text" id="brandLogo" placeholder="/a/my-logo/logo.png" autocomplete="off" spellcheck="false">
+              <span class="desc">The logo and favicon both take a path on this server, or a data: image URI. Remote URLs are refused: the viewer pages only load images from their own origin, and a hotlinked asset is a third-party request from every page someone opens. No SVG.</span>
+              <span class="fielderr" id="brandErrLogoUrl"></span>
+            </label>
+            <label class="f">Favicon
+              <input type="text" id="brandFavicon" placeholder="/a/my-logo/favicon.png" autocomplete="off" spellcheck="false">
+              <span class="fielderr" id="brandErrFaviconUrl"></span>
+            </label>
+            <label class="f">Accent color
+              <span class="colorrow">
+                <input type="color" id="brandAccentPick" value="#c73d1d" aria-label="Pick an accent color">
+                <input type="text" id="brandAccent" placeholder="#c73d1d" autocomplete="off" spellcheck="false">
+              </span>
+              <span class="desc">Hex, rgb() or hsl(). The picker only writes hex, so type the other two.</span>
+              <span class="fielderr" id="brandErrAccentColor"></span>
+            </label>
+            <label class="f">Footer line
+              <input type="text" id="brandFooter" maxlength="160" placeholder="Published with Artifact" autocomplete="off">
+              <span class="fielderr" id="brandErrFooterText"></span>
             </label>
             <div class="foot"><button id="saveSettings">Save settings</button><span class="saved" id="settingsSaved"></span></div>
           </div>
@@ -2082,10 +2130,56 @@
         $('mdSize').value = cfg.md.size;
         $('mdTheme').value = cfg.md.theme;
       }
+      if (cfg.branding) {
+        for (const [id, field] of Object.entries(BRAND_INPUTS)) $(id).value = cfg.branding[field] || '';
+        syncAccentPicker();
+      }
     } catch {}
   }
 
+  // The five branding inputs, and the field each one writes. The error span for a field is
+  // `brandErr` + the field name with a capital first letter, which is how a refusal the server
+  // sends back finds the input it belongs under.
+  const BRAND_INPUTS = {
+    brandName: 'productName',
+    brandLogo: 'logoUrl',
+    brandFavicon: 'faviconUrl',
+    brandAccent: 'accentColor',
+    brandFooter: 'footerText',
+  };
+
+  const brandErrEl = (field) => $('brandErr' + field[0].toUpperCase() + field.slice(1));
+
+  function clearBrandErrors() {
+    for (const field of Object.values(BRAND_INPUTS)) brandErrEl(field).textContent = '';
+  }
+
+  // The picker can only hold #rrggbb, so it follows the text field when the text field holds a
+  // hex value and sits on the built-in accent otherwise. rgb() and hsl() stay text-only.
+  function syncAccentPicker() {
+    const value = $('brandAccent').value.trim();
+    $('brandAccentPick').value = /^#[0-9a-f]{6}$/i.test(value) ? value : '#c73d1d';
+  }
+
+  $('brandAccent').addEventListener('input', syncAccentPicker);
+  $('brandAccentPick').addEventListener('input', () => { $('brandAccent').value = $('brandAccentPick').value; });
+
+  // Brand assets are same-origin or inline, never hotlinked. The server refuses a remote URL
+  // anyway; saying so here means the operator hears it while the field is still in front of
+  // them instead of after a round trip.
+  function localAssetError(value) {
+    const raw = value.trim();
+    if (!raw || (raw.startsWith('/') && !raw.startsWith('//'))) return '';
+    if (/^data:image\/svg/i.test(raw)) {
+      return 'cannot be an SVG: an SVG runs script and nothing here sanitizes one. Use png, jpeg, webp or gif.';
+    }
+    if (/^data:/i.test(raw)) return '';
+    return 'must be a path on this server starting with a single /, or a data: image URI. Remote URLs are refused.';
+  }
+
   $('saveSettings').addEventListener('click', () => busy($('saveSettings'), 'Saving…', async () => {
+    const branding = {};
+    for (const [id, field] of Object.entries(BRAND_INPUTS)) branding[field] = $(id).value.trim();
     const body = {
       frame: { enabled: $('frameEnabled').checked, default: $('frameDefault').checked },
       md: {
@@ -2094,9 +2188,19 @@
         size: $('mdSize').value,
         theme: $('mdTheme').value,
       },
+      branding,
     };
     const el = $('settingsSaved');
     el.textContent = '';
+    clearBrandErrors();
+    for (const field of ['logoUrl', 'faviconUrl']) {
+      const problem = localAssetError(branding[field]);
+      if (problem) {
+        brandErrEl(field).textContent = problem;
+        el.textContent = 'Save failed';
+        return;
+      }
+    }
     try {
       const res = await fetch('/api/config', { method: 'PUT', headers: headers(), body: JSON.stringify(body) });
       if (res.ok) {
@@ -2104,7 +2208,16 @@
         setTimeout(() => { el.textContent = ''; }, 1500);
       } else {
         const d = await res.json().catch(() => ({}));
-        el.textContent = d.error || 'Save failed';
+        // Every branding refusal opens with `branding.<field>`. Strip that prefix and the
+        // message lands under the input it is about, rather than as one line by the button
+        // naming a field the operator then has to go find.
+        const named = /^branding\.([A-Za-z]+)\s+(.*)$/s.exec(d.error || '');
+        if (named && Object.values(BRAND_INPUTS).includes(named[1])) {
+          brandErrEl(named[1]).textContent = named[2];
+          el.textContent = 'Save failed';
+        } else {
+          el.textContent = d.error || 'Save failed';
+        }
       }
     } catch {
       el.textContent = 'Save failed';

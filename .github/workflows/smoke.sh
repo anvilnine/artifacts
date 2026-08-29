@@ -1946,6 +1946,46 @@ code=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/a/ci-cli-2")
 expect_code 200 "$code" "cli rename"
 node "$CLI_DIR/cli.js" config | grep -q '"enabled"' || fail "cli config get"
 echo "ok: cli config"
+
+# branding from the cli. One flag at a time: the other four have to survive, because the server
+# merges a partial branding object and the cli only sends the flags it was given.
+node "$CLI_DIR/cli.js" config --brand-name 'CLI Brand' --brand-footer 'Published with CLI Brand' > /dev/null
+node "$CLI_DIR/cli.js" config --brand-accent '#0055ff' > /dev/null
+cfg=$(node "$CLI_DIR/cli.js" config)
+echo "$cfg" | grep -q '"productName": "CLI Brand"' || fail "cli --brand-name did not land"
+echo "$cfg" | grep -q '"footerText": "Published with CLI Brand"' || fail "cli --brand-footer did not land"
+echo "$cfg" | grep -q '"accentColor": "#0055ff"' || fail "cli --brand-accent did not land"
+# the accent save left the name and footer alone
+node "$CLI_DIR/cli.js" config --brand-name none > /dev/null
+cfg=$(node "$CLI_DIR/cli.js" config)
+echo "$cfg" | grep -q '"productName": ""' || fail "cli --brand-name none did not clear"
+echo "$cfg" | grep -q '"footerText": "Published with CLI Brand"' || fail "clearing one field cleared another"
+# a remote logo is refused by the same rule the dashboard states: same origin or inline only
+if node "$CLI_DIR/cli.js" config --brand-logo https://cdn.example.com/l.png > /dev/null 2>&1; then
+  fail "cli accepted a hotlinked logo"
+fi
+node "$CLI_DIR/cli.js" config --brand-logo /a/brand/logo.png > /dev/null
+node "$CLI_DIR/cli.js" config | grep -q '"logoUrl": "/a/brand/logo.png"' || fail "cli --brand-logo path refused"
+# put it all back the way the branding block was before this section ran
+node "$CLI_DIR/cli.js" config --brand-name none --brand-logo none --brand-favicon none \
+  --brand-accent none --brand-footer none > /dev/null
+echo "ok: cli branding flags"
+
+# the dashboard reads the server's refusal and puts it under the field it names, so the message
+# has to keep opening with `branding.<field>`.
+msg=$(curl -s -X PUT "$BASE/api/config" -H "$AUTH" -H "$JSON" -d '{"branding":{"logoUrl":"https://cdn.example.com/l.png"}}')
+echo "$msg" | grep -q 'branding.logoUrl' || fail "a refused branding value no longer names its field"
+echo "ok: a branding refusal names its field"
+
+# the settings panel ships the five inputs and an error slot per field
+for id in brandName brandLogo brandFavicon brandAccent brandFooter; do
+  curl -s "$BASE/" | grep -q "id=\"$id\"" || fail "settings panel has no $id input"
+done
+for id in brandErrProductName brandErrLogoUrl brandErrFaviconUrl brandErrAccentColor brandErrFooterText; do
+  curl -s "$BASE/" | grep -q "id=\"$id\"" || fail "settings panel has no $id error slot"
+done
+curl -s "$BASE/" | grep -q 'id="brandAccentPick"' || fail "settings panel has no accent picker"
+echo "ok: settings panel branding inputs"
 node "$CLI_DIR/cli.js" frame ci-cli-2 off > /dev/null
 if curl -s "$BASE/a/ci-cli-2" | grep -q '<iframe'; then fail "cli frame off still framed"; fi
 echo "ok: cli frame off"

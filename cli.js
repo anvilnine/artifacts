@@ -6,6 +6,7 @@ import { parseArgs } from 'node:util';
 import AdmZip from 'adm-zip';
 
 import { sweepOrphans } from './lib/artifact-files.js';
+import { brandingPatchFromFlags } from './lib/branding.js';
 import { artifactExpired } from './lib/expiry.js';
 import { createStorage } from './storage/index.js';
 
@@ -31,6 +32,9 @@ Usage:
   artifacts source <slug> [-o file]
   artifacts qr <slug> [--png] [--scale n] [--margin n] [-o file]
   artifacts config [--frame-enabled true|false] [--frame-default true|false]
+                   [--brand-name <text|none>] [--brand-logo <path|data-uri|none>]
+                   [--brand-favicon <path|data-uri|none>] [--brand-accent <color|none>]
+                   [--brand-footer <text|none>]
   artifacts keys list
   artifacts keys create <name> [--scopes read,publish,full] [--expires ISO]
   artifacts keys revoke <id>
@@ -66,6 +70,11 @@ const { values: opts, positionals } = parseArgs({
     password: { type: 'string' },
     'frame-enabled': { type: 'string' },
     'frame-default': { type: 'string' },
+    'brand-name': { type: 'string' },
+    'brand-logo': { type: 'string' },
+    'brand-favicon': { type: 'string' },
+    'brand-accent': { type: 'string' },
+    'brand-footer': { type: 'string' },
     output: { type: 'string', short: 'o' },
     apply: { type: 'boolean' },
     png: { type: 'boolean' },
@@ -309,8 +318,15 @@ switch (command) {
     const frame = {};
     if (opts['frame-enabled'] !== undefined) frame.enabled = parseBool(opts['frame-enabled'], '--frame-enabled');
     if (opts['frame-default'] !== undefined) frame.default = parseBool(opts['frame-default'], '--frame-default');
-    const out = Object.keys(frame).length
-      ? await apiJson('PUT', '/api/config', { frame })
+    // Both blocks go in one PUT. The server merges a partial branding object, so a run that
+    // sets one field leaves the other four as they were, and `--brand-name none` clears it.
+    const branding = brandingPatchFromFlags(opts);
+    const patch = {
+      ...(Object.keys(frame).length && { frame }),
+      ...(Object.keys(branding).length && { branding }),
+    };
+    const out = Object.keys(patch).length
+      ? await apiJson('PUT', '/api/config', patch)
       : await apiJson('GET', '/api/config');
     console.log(JSON.stringify(out, null, 2));
     break;

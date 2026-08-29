@@ -10,6 +10,8 @@ import assert from 'node:assert/strict';
 import { createConfigStore } from '../lib/config.js';
 import {
   MAX_BRAND_URL_LEN,
+  brandingErrorField,
+  brandingPatchFromFlags,
   parseAccentColor,
   parseBrandUrl,
   parseFooterText,
@@ -246,4 +248,65 @@ test('BRAND_ env vars supply the values, and a bad one warns and is ignored', as
       else process.env[key] = before[key];
     }
   }
+});
+
+// ---------------------------------------------------------------------------
+// The two operator surfaces: the CLI's flags and the message the dashboard puts
+// next to a field.
+// ---------------------------------------------------------------------------
+
+test('the cli flags map onto the five branding fields', () => {
+  assert.deepEqual(
+    brandingPatchFromFlags({
+      'brand-name': 'Dropkiln',
+      'brand-logo': '/brand/logo.png',
+      'brand-favicon': '/brand/f.ico',
+      'brand-accent': '#0055ff',
+      'brand-footer': 'Published with Dropkiln',
+    }),
+    {
+      productName: 'Dropkiln',
+      logoUrl: '/brand/logo.png',
+      faviconUrl: '/brand/f.ico',
+      accentColor: '#0055ff',
+      footerText: 'Published with Dropkiln',
+    },
+  );
+});
+
+test('a flag nobody passed stays out of the patch, so the other four survive a save', () => {
+  assert.deepEqual(brandingPatchFromFlags({}), {});
+  assert.deepEqual(brandingPatchFromFlags({ 'brand-accent': '#0055ff' }), { accentColor: '#0055ff' });
+  assert.deepEqual(brandingPatchFromFlags(undefined), {});
+});
+
+test('none clears a field, the way every other cli verb spells unset', () => {
+  assert.deepEqual(
+    brandingPatchFromFlags({ 'brand-name': 'none', 'brand-footer': 'none' }),
+    { productName: '', footerText: '' },
+  );
+});
+
+test('a refused value names its own field, so a form can put the message next to it', () => {
+  const bad = [
+    [() => parseProductName('<b>'), 'productName'],
+    [() => parseProductName('x'.repeat(41)), 'productName'],
+    [() => parseFooterText('y'.repeat(161)), 'footerText'],
+    [() => parseBrandUrl('logoUrl', 'https://cdn.example.com/l.png'), 'logoUrl'],
+    [() => parseBrandUrl('faviconUrl', 'data:image/svg+xml;base64,AAAA'), 'faviconUrl'],
+    [() => parseAccentColor('red; } body { display: none'), 'accentColor'],
+  ];
+  for (const [call, field] of bad) {
+    assert.throws(call, (err) => {
+      assert.equal(err.status, 400);
+      assert.equal(brandingErrorField(err.message), field);
+      return true;
+    });
+  }
+});
+
+test('a message that names no branding field reads as a whole-form error', () => {
+  assert.equal(brandingErrorField('forbidden'), null);
+  assert.equal(brandingErrorField(''), null);
+  assert.equal(brandingErrorField(undefined), null);
 });
