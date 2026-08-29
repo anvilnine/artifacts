@@ -188,8 +188,8 @@ A zipped static project (HTML + CSS + JS + images) served under `/a/{slug}/`. Up
 ### Custom not-found page
 
 Put a `404.html` at the root of the zip and any miss under `/a/{slug}/` serves it with a 404
-status: a missing file, a missing directory, a directory with no `index.html`. Without one, a miss
-is a plain-text `not found`. The page is served the same way as the rest of the site, so relative
+status: a missing file, a missing directory, a directory with no `index.html`. Without one, a miss is the branded 404
+card for a browser navigation and a plain-text `not found` for an asset read or a script. The page is served the same way as the rest of the site, so relative
 asset URLs inside it resolve against `/a/{slug}/`. Most static site generators already emit a
 `404.html`, so this needs no extra work for an Astro or Eleventy build.
 

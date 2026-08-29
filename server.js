@@ -53,6 +53,13 @@ import {
 } from './lib/redirect.js';
 import { fillShell } from './lib/shells.js';
 import {
+  wantsHtmlPage,
+  NOT_FOUND_COPY,
+  EXPIRED_COPY,
+  NOT_FOUND_TEXT,
+  EXPIRED_TEXT,
+} from './lib/status-page.js';
+import {
   frameBrandSlots, jsxBrandSlots, mdBrandSlots, notFoundBrandSlots, passwordBrandSlots,
   socialBranding,
 } from './lib/branding.js';
@@ -447,7 +454,13 @@ function buildPromptHtml(meta) {
 }
 
 function buildNotFoundHtml() {
-  return fillShell(NOT_FOUND_SHELL, notFoundBrandSlots(config.current.branding));
+  return buildStatusHtml(NOT_FOUND_COPY);
+}
+
+// The 404 card and the 410 card are the same card with different words, so an operator's logo,
+// accent and footer reach both and there is one set of styles to keep in step.
+function buildStatusHtml(copy) {
+  return fillShell(NOT_FOUND_SHELL, { ...notFoundBrandSlots(config.current.branding), ...copy });
 }
 
 async function readMeta(slug) {
@@ -463,12 +476,37 @@ async function readMeta(slug) {
 // One 404 shape for every serve-path miss (missing, disabled, locked-private, wrong slug)
 // so an unauthenticated caller cannot distinguish them — no existence oracle.
 function notFound(res) {
-  return res.status(404).set({
+  return sendStatusCard(res, 404, NOT_FOUND_COPY);
+}
+
+// The expired page. 410 says the artifact was here and is gone on purpose, and the card says the
+// same thing in words, so a reader stops hunting for a typo in the link. Callers gate this behind
+// artifactUnlocked, so a locked artifact still answers the flat 404 and expiry stays off the
+// existence oracle.
+function expired(res) {
+  return sendStatusCard(res, 410, EXPIRED_COPY);
+}
+
+function sendStatusCard(res, status, copy) {
+  return res.status(status).set({
     'Content-Security-Policy': FRAME_CSP,
     'X-Content-Type-Options': 'nosniff',
     'Referrer-Policy': 'no-referrer',
     'Cache-Control': 'no-cache',
-  }).type('html').send(buildNotFoundHtml());
+  }).type('html').send(buildStatusHtml(copy));
+}
+
+// A miss on a sub-path. A person who followed a link gets the branded card; an <img>, a range
+// read, curl and fetch() keep the one-line body, because an HTML page in place of an asset is
+// noise to whatever asked for the asset.
+function missing(req, res) {
+  if (wantsHtmlPage(req.headers.accept)) return notFound(res);
+  return res.status(404).type('text/plain').send(NOT_FOUND_TEXT);
+}
+
+function expiredSubPath(req, res) {
+  if (wantsHtmlPage(req.headers.accept)) return expired(res);
+  return res.status(410).type('text/plain').send(EXPIRED_TEXT);
 }
 
 // ---------------------------------------------------------------------------
@@ -1462,7 +1500,7 @@ function parseRange(header, size) {
 // Pipe a storage stream with a hardened error contract: once the first byte is sent the
 // status/headers are flushed and immutable, so an upstream error must ABORT the socket
 // (res.destroy) — never res.end(), which would pass a truncated artifact off as complete.
-function pipeStream(res, stream) {
+function pipeStream(req, res, stream) {
   stream.on('error', (err) => {
     if (res.headersSent) return res.destroy();
     // A read that passed the stat can still miss when the open happens: local checks the file
@@ -1470,7 +1508,7 @@ function pipeStream(res, stream) {
     // same "not there" the stat catches, and the rename path has always answered it as a 404,
     // so it answers 404 here too rather than the 500 a real read error gets.
     const gone = err?.code === 'ENOENT' || err?.code === 'ENOTDIR';
-    if (gone) return res.status(404).type('text/plain').send('not found');
+    if (gone) return missing(req, res);
     res.status(500).type('text/plain').send('internal error');
   });
   stream.pipe(res);
@@ -1486,31 +1524,31 @@ async function serveObject(req, res, key, { forceType } = {}) {
     const rangeHeader = req.headers.range;
     if (rangeHeader) {
       const info = await storage.head(key);
-      if (!info) return res.status(404).type('text/plain').send('not found');
+      if (!info) return missing(req, res);
       const range = parseRange(rangeHeader, info.size);
       if (range === 'invalid') {
         return res.status(416).set('Content-Range', `bytes */${info.size}`).end();
       }
       if (range) {
         const got = await storage.get(key, { range });
-        if (!got) return res.status(404).type('text/plain').send('not found');
+        if (!got) return missing(req, res);
         res.status(206).set({
           'Content-Type': contentType,
           'Accept-Ranges': 'bytes',
           'Content-Range': `bytes ${range.start}-${range.end}/${info.size}`,
           'Content-Length': String(range.end - range.start + 1),
         });
-        return pipeStream(res, got.stream);
+        return pipeStream(req, res, got.stream);
       }
     }
     const got = await storage.get(key);
-    if (!got) return res.status(404).type('text/plain').send('not found');
+    if (!got) return missing(req, res);
     res.status(200).set({ 'Content-Type': contentType, 'Accept-Ranges': 'bytes' });
     if (got.size != null) res.set('Content-Length', String(got.size));
-    pipeStream(res, got.stream);
+    pipeStream(req, res, got.stream);
   } catch (err) {
     if (err instanceof UnsafeKeyError) {
-      if (!res.headersSent) res.status(404).type('text/plain').send('not found');
+      if (!res.headersSent) missing(req, res);
       return;
     }
     if (!res.headersSent) res.status(500).type('text/plain').send('internal error');
@@ -1523,12 +1561,12 @@ async function serveObject(req, res, key, { forceType } = {}) {
 // every other host. No 404.html in the zip: the plain-text miss serveObject would have sent.
 // The caller has already set ARTIFACT_HEADERS, so the page runs under the same CSP as the
 // rest of the site.
-async function serveSiteNotFound(res, slug) {
+async function serveSiteNotFound(req, res, slug) {
   const got = await storage.get(`${slug}/site/404.html`).catch(() => null);
-  if (!got) return res.status(404).type('text/plain').send('not found');
+  if (!got) return missing(req, res);
   res.status(404).set({ 'Content-Type': 'text/html; charset=utf-8' });
   if (got.size != null) res.set('Content-Length', String(got.size));
-  pipeStream(res, got.stream);
+  pipeStream(req, res, got.stream);
 }
 
 // The frame wrapper is our own page: inline styles/script + a same-origin iframe.
@@ -1582,9 +1620,7 @@ app.get('/a/:slug', async (req, res) => {
   // Expiry is 410 only once the caller has proved access; otherwise a 404 like any other
   // miss, so expiry does not become an existence oracle for a locked artifact.
   if (isExpired(meta)) {
-    return artifactUnlocked(req, meta)
-      ? res.status(410).type('text/plain').send('artifact expired')
-      : notFound(res);
+    return artifactUnlocked(req, meta) ? expired(res) : notFound(res);
   }
   // Visibility gate. password → the unlock prompt (401) until a valid unlock cookie is
   // present. private with no valid cookie → a flat 404 identical to a missing artifact
@@ -1674,7 +1710,7 @@ app.get('/a/:slug/source', async (req, res, next) => {
   // Unlock before expiry so a locked artifact yields the canonical 404, never a 410 that
   // would leak existence.
   if (!artifactUnlocked(req, meta)) return notFound(res);
-  if (isExpired(meta)) return res.status(410).type('text/plain').send('artifact expired');
+  if (isExpired(meta)) return expiredSubPath(req, res);
   if (meta.type === 'zip') return next(); // zip sites serve /source as a site path
   res.set({ 'X-Content-Type-Options': 'nosniff', 'Referrer-Policy': 'no-referrer' });
   // A redirect's "source" is its target, and the docs say so, so it answers with the same value
@@ -1711,7 +1747,7 @@ app.get('/a/:slug/*', async (req, res) => {
   const meta = SLUG_RE.test(slug) ? await readMeta(slug) : null;
   if (!meta || meta.disabled) return notFound(res);
   if (!artifactUnlocked(req, meta)) return notFound(res);
-  if (isExpired(meta)) return res.status(410).type('text/plain').send('artifact expired');
+  if (isExpired(meta)) return expiredSubPath(req, res);
   // A pdf artifact owns one sub-path: the file its viewer loads. `?download=1` sends the same
   // bytes as an attachment, which is the direct-download link the viewer's Download button and
   // anything else that wants the file point at.
@@ -1732,11 +1768,11 @@ app.get('/a/:slug/*', async (req, res) => {
   let key = `${slug}/site/${rel}`;
   if (rel === '' || rel.endsWith('/')) {
     key = `${slug}/site/${rel}index.html`;
-    if (!(await storage.head(key).catch(() => null))) return serveSiteNotFound(res, slug);
+    if (!(await storage.head(key).catch(() => null))) return serveSiteNotFound(req, res, slug);
   } else if (!(await storage.head(key).catch(() => null))) {
     const alt = `${slug}/site/${rel}/index.html`;
     if (await storage.head(alt).catch(() => null)) key = alt;
-    else return serveSiteNotFound(res, slug);
+    else return serveSiteNotFound(req, res, slug);
   }
   serveObject(req, res, key);
 });

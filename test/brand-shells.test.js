@@ -16,6 +16,8 @@ import {
   notFoundBrandSlots,
   passwordBrandSlots,
 } from '../lib/branding.js';
+import { fillShell } from '../lib/shells.js';
+import { NOT_FOUND_COPY, EXPIRED_COPY } from '../lib/status-page.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const shellText = (name) => readFileSync(join(here, '..', 'shells', `${name}.html`), 'utf8');
@@ -78,8 +80,14 @@ test('a product name never becomes the noun for a published item', () => {
   for (const name of ['password', 'not-found', 'frame']) {
     assert.ok(!shellText(name).includes('{{PRODUCT_'), `${name}.html still has a product-name slot`);
   }
-  assert.match(shellText('not-found'), /<h1>Artifact unavailable<\/h1>/);
   assert.match(shellText('password'), /<h1>Protected artifact<\/h1>/);
+  // not-found.html holds its headline in a slot now, so the fixed noun lives in
+  // lib/status-page.js. Both cards it renders still name the artifact, never the product.
+  for (const copy of [NOT_FOUND_COPY, EXPIRED_COPY]) {
+    const page = fillShell(shellText('not-found'), { ...notFoundBrandSlots(b), ...copy });
+    assert.match(page, /<h1>Artifact (unavailable|expired)<\/h1>/);
+    assert.ok(!page.includes('Dropkiln'), 'the card never carries the product name');
+  }
 });
 
 test('a product name reaches the frame chip and nothing else on the frame', () => {

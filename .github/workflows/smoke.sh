@@ -136,6 +136,28 @@ curl -sf -X PATCH "$BASE/api/artifacts/ci-smoke" -H "$AUTH" -H "$JSON" -d '{"dis
 code=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/a/ci-smoke")
 expect_code 410 "$code" "expired artifact"
 
+# the 410 is a branded page, not the bare string it used to be, and it says expired rather than
+# reusing the 404 copy. A reader who lands on a lapsed link needs to know the link was fine.
+expired_headers=$(mktemp)
+expired_body=$(mktemp)
+code=$(curl -s -D "$expired_headers" -o "$expired_body" -w '%{http_code}' "$BASE/a/ci-smoke")
+expect_code 410 "$code" "expired artifact page"
+grep -qi '^Content-Type: text/html' "$expired_headers" || fail "expired artifact is not HTML"
+grep -q 'Artifact expired' "$expired_body" || fail "expired page copy missing"
+grep -q '<p class="status">410</p>' "$expired_body" || fail "expired page does not show 410"
+grep -q 'Artifact unavailable' "$expired_body" && fail "expired page reuses the 404 copy"
+rm "$expired_headers"
+rm "$expired_body"
+echo "ok: branded artifact-expired page"
+
+# a sub-path read keeps the plain body for a machine and gives a person the card. curl sends
+# Accept: */*, a browser navigation sends text/html.
+curl -s "$BASE/a/ci-smoke/source" | grep -q '^artifact expired$' || fail "expired source body changed for a machine"
+curl -s -H 'Accept: text/html' "$BASE/a/ci-smoke/source" | grep -q 'Artifact expired' || fail "expired source has no card for a browser"
+code=$(curl -s -o /dev/null -w '%{http_code}' -H 'Accept: text/html' "$BASE/a/ci-smoke/source")
+expect_code 410 "$code" "expired source keeps its status for a browser"
+echo "ok: expiry sub-path splits by Accept"
+
 # clear expiry + rename -> new slug serves, old 404
 curl -sf -X PATCH "$BASE/api/artifacts/ci-smoke" -H "$AUTH" -H "$JSON" -d '{"expiresAt":null,"slug":"ci-smoke-2"}' > /dev/null
 code=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/a/ci-smoke-2")
@@ -907,6 +929,7 @@ echo "ok: zip tags"
 code=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/a/ci-zip/nope.html")
 expect_code 404 "$code" "zip miss, no 404.html in zip"
 curl -s "$BASE/a/ci-zip/nope.html" | grep -q '^not found$' || fail "zip miss body changed"
+curl -s -H 'Accept: text/html' "$BASE/a/ci-zip/nope.html" | grep -q 'Artifact unavailable' || fail "zip miss has no card for a browser"
 echo "ok: zip miss falls back to plain not-found"
 
 # zip site with a 404.html: every miss under the site serves that page, still status 404
