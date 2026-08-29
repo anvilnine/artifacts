@@ -13,8 +13,8 @@ DELETE /api/artifacts/:slug                                                  →
 GET    /api/artifacts        list (?tag= and/or ?project= to filter)         → [...]   [read]
 GET    /api/artifacts/:slug/link  mint a fresh share link, no mutation       → {url, visibility}   [read]
 GET    /api/artifacts/:slug/qr    QR code for the canonical URL (?format=svg|png&scale=&margin=) → image   [read]
-GET    /api/config                                                           → {frame: {enabled, default}, md: {font, width, size, theme}, baseUrl}   [read]
-PUT    /api/config           {frame?: {enabled?, default?}, md?: {font?, width?, size?, theme?}} → updated config   [full]
+GET    /api/config                                                           → {frame: {enabled, default}, md: {font, width, size, theme}, branding: {productName, logoUrl, faviconUrl, accentColor, footerText}, baseUrl}   [read]
+PUT    /api/config           {frame?: {enabled?, default?}, md?: {font?, width?, size?, theme?}, branding?: {productName?, logoUrl?, faviconUrl?, accentColor?, footerText?}} → updated config   [full]
 GET    /a/:slug              rendered artifact, framed when active (public unless private/password)
 GET    /a/:slug?k=<token>    capability-link exchange: sets the unlock cookie, 302s to a clean URL (private/password)
 GET    /a/:slug?raw=1        bare artifact without the frame
@@ -43,8 +43,77 @@ Semantics:
 
 Whether an artifact is framed resolves as `config.frame.enabled && (meta.frame ?? config.frame.default)`:
 
-- **`GET/PUT /api/config`** manage the global config: `{frame: {enabled, default}}` (both booleans) plus the four markdown render settings documented in [Markdown render settings](formats.md#markdown-render-settings). `enabled` is the master switch; `default` applies to items with no per-item value. `PUT` accepts a partial `frame` or `md` object and merges it. The optional `FRAME_ENABLED` / `FRAME_DEFAULT` env vars (both default `true` when unset) supply the values while no config has been saved. The server writes nothing on boot. `config.json` appears the first time a `PUT` is accepted, which keeps the git backend from committing on every startup. It is a reserved key in whatever backend you run, landing at `DATA_DIR/artifacts/config.json` on the local one. A `PUT` writes all six fields at once, so once the server has saved it the env vars stop having any effect. Edit that file by hand and the rule is per field: anything missing or invalid falls back to the env var, then to the built-in default.
+- **`GET/PUT /api/config`** manage the global config: `{frame: {enabled, default}}` (both booleans) plus the four markdown render settings documented in [Markdown render settings](formats.md#markdown-render-settings). `enabled` is the master switch; `default` applies to items with no per-item value. `PUT` accepts a partial `frame`, `md` or `branding` object and merges it. The optional `FRAME_ENABLED` / `FRAME_DEFAULT` env vars (both default `true` when unset) supply the values while no config has been saved. The server writes nothing on boot. `config.json` appears the first time a `PUT` is accepted, which keeps the git backend from committing on every startup. It is a reserved key in whatever backend you run, landing at `DATA_DIR/artifacts/config.json` on the local one. A `PUT` writes every field at once, so once the server has saved it the env vars stop having any effect. Edit that file by hand and the rule is per field: anything missing or invalid falls back to the env var, then to the built-in default.
 - **Per item**, the `frame` field on `POST` / `PUT` / `PATCH` is `true` (always framed), `false` (never framed), or — via `PATCH {"frame": null}` — cleared so the item inherits the global default.
+
+### Branding
+
+The `branding` block is what the viewer-facing shells read instead of carrying a product name and
+brand colors of their own. Every field defaults to an empty string, and an empty string means "keep
+the built-in look", so a server that has never had branding set renders byte for byte what it
+rendered before the block existed.
+
+| Field | Accepts | Refused with a 400 |
+|---|---|---|
+| `productName` | Plain text, up to 40 chars. Whitespace collapses. | Not a string, over 40 chars, or containing `<` / `>`. |
+| `logoUrl` | A same-origin path starting with a single `/`, or a base64 `data:` URI for a `png`, `jpeg`, `webp` or `gif`. Up to 8192 chars. | Any `http://` or `https://` URL, a `data:image/svg+xml` URI, any other `data:` type, a `javascript:` URL, a protocol-relative `//host/x`, a relative `assets/x`, or quotes, angle brackets, backslashes or spaces anywhere in it. |
+| `faviconUrl` | Same rules as `logoUrl`. | Same as `logoUrl`. |
+| `accentColor` | A fully opaque hex color (`#rgb`, `#rgba`, `#rrggbb`, `#rrggbbaa`) or `rgb()`, `rgba()`, `hsl()`, `hsla()` color. Both argument forms work: `rgb(29, 78, 216)` and `rgb(29 78 216 / 100%)`. | Anything else, color names included, plus any color with an alpha below 1. The value lands inside a `<style>` block, so it is parsed rather than pattern-matched: a shape-only check let `rgb(--)` and `rgba(1,2)` through, and a color the browser cannot parse voids the whole declaration it sits in. |
+| `footerText` | Plain text, up to 160 chars. Whitespace collapses. | Not a string, over 160 chars, or containing `<` / `>`. |
+
+The error message names the field it refused, for example `branding.accentColor must be a hex color
+(#rgb, #rgba, #rrggbb, #rrggbbaa) or an rgb(), rgba(), hsl() or hsla() color`. A refused field is
+applied nowhere: the whole `PUT` fails, so a bad value never lands half-written.
+
+**Where a brand asset lives.** A logo or favicon has to come from this origin or be inlined,
+because the chrome pages carry `img-src 'self' data:` and a viewer's browser blocks anything else.
+A hotlinked logo is also a third-party request from every page a viewer opens, which T2.6.10 rules
+out. There is no static file route on this server, so until T2.6.10 adds a real upload the three
+working options are: publish the image as a public artifact and point at `/a/<slug>/logo.png`,
+serve the path from whatever reverse proxy or CDN sits in front of this server on the same origin,
+or inline it as a `data:` URI (the 8192-char cap holds a small PNG). SVG is refused as a `data:`
+URI on purpose: an SVG runs script, it would load from our own origin, and nothing on this build
+sanitizes one.
+
+`BRAND_PRODUCT_NAME`, `BRAND_LOGO_URL`, `BRAND_FAVICON_URL`, `BRAND_ACCENT_COLOR` and
+`BRAND_FOOTER_TEXT` supply the values while no config has been saved. A value one of them holds
+that this build refuses is logged once at boot and ignored, so a typo in an env var does not stop
+the server from starting. In a hand-edited `config.json` the same rule applies per field: a value
+that fails validation falls back to the env var, then to the empty default.
+
+Where each field lands:
+
+| Surface | What branding reaches it |
+|---|---|
+| `shells/frame.html` (the viewer frame) | Favicon, and a brand chip at the left of the bar: the logo when there is one, the product name otherwise. |
+| `shells/password.html` (the unlock gate) | Favicon, logo above the card, accent color, footer line. |
+| `shells/not-found.html` (the 404 page) | Favicon, the logo in place of the built-in mark, accent color, footer line. |
+| `shells/md.html` (markdown pages) | Favicon, and the accent color for links, inline code and the blockquote rule. |
+| `shells/jsx.html` (React pages) | Favicon and the error readout's label. |
+| Share-link tags (`og:` / `twitter:`) | `og:site_name` from the product name, and the logo as `og:image` for an artifact that carries none. A path `logoUrl` is resolved against `BASE_URL`, because an unfurler fetches it from its own host. A `data:` logo supplies no `og:image`: no unfurler reads one. |
+
+`productName` names the product, not the thing the product publishes. It reaches the frame chip,
+`og:site_name`, the footer line and the jsx error label, and it is used exactly as typed,
+capitalization included. It is never substituted into the wording a viewer reads about an item:
+the 404 says "Artifact unavailable" and the gate says "Protected artifact" on every install,
+because "Dropkiln unavailable" reads as "the service is down" rather than "this link is wrong".
+
+`accentColor` takes over every accent role in a shell at once, the two translucent washes
+included, which `color-mix()` derives from the same value. Each shell carries a light and a dark
+value for its accent, and the dark one is derived as `color-mix(in srgb, <accent> 70%, white)`,
+because one value cannot pass contrast on both a white card and a `#0b0d0f` one. The unlock
+button's label is picked the same way, from the accent's luminance: `#0b0d0f` on a light accent,
+`#ffffff` on a dark one. The error reds are not accent roles: they say "this failed", and a
+blue-branded instance should not get a blue error message.
+
+The 404, password, markdown and frame pages render per request, so a `PUT` shows on the next
+view. `jsx` artifacts are built once, at publish time, and keep the branding they were built with
+until they are republished; their frame still rebrands, because the frame is rendered per request.
+`html` artifacts carry no branding at all: there is no html shell, the bytes you posted are the
+bytes served, so there is nothing stale to republish.
+
+There is no per-artifact branding. A single artifact that needs its own mark uses a watermark
+instead.
 
 `GET /api/config` also returns `baseUrl`, the `BASE_URL` the server builds artifact links from. It is not config and `PUT` ignores it: the dashboard needs it because the origin an operator opens the dashboard on is not always the origin artifact links use.
 

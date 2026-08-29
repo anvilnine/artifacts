@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="robots" content="noindex, nofollow">
-<title>{{TITLE}}</title>{{FAVICON}}
+<title>{{TITLE}}</title>
 <script src="https://cdn.tailwindcss.com"></script>
 <script type="importmap">
 {{IMPORT_MAP}}
@@ -14,7 +14,7 @@
   body { margin: 0; }
   /* Tailwind + Babel load from external CDNs (see script tags above); the React
      artifact owns its own body styling, so we only theme the error readout here. */
-  #__artifact_error { display: none; font-family: "IBM Plex Mono", ui-monospace, monospace; color: {{ERROR}}; padding: 16px; white-space: pre-wrap; }
+  #__artifact_error { display: none; font-family: "IBM Plex Mono", ui-monospace, monospace; color: #c4573e; padding: 16px; white-space: pre-wrap; }
 </style>
 </head>
 <body>
@@ -24,7 +24,7 @@
   window.addEventListener('error', function (e) {
     var el = document.getElementById('__artifact_error');
     el.style.display = 'block';
-    el.textContent = {{ERROR_LABEL}} + e.message;
+    el.textContent = 'Artifact error: ' + e.message;
   });
 </script>
 <script type="text/babel" data-type="module" data-presets="react,typescript" data-filename="artifact.tsx">

@@ -136,3 +136,33 @@ test('a title, a description and an image cannot break out of the attribute', ()
     assert.match(line, /^<meta (name|property)="[a-z:_]+" content="[^"<>]*">$/, `broke out: ${line}`);
   }
 });
+
+// --- branding in the share-link tags ---
+// The 404, password and md pages are what a person sees; these tags are what Slack, Discord and
+// X see, and they were the one viewer-facing surface with no branding hook at all.
+
+test('no branding leaves the tags exactly as they were', () => {
+  const meta = { slug: 'ci-social', title: 'A page' };
+  assert.equal(socialTags(meta, CANONICAL, { siteName: '', image: '' }), socialTags(meta, CANONICAL));
+});
+
+test('a product name renders og:site_name', () => {
+  const tags = socialTags({ slug: 'ci-social' }, CANONICAL, { siteName: 'Dropkiln', image: '' });
+  assert.match(tags, /<meta property="og:site_name" content="Dropkiln">/);
+});
+
+test('the brand logo is the preview image only when the artifact sets none', () => {
+  const brand = { siteName: '', image: 'https://cdn.example.com/logo.png' };
+  const fallback = socialTags({ slug: 'ci-social' }, CANONICAL, brand);
+  assert.match(fallback, /<meta property="og:image" content="https:\/\/cdn\.example\.com\/logo\.png">/);
+  assert.match(fallback, /twitter:card" content="summary_large_image"/);
+
+  const own = socialTags({ slug: 'ci-social', ogImage: 'https://example.com/own.png' }, CANONICAL, brand);
+  assert.match(own, /content="https:\/\/example\.com\/own\.png"/);
+  assert.doesNotMatch(own, /logo\.png/);
+});
+
+test('a site name is escaped on the way into the tag', () => {
+  const tags = socialTags({ slug: 'ci-social' }, CANONICAL, { siteName: 'A & "B"', image: '' });
+  assert.match(tags, /content="A &amp; &quot;B&quot;">/);
+});

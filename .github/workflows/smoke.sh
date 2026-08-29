@@ -1176,6 +1176,102 @@ body=$(curl -s -b /tmp/pwjar "$BASE/a/cap-pw?raw=1")
 echo "$body" | grep -q 'pw body' || fail "password unlock cookie did not serve body"
 echo "ok: password mode unlock round-trip"
 
+# --- branding: one config change rebrands every shell, no shell file touched ---
+# This block writes the config, so it saves what the target already had and puts it back at the
+# end, the way the md.width check above does. Two reasons: a self-host that runs the suite
+# against its own instance should not come out of it white-labelled as "Smokebrand", and the
+# built-in-look assertions below are only true on an instance nobody has branded yet.
+brand_before=$(curl -s "$BASE/api/config" -H "$AUTH" \
+  | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>process.stdout.write(JSON.stringify(JSON.parse(s).branding)))')
+[ -n "$brand_before" ] || fail "config did not report a branding block"
+if [ "$brand_before" = '{"productName":"","logoUrl":"","faviconUrl":"","accentColor":"","footerText":""}' ]; then
+  host_branded=no
+else
+  host_branded=yes
+  echo "note: this host is already branded, skipping the built-in-look assertions"
+fi
+
+curl -sf -X POST "$BASE/api/artifacts" -H "$AUTH" -H "$JSON" \
+  -d '{"content":"# brand smoke\n\nhi","type":"md","slug":"ci-brand-md","visibility":"public"}' > /dev/null
+curl -sf -X POST "$BASE/api/artifacts" -H "$AUTH" -H "$JSON" \
+  -d '{"content":"export default function A(){ return <div>brand</div>; }","type":"jsx","slug":"ci-brand-jsx","visibility":"public"}' > /dev/null
+if [ "$host_branded" = no ]; then
+  curl -s "$BASE/a/ci-brand-md?raw=1" | grep -q -- '--link: #c73d1d' || fail "md page is not on the default link color"
+  curl -s "$BASE/a/ci-brand-jsx?raw=1" | grep -qF "'Artifact error: '" || fail "jsx page is not on the default error label"
+  if curl -s "$BASE/a/ci-brand-md" | grep -q 'og:site_name'; then fail "og:site_name rendered with no product name set"; fi
+  echo "ok: shells render the built-in branding by default"
+fi
+
+curl -sf -X PUT "$BASE/api/config" -H "$AUTH" -H "$JSON" \
+  -d '{"branding":{"productName":"Smokebrand","logoUrl":"/brand/logo.png","faviconUrl":"/brand/f.ico","accentColor":"#0055ff","footerText":"Published with Smokebrand"}}' > /dev/null
+curl -s "$BASE/api/config" -H "$AUTH" | grep -q '"productName":"Smokebrand"' || fail "branding did not persist"
+
+body=$(curl -s "$BASE/a/does-not-exist-zzz")
+echo "$body" | grep -q '#0055ff' || fail "404 page kept the built-in accent color"
+echo "$body" | grep -q 'Published with Smokebrand' || fail "404 page missing the branded footer"
+echo "$body" | grep -q '<img class="mark" src="/brand/logo.png"' || fail "404 page kept the built-in mark"
+# The product name is the name of the product, not a count noun for what it publishes. A viewer
+# on a dead link reads "Artifact unavailable" on every install, branded or not.
+echo "$body" | grep -q 'Artifact unavailable' || fail "404 page put the product name where the noun goes"
+body=$(curl -s "$BASE/a/cap-pw")
+echo "$body" | grep -q '#0055ff' || fail "password page kept the built-in accent color"
+echo "$body" | grep -q '<link rel="icon" href="/brand/f.ico">' || fail "password page missing the branded favicon"
+echo "$body" | grep -q 'Protected artifact' || fail "password page put the product name where the noun goes"
+body=$(curl -s "$BASE/a/ci-brand-md?raw=1")
+echo "$body" | grep -q -- '--link: #0055ff' || fail "md page kept the built-in link color"
+echo "$body" | grep -q '<link rel="icon" href="/brand/f.ico">' || fail "md page missing the branded favicon"
+# html and jsx pages are built once, at publish time, so this one is published after the
+# rebrand. An artifact published earlier keeps the branding it was built with until it is
+# republished; its frame, being rendered per request, rebrands either way.
+curl -sf -X POST "$BASE/api/artifacts" -H "$AUTH" -H "$JSON" \
+  -d '{"content":"export default function A(){ return <div>brand</div>; }","type":"jsx","slug":"ci-brand-jsx-2","visibility":"public"}' > /dev/null
+body=$(curl -s "$BASE/a/ci-brand-jsx-2?raw=1")
+echo "$body" | grep -qF '"Smokebrand error: "' || fail "jsx page kept the built-in error label"
+echo "$body" | grep -q '<link rel="icon" href="/brand/f.ico">' || fail "jsx page missing the branded favicon"
+if [ "$host_branded" = no ]; then
+  curl -s "$BASE/a/ci-brand-jsx?raw=1" | grep -qF "'Artifact error: '" || fail "an older jsx page changed under it"
+fi
+echo "ok: branding rebrands the 404, password, md, jsx and frame shells"
+
+# share-link tags: the site name shows, and the logo stands in for a missing preview image
+body=$(curl -s "$BASE/a/ci-brand-md")
+echo "$body" | grep -q '<meta property="og:site_name" content="Smokebrand">' || fail "share tags missing og:site_name"
+echo "$body" | grep -qF "<meta property=\"og:image\" content=\"$BASE/brand/logo.png\">" || fail "share tags missing the brand logo fallback"
+echo "$body" | grep -q 'twitter:card" content="summary_large_image"' || fail "share tags kept the small card with an image set"
+echo "$body" | grep -q 'Smokebrand' || fail "frame bar missing the product name"
+echo "ok: branding reaches the share-link tags"
+
+# a refused value -> 400 naming the field, and nothing written
+out=$(curl -s -o /dev/null -w '%{http_code}' -X PUT "$BASE/api/config" -H "$AUTH" -H "$JSON" -d '{"branding":{"accentColor":"red; } body { display: none"}}')
+expect_code 400 "$out" "invalid accentColor rejected"
+curl -s "$BASE/api/config" -H "$AUTH" | grep -q '"accentColor":"#0055ff"' || fail "a refused branding PUT still wrote"
+echo "ok: branding validation"
+
+# a remote logo -> 400. The chrome pages carry `img-src 'self' data:`, so an absolute URL is
+# accepted by the API and then refused by the viewer's own browser, and on the 404 that means no
+# mark at all, because the logo replaces the built-in one.
+out=$(curl -s -o /dev/null -w '%{http_code}' -X PUT "$BASE/api/config" -H "$AUTH" -H "$JSON" -d '{"branding":{"logoUrl":"https://cdn.example.com/l.png"}}')
+expect_code 400 "$out" "remote logoUrl rejected"
+out=$(curl -s -o /dev/null -w '%{http_code}' -X PUT "$BASE/api/config" -H "$AUTH" -H "$JSON" -d '{"branding":{"logoUrl":"data:image/svg+xml;base64,AAAA"}}')
+expect_code 400 "$out" "inline SVG logoUrl rejected"
+out=$(curl -s -o /dev/null -w '%{http_code}' -X PUT "$BASE/api/config" -H "$AUTH" -H "$JSON" -d '{"branding":{"accentColor":"rgba(0,0,0,0)"}}')
+expect_code 400 "$out" "see-through accentColor rejected"
+echo "ok: brand asset and accent policy"
+
+# put back exactly what this host had, rather than clearing five fields it may have set
+curl -sf -X PUT "$BASE/api/config" -H "$AUTH" -H "$JSON" -d "{\"branding\":$brand_before}" > /dev/null
+curl -s "$BASE/api/config" -H "$AUTH" | grep -qF "$brand_before" || fail "branding restore did not put the stored block back"
+if [ "$host_branded" = no ]; then
+  # not just the wording: a bug that left accentColor set while the copy read right would pass
+  # on the copy alone.
+  curl -s "$BASE/a/does-not-exist-zzz" | grep -q -- '--accent: #c73d1d' || fail "branding reset did not restore the built-in accent"
+  curl -s "$BASE/a/ci-brand-md?raw=1" | grep -q -- '--link: #c73d1d' || fail "branding reset did not restore the built-in md link color"
+fi
+curl -sf -X DELETE "$BASE/api/artifacts/ci-brand-md" -H "$AUTH" > /dev/null
+curl -sf -X DELETE "$BASE/api/artifacts/ci-brand-jsx" -H "$AUTH" > /dev/null
+curl -sf -X DELETE "$BASE/api/artifacts/ci-brand-jsx-2" -H "$AUTH" > /dev/null
+echo "ok: branding reset to the built-in defaults"
+
 curl -sf -X DELETE "$BASE/api/artifacts/cap-one" -H "$AUTH" > /dev/null
 curl -sf -X DELETE "$BASE/api/artifacts/cap-pw" -H "$AUTH" > /dev/null
 
