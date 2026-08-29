@@ -210,7 +210,27 @@ test('what the viewer is told, per mode', () => {
   assert.equal(presentation.bar, true); // kept, because it holds the full-screen button
   assert.equal(presentation.fullscreen, true);
   assert.ok(presentation.hash.includes('view=Fit'));
-  assert.ok(presentation.hash.includes('toolbar=0'));
+  // T2.2.5: the browser's toolbar stays, because it carries the only page counter and the only
+  // prev/next a reader of a multi-page deck gets. The side panel still goes.
+  assert.ok(!presentation.hash.includes('toolbar=0'));
+  assert.ok(presentation.hash.includes('navpanes=0'));
+});
+
+// An <object> holding a PDF is not a document this page can drive: there is no API for the
+// current page, and reassigning the object's data to jump to #page=N blanks the viewer in
+// Chromium rather than moving it (checked in a browser). So the browser's own toolbar is the
+// only page navigation there is, and presentation mode has to leave it alone to have any.
+test('presentation mode leaves the reader a way to move page to page', () => {
+  const presentation = pdfViewerFlags({ mode: 'presentation', download: true });
+  assert.ok(!presentation.hash.includes('toolbar=0'), 'the page counter and prev/next live there');
+});
+
+// The one case that cannot have both: downloads off works by taking that toolbar away, since it
+// carries a download button and a print button. The setting wins, and the docs say so.
+test('downloads off still beats page navigation in presentation mode', () => {
+  const locked = pdfViewerFlags({ mode: 'presentation', download: false });
+  assert.ok(locked.hash.includes('toolbar=0'));
+  assert.ok(locked.hash.includes('navpanes=0'));
 });
 
 test('downloads off take the browser toolbar with them, in every mode', () => {

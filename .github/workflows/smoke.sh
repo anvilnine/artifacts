@@ -1787,6 +1787,11 @@ raw=$(curl -s "$BASE/a/ci-pdf?raw=1")
 printf '%s' "$raw" | grep -qF "mode-presentation" || fail "presentation mode did not take"
 printf '%s' "$raw" | grep -qF 'id="fullscreen"' || fail "presentation mode has no full-screen button"
 printf '%s' "$raw" | grep -qF 'view=Fit&' || fail "presentation mode does not fit a whole page"
+# T2.2.5: the browser's toolbar is the page counter and the prev/next of a deck, so presentation
+# leaves it up and only asks the side panel to go. Nothing here can build its own: an <object>
+# holding a PDF exposes no current page.
+if printf '%s' "$raw" | grep -qF 'toolbar=0'; then fail "presentation mode has no page navigation"; fi
+printf '%s' "$raw" | grep -qF 'navpanes=0' || fail "presentation mode keeps the side panel"
 echo "ok: pdf modes"
 
 # A patch names one key and leaves the other alone, and the row carries both.
@@ -1797,6 +1802,10 @@ raw=$(curl -s "$BASE/a/ci-pdf?raw=1")
 printf '%s' "$raw" | grep -qF "mode-presentation" || fail "a download patch reset the mode"
 if printf '%s' "$raw" | grep -qF 'id="download"'; then fail "downloads off still shows a download button"; fi
 if printf '%s' "$raw" | grep -qF 'id="open"'; then fail "downloads off still shows an open button"; fi
+# The one combination that cannot have both: downloads off works by taking the browser's toolbar
+# away, and that toolbar is also the page counter. The download setting wins, and formats.md
+# says so rather than leaving it to be discovered.
+printf '%s' "$raw" | grep -qF 'toolbar=0' || fail "presentation with downloads off kept the browser toolbar"
 # Viewer-level only, and the docs say so: the bytes are still one URL away.
 code=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/a/ci-pdf/file.pdf")
 expect_code 200 "$code" "the file with downloads off"
@@ -1857,7 +1866,7 @@ printf '%s' "$raw" | grep -qF 'aria-label="Download the PDF"' || fail "the Downl
 # The open parameters are joined with "&", which has to be escaped inside an attribute.
 curl -sf -X PATCH "$BASE/api/artifacts/ci-pdf" -H "$AUTH" -H "$JSON" -d '{"pdf":{"mode":"presentation"}}' > /dev/null
 raw=$(curl -s "$BASE/a/ci-pdf?raw=1")
-printf '%s' "$raw" | grep -qF 'file.pdf#view=Fit&amp;toolbar=0' || fail "the embed url is not escaped"
+printf '%s' "$raw" | grep -qF 'file.pdf#view=Fit&amp;navpanes=0' || fail "the embed url is not escaped"
 printf '%s' "$raw" | grep -qF 'aria-label="Show the document full screen"' || fail "the Full screen button has no accessible name"
 curl -sf -X PATCH "$BASE/api/artifacts/ci-pdf" -H "$AUTH" -H "$JSON" -d '{"pdf":null}' > /dev/null
 echo "ok: pdf toolbar accessible names and escaping"

@@ -147,13 +147,20 @@ The three modes:
 | Mode | The page |
 |---|---|
 | `standard` | Our toolbar (title, Open, Download) above the document, browser controls untouched. |
-| `presentation` | A whole page at a time on a dark backdrop, with a Full screen button in the toolbar. The browser's own toolbar is asked to go, so slides are not framed by chrome. |
+| `presentation` | A whole page at a time on a dark backdrop, with a Full screen button in the toolbar. The browser's side panel is asked to go; its toolbar stays, because that toolbar is the page counter and the prev/next of a multi-page deck. Chrome hides it in full screen, which is where a deck is read. |
 | `minimal` | The document, edge to edge. No toolbar of ours; the browser's is left alone, because with ours gone it is the only way left to reach the file. |
 
-Which of them hides the browser's own controls comes down to two things: `presentation` always
-asks for them to go, and `download: false` asks in every mode (the next section covers that half).
+Which of them hides the browser's own controls comes down to `download: false`, which asks in
+every mode (the next section covers that half). `presentation` asks only for the side panel to go.
 So `standard` with downloads off is the document alone, and `minimal` with downloads on still has
 the browser's toolbar over it.
+
+**Presentation with downloads off has no page navigation.** Hiding the file works by asking the
+browser's toolbar to go, and that toolbar is also the page counter and the prev/next. There is no
+way to keep one and not the other: an `<object>` holding a PDF exposes no current page to the
+page around it, and reassigning its `data` to jump to `#page=N` blanks the viewer in Chromium
+rather than moving it. A reader in that combination still moves with the arrow keys and the
+scroll wheel. If page navigation matters more than the buttons, leave `download` on.
 
 A bar of ours with nothing in it is never drawn. `standard` with downloads off has no buttons left,
 and inside the viewer frame the title is already in the frame's own bar, so the mode renders the
