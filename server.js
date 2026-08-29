@@ -1367,18 +1367,30 @@ app.set('case sensitive routing', true);
 // answering 401, and roughly 12 to 32 MB of RSS per request in flight. PDFs make a 9 to 10 MB
 // body an ordinary request rather than an odd one.
 //
-// So a caller nobody can name gets two things: a parser that will not buffer a publish-sized
-// body for them at all, and a budget for the big bodies it does accept. Neither reaches a
-// caller who is signed in. Both are keyed on the write methods rather than on a path prefix:
-// the first version gated `/api/artifacts` only, which left `POST /mcp`, `POST /api/keys`,
-// `PATCH /api/keys/:id` and `PUT /api/config` buffering 10 MB apiece before auth, and 40
-// anonymous 9 MB bodies to /mcp took RSS from 39,824 KB to 474,384 KB.
+// So a caller who cannot publish gets two things: a parser that will not buffer a publish-sized
+// body for them at all, and a budget for the big bodies it does accept. Neither reaches a caller
+// who may publish. Two earlier versions of this gate had holes worth naming, because both looked
+// like they covered everything:
 //
-// The budget is spent only by an anonymous caller. Spending it on everyone meant 20 anonymous
-// bodies from one address locked the operator out of publishing for a minute, and under
-// cloudflared (docs/deploy.md) every client shares one address, so that is one visitor and the
-// whole install. An anonymous caller cannot write anything here in the first place; the budget
-// is about what the server does before it says so.
+//   - Keyed on a path prefix, `/api/artifacts` only. That left `POST /mcp`, `POST /api/keys`,
+//     `PATCH /api/keys/:id` and `PUT /api/config` buffering 10 MB apiece before auth, and 40
+//     anonymous 9 MB bodies to /mcp took RSS from 39,824 KB to 474,384 KB.
+//   - Keyed on the write methods (POST/PUT/PATCH/DELETE). body-parser has no method filter: it
+//     reads a body from any request that carries one and matches the content type, `GET`
+//     included. So the gate returned early on a `GET`, nothing marked the request, and the
+//     parser pick fell through to the 10 MB one. Measured with no credential at all, 40
+//     concurrent 9 MB bodies: `GET /healthz` 89,280 -> 580,960 KB, `GET /api/artifacts`
+//     109,328 -> 592,256 KB, `GET /robots.txt` 107,728 -> 597,280 KB, `OPTIONS /api/artifacts`
+//     109,984 -> 769,120 KB. An unauthenticated OOM of the whole install on the healthcheck.
+//
+// So it keys on what body-parser itself keys on: does the request carry a body. That still keeps
+// identify() off the serve path, where a `GET /a/:slug` carries no body and no header to read.
+//
+// The budget is spent only by a caller who cannot publish. Spending it on everyone meant 20
+// anonymous bodies from one address locked the operator out of publishing for a minute, and
+// under cloudflared (docs/deploy.md) every client shares one address, so that is one visitor and
+// the whole install. A caller who cannot publish cannot write anything here in the first place;
+// the budget is about what the server does before it says so.
 //
 // This is one process, like the other two limiters. It pairs with a CDN or edge limit
 // (docs/deploy.md); it does not replace one.
@@ -1388,25 +1400,35 @@ const publishLimiter = createRateLimiter({ windowMs: 60_000, max: 20 });
 // The body's declared size. A chunked body does not declare one, and it is not counted here:
 // counting it as big charged a client that streams a 36 byte body the full publish budget, and
 // counting it as small would let the flood back in through one header. What bounds it instead
-// is the parser below, which stops reading an anonymous body at BIG_BODY_BYTES whether or not
+// is the parser below, which stops reading a capped body at BIG_BODY_BYTES whether or not
 // a Content-Length said so. No length and no transfer-encoding means no body.
 function declaredBodySize(req) {
   const len = Number(req.headers['content-length']);
   return Number.isFinite(len) ? len : 0;
 }
 
-// The methods express.json() will read a body for. DELETE is in the list because the parser
-// buffers its body too, even though no route here reads one.
-function isWrite(req) {
-  return req.method === 'POST' || req.method === 'PUT' ||
-    req.method === 'PATCH' || req.method === 'DELETE';
+// Does this request carry a body at all? This is the same question body-parser asks, and asking
+// a different one is what left the flood open on `GET`: the method says nothing about whether
+// there are bytes to buffer.
+function hasBody(req) {
+  return req.headers['content-length'] !== undefined ||
+    req.headers['transfer-encoding'] !== undefined;
 }
 
 app.use((req, res, next) => {
-  if (!isWrite(req)) return next();
+  if (!hasBody(req)) return next();
+  // Publish authority, not mere identity. A read key is the weakest credential an operator can
+  // issue, and it exists to be handed to something they do not fully trust; extending it a 10 MB
+  // buffer meant 40 concurrent 9 MB bodies under a read key took RSS from 109,792 KB to
+  // 565,584 KB, every one of them answering 403 after the buffering was done. Nothing legitimate
+  // needs a body over 256 kB below publish scope: every route that takes one is requireAuth
+  // ('publish') or stricter, the credential routes have their own 16 kB parser, and the one
+  // route a read key may reach with a body, POST /mcp, re-checks scope per tool below.
+  //
   // Stashed for the parser pick below, which asks the same question one middleware later.
-  req.anonymousWrite = !identify(req);
-  if (!req.anonymousWrite) return next();
+  const who = identify(req);
+  req.smallBody = !who || !hasScope(who.scopes, 'publish');
+  if (!req.smallBody) return next();
   if (declaredBodySize(req) < BIG_BODY_BYTES) return next();
   const key = clientIp(req);
   const gate = publishLimiter.check(key);
@@ -1421,23 +1443,23 @@ app.use((req, res, next) => {
 // Body parsing runs before routing, so an unauthenticated caller could make the server
 // parse 10 MB of JSON on /api/auth/login before the rate limiter ever looked at them.
 // Credential routes take a username, a password, or a slug — 16 kB is generous — so they
-// get their own small parser. Every other anonymous write gets the big-body line as its
-// limit: no route here takes a big body without a credential, so 256 kB is more than any of
-// them needs, and body-parser stops reading at the cap rather than buffering to the end.
-// A caller who is signed in keeps the publish-sized limit.
+// get their own small parser. Every other request from a caller who cannot publish gets the
+// big-body line as its limit: no route here takes a big body below publish scope, so 256 kB is
+// more than any of them needs, and body-parser stops reading at the cap rather than buffering to
+// the end. A caller who may publish keeps the publish-sized limit.
 //
 // The credential test lowercases the path rather than reading it as sent. Case sensitive
 // routing means `/API/auth/login` matches no route and 404s, but this comparison runs before
 // routing, and a 404 that buffered 10 MB first is still the flood.
 const jsonPublish = express.json({ limit: '10mb' });
 const jsonCredential = express.json({ limit: '16kb' });
-const jsonAnonymous = express.json({ limit: BIG_BODY_BYTES });
+const jsonSmall = express.json({ limit: BIG_BODY_BYTES });
 app.use((req, res, next) => {
   const path = req.path.toLowerCase();
   const credential = path.startsWith('/api/auth/') ||
     (path.startsWith('/a/') && path.endsWith('/unlock'));
   if (credential) return jsonCredential(req, res, next);
-  return (req.anonymousWrite ? jsonAnonymous : jsonPublish)(req, res, next);
+  return (req.smallBody ? jsonSmall : jsonPublish)(req, res, next);
 });
 
 // Whole domain is non-crawlable.

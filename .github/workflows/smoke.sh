@@ -2265,6 +2265,26 @@ bigbody=$(mktemp)
 node -e 'process.stdout.write(JSON.stringify({content:"x".repeat(400000),type:"html"}))' > "$bigbody"
 floodcodes=$(mktemp)
 floodheaders=$(mktemp)
+floodbody=$(mktemp)
+
+# The gate used to key on the method, and body-parser has no method filter: it reads a body from
+# any request that carries one and matches the content type. So a GET with a body skipped the
+# gate and got the 10 MB parser, and 40 concurrent 9 MB bodies to GET /healthz with no credential
+# at all took RSS from 89,280 KB to 580,960 KB. The healthcheck endpoint, unauthenticated.
+code=$(curl -s -o "$floodbody" -w '%{http_code}' -X GET "$BASE/healthz" -H "$JSON" \
+  --data-binary "@$bigbody")
+expect_code 413 "$code" "a GET carrying a body is capped like any other body"
+
+# A read key is the weakest credential an operator can issue. It gets the same small parser: it
+# cannot publish, so it has no use for a 10 MB buffer, and it used to get one and then a 403.
+resp=$(curl -s -X POST "$BASE/api/keys" -H "$AUTH" -H "$JSON" -d '{"name":"ci-flood-read","scopes":["read"]}')
+floodreadkey=$(printf '%s' "$resp" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>process.stdout.write(JSON.parse(s).key))')
+floodreadid=$(printf '%s' "$resp" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>process.stdout.write(JSON.parse(s).id))')
+code=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/api/artifacts" -H "$JSON" \
+  -H "Authorization: Bearer $floodreadkey" --data-binary "@$bigbody")
+expect_code 413 "$code" "a read-scope key gets the small parser, not the publish-sized one"
+curl -sf -X DELETE "$BASE/api/keys/$floodreadid" -H "$AUTH" > /dev/null
+
 for n in $(seq 1 25); do
   curl -s -o /dev/null -w '%{http_code}\n' -X POST "$BASE/api/artifacts" -H "$JSON" \
     --data-binary "@$bigbody" >> "$floodcodes" &
@@ -2278,11 +2298,16 @@ curl -s -D "$floodheaders" -o /dev/null -X POST "$BASE/api/artifacts" -H "$JSON"
   --data-binary "@$bigbody"
 grep -qi '^Retry-After:' "$floodheaders" || fail "the 429 does not say when to retry"
 echo "ok: the publish 429 carries Retry-After"
+# And the budget counts a GET the same way, so the flood cannot come back through a method the
+# gate does not look at. This IP has already spent it, so one request is enough to show it.
+code=$(curl -s -o /dev/null -w '%{http_code}' -X GET "$BASE/healthz" -H "$JSON" \
+  --data-binary "@$bigbody")
+expect_code 429 "$code" "a GET with a large body spends the same budget"
 # A normal publish is a few kB and never touches the budget, even now that this IP has spent it.
 code=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/api/artifacts" -H "$AUTH" -H "$JSON" \
   -d '{"content":"<h1>after the flood</h1>","type":"html","slug":"ci-flood","visibility":"public"}')
 expect_code 201 "$code" "an ordinary publish after the flood"
 curl -sf -X DELETE "$BASE/api/artifacts/ci-flood" -H "$AUTH" > /dev/null
-rm "$bigbody" "$floodcodes" "$floodheaders"
+rm "$bigbody" "$floodcodes" "$floodheaders" "$floodbody"
 
 echo "all smoke tests passed"
