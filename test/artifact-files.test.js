@@ -4,7 +4,15 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { dropStaleObjects, ownedKeys, staleKeys, SOURCE_EXT } from '../lib/artifact-files.js';
+import {
+  dropOrphanObjects,
+  dropStaleObjects,
+  orphanKeys,
+  ownedKeys,
+  staleKeys,
+  sweepOrphans,
+  SOURCE_EXT,
+} from '../lib/artifact-files.js';
 
 const TYPES = ['html', 'jsx', 'tsx', 'md', 'redirect', 'pdf'];
 
@@ -156,4 +164,95 @@ test('a delete that throws is swallowed and does not stop the rest', async () =>
 test('a backend with no delete does not sink the write', async () => {
   const dropped = await dropStaleObjects({}, 'conv', 'html', 'md');
   assert.deepEqual(dropped, []);
+});
+
+// A namespace that collected orphans before the type-change cleanup landed, plus the store
+// calls a sweep makes: which artifacts exist, which keys are really there, and a delete.
+function memStore(namespaces) {
+  const files = new Set();
+  const metas = [];
+  for (const [slug, { type, keys }] of Object.entries(namespaces)) {
+    const record = type === 'unreadable' ? 'half a record' : JSON.stringify({ slug, type });
+    metas.push({ slug, buffer: Buffer.from(record) });
+    for (const name of keys) files.add(`${slug}/${name}`);
+  }
+  return {
+    files,
+    async listMetas() {
+      return metas;
+    },
+    async head(key) {
+      return files.has(key) ? { size: 1 } : null;
+    },
+    async delete(key) {
+      files.delete(key);
+    },
+  };
+}
+
+test('orphanKeys names every content key the type does not own', () => {
+  assert.deepEqual(orphanKeys('s', 'md').sort(), [
+    's/index.html',
+    's/source.html',
+    's/source.jsx',
+    's/source.pdf',
+    's/source.tsx',
+    's/source.url',
+  ]);
+  // html owns both of the two it would otherwise be asked about.
+  assert.ok(!orphanKeys('s', 'html').includes('s/index.html'));
+  assert.ok(!orphanKeys('s', 'html').includes('s/source.html'));
+});
+
+// A zip serves out of site/ and no API path converts it, so a sweep that treated its files as
+// orphans would take a live site apart. Same for a record this build cannot read.
+test('orphanKeys says nothing about a type it does not know', () => {
+  assert.deepEqual(orphanKeys('s', 'zip'), []);
+  assert.deepEqual(orphanKeys('s', undefined), []);
+  assert.deepEqual(orphanKeys('s', 'constructor'), []);
+});
+
+// Half one: copySlug carries every content object under the namespace, orphans included, so a
+// duplicate of an artifact converted before the cleanup existed starts life holding dead bytes.
+test('a duplicate is pruned to what its type owns', async () => {
+  const storage = stubStorage();
+  const dropped = await dropOrphanObjects(storage, 'copy', 'md');
+  assert.deepEqual(storage.asked.sort(), orphanKeys('copy', 'md').sort());
+  assert.deepEqual(dropped.sort(), orphanKeys('copy', 'md').sort());
+  const zip = stubStorage();
+  assert.deepEqual(await dropOrphanObjects(zip, 'copy', 'zip'), []);
+  assert.deepEqual(zip.asked, []);
+});
+
+// Half two: the one-shot cleanup for installs that already have orphans on disk.
+test('a sweep names what it would remove and removes nothing until asked', async () => {
+  const store = memStore({
+    old: { type: 'md', keys: ['meta.json', 'index.html', 'source.html', 'source.md'] },
+    fine: { type: 'html', keys: ['meta.json', 'index.html', 'source.html'] },
+  });
+  const found = await sweepOrphans(store);
+  assert.deepEqual(found.sort(), ['old/index.html', 'old/source.html']);
+  assert.ok(store.files.has('old/index.html'));
+  assert.ok(store.files.has('old/source.html'));
+});
+
+test('a sweep with apply removes them, and a second run finds nothing', async () => {
+  const store = memStore({
+    old: { type: 'md', keys: ['meta.json', 'index.html', 'source.html', 'source.md'] },
+  });
+  assert.deepEqual((await sweepOrphans(store, { apply: true })).sort(), [
+    'old/index.html',
+    'old/source.html',
+  ]);
+  assert.deepEqual([...store.files].sort(), ['old/meta.json', 'old/source.md']);
+  assert.deepEqual(await sweepOrphans(store, { apply: true }), []);
+});
+
+test('a sweep leaves a zip site and a record it cannot read alone', async () => {
+  const store = memStore({
+    site: { type: 'zip', keys: ['meta.json', 'index.html', 'site/index.html'] },
+    broken: { type: 'unreadable', keys: ['meta.json', 'index.html', 'source.url'] },
+  });
+  assert.deepEqual(await sweepOrphans(store, { apply: true }), []);
+  assert.equal(store.files.size, 6);
 });

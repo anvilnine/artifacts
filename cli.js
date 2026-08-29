@@ -5,7 +5,9 @@ import { parseArgs } from 'node:util';
 
 import AdmZip from 'adm-zip';
 
+import { sweepOrphans } from './lib/artifact-files.js';
 import { artifactExpired } from './lib/expiry.js';
+import { createStorage } from './storage/index.js';
 
 const USAGE = `artifacts — publish to a self-hosted artifacts instance
 
@@ -32,6 +34,9 @@ Usage:
   artifacts keys list
   artifacts keys create <name> [--scopes read,publish,full] [--expires ISO]
   artifacts keys revoke <id>
+
+Maintenance (runs on the server host against its own storage, not over HTTP):
+  artifacts sweep [--apply]
 
 Connection (flags override env):
   --url   server origin        [env: ARTIFACTS_URL]
@@ -62,6 +67,7 @@ const { values: opts, positionals } = parseArgs({
     'frame-enabled': { type: 'string' },
     'frame-default': { type: 'string' },
     output: { type: 'string', short: 'o' },
+    apply: { type: 'boolean' },
     png: { type: 'boolean' },
     scale: { type: 'string' },
     margin: { type: 'string' },
@@ -80,7 +86,9 @@ if (opts.help || !command) {
 const url = (opts.url || process.env.ARTIFACTS_URL || '').replace(/\/$/, '');
 const key = opts.key || process.env.ARTIFACTS_API_KEY;
 
-if (!url) fail('server URL required: pass --url or set ARTIFACTS_URL');
+// Every verb but `sweep` talks to a running instance. `sweep` opens the configured store
+// directly, so it needs the server's env (DATA_DIR / STORAGE_BACKEND) and no URL at all.
+if (!url && command !== 'sweep') fail('server URL required: pass --url or set ARTIFACTS_URL');
 
 async function api(method, apiPath, { body, contentType, auth = true } = {}) {
   if (auth && !key) fail('API key required: pass --key or set ARTIFACTS_API_KEY');
@@ -361,6 +369,20 @@ switch (command) {
     need(1, '<slug>');
     await apiJson('DELETE', `/api/artifacts/${args[0]}`);
     console.log(`${args[0]} deleted`);
+    break;
+  }
+
+  // The one-time cleanup for an install that has been converting artifacts since before the
+  // server pruned the old type's files. Prints what it would remove and removes nothing;
+  // --apply removes it, the way the destructive verbs above take an explicit argument rather
+  // than acting on a bare slug. Safe to run more than once.
+  case 'sweep': {
+    const apply = Boolean(opts.apply);
+    const storage = await createStorage();
+    const keys = await sweepOrphans(storage, { apply });
+    for (const key of keys) console.log(`${apply ? 'removed' : 'would remove'} ${key}`);
+    const count = `${keys.length} orphaned file${keys.length === 1 ? '' : 's'}`;
+    console.log(apply ? `${count} removed` : `${count} found; re-run with --apply to remove them`);
     break;
   }
 

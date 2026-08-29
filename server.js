@@ -31,7 +31,7 @@ import {
   validateCredentials,
   parseKeyInput,
 } from './lib/auth.js';
-import { SOURCE_EXT, dropStaleObjects } from './lib/artifact-files.js';
+import { SOURCE_EXT, dropOrphanObjects, dropStaleObjects } from './lib/artifact-files.js';
 import { createConfigStore } from './lib/config.js';
 import { ApiError, clientFacingError } from './lib/errors.js';
 import { artifactExpired } from './lib/expiry.js';
@@ -1014,6 +1014,12 @@ async function copyArtifact(sourceSlug, targetSlug, body, keyId) {
 
   // Copy content first; meta.json is written LAST as the commit marker (copySlug skips it).
   await storage.copySlug(sourceSlug, targetSlug);
+  // copySlug carries every content object under the namespace and prunes nothing, so a source
+  // that collected orphans before the type-change cleanup existed hands them to the copy. A
+  // brand-new slug should not start life holding dead bytes, and the git backend would commit
+  // them. Before the meta write, so the commit marker lands on a namespace that is already
+  // clean, and before flush, so git makes one commit.
+  await dropOrphanObjects(storage, targetSlug, source.type);
 
   const meta = {
     slug: targetSlug,
