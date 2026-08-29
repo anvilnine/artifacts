@@ -491,6 +491,11 @@
   .qrbox .qrlinks { display: flex; gap: 8px; }
   .qrbox .qrlinks .act { text-decoration: none; }
   .qrbox .qrfail { font-size: 13px; color: var(--taupe); text-align: center; line-height: 1.5; }
+  /* Embed dialog: the snippet is code, so it reads in the same mono field the compose box uses. */
+  .embedbox { display: flex; flex-direction: column; gap: 10px; }
+  .embedbox textarea { width: 100%; font-family: var(--f-mono); font-size: 12px; line-height: 1.5; resize: vertical; }
+  .embedbox .embedlinks { display: flex; gap: 8px; }
+  .embedbox .embedlinks .act { text-decoration: none; }
   .dialog .foot { display: flex; justify-content: flex-end; gap: 8px; margin-top: 14px; }
   .dialog button.ghost {
     background: transparent; color: var(--taupe); border: 1px solid var(--rim); font-weight: 600;
@@ -1210,6 +1215,82 @@
     dialog({
       title: 'QR code for “' + a.slug + '”',
       body: 'Points at the permanent link, so it keeps working after an update.' + warning,
+      node: box,
+      hideConfirm: true,
+      cancelText: 'Close',
+    });
+  }
+
+  // The embed snippet. An artifact answers with no frame-ancestors and no X-Frame-Options, so
+  // any page may already frame one; what a person needs from here is the tag to paste and the
+  // two cases where that tag shows nothing. Built from the server's BASE_URL for the reason the
+  // QR dialog is: the origin an operator has this console open on is not always the origin
+  // artifact links use, and this string leaves the building.
+  function openEmbed(a) {
+    const path = '/a/' + a.slug + (a.type === 'zip' ? '/' : '') + '?raw=1';
+    // ?raw=1 rather than the bare link: a frame load already gets the bare page through
+    // Sec-Fetch-Dest, but a browser that does not send that header would get the toolbar page,
+    // which refuses to be framed, and the embed would come up empty for those readers only.
+    const src = serverBaseUrl + path;
+    // The frame's accessible name, so a screen reader announces the artifact instead of
+    // "iframe". It lands inside an attribute in text somebody pastes, so the characters that
+    // could close that attribute go first.
+    const label = String(a.title || a.slug).replace(/["'<>&]/g, ' ').replace(/\s+/g, ' ').trim();
+    const snippet = '<iframe src="' + src + '" title="' + (label || a.slug)
+      + '" width="100%" height="600" style="border:0" loading="lazy"></iframe>';
+
+    const box = document.createElement('div');
+    box.className = 'embedbox';
+
+    const code = document.createElement('textarea');
+    code.readOnly = true;
+    code.rows = 4;
+    code.spellcheck = false;
+    code.value = snippet;
+    code.setAttribute('aria-label', 'Embed code for ' + a.slug);
+    // Clicking into it selects the whole tag, so the keyboard route to a copy is one shortcut
+    // rather than a drag across three wrapped lines.
+    code.addEventListener('focus', () => code.select());
+    box.appendChild(code);
+
+    const links = document.createElement('div');
+    links.className = 'embedlinks';
+    const copyBtn = actBtn('Copy snippet', '');
+    copyBtn.addEventListener('click', async () => {
+      try {
+        await navigator.clipboard.writeText(snippet);
+        flash(copyBtn, 'Copied');
+      } catch {
+        // A denied clipboard leaves the text selected, which is the manual way to the same
+        // place, so the button says what happened rather than failing silently.
+        code.focus();
+        flash(copyBtn, 'Copy it by hand');
+      }
+    });
+    links.appendChild(copyBtn);
+    const open = document.createElement('a');
+    open.className = 'act';
+    open.href = path;
+    open.target = '_blank';
+    open.rel = 'noopener';
+    open.textContent = 'Open what it loads';
+    links.appendChild(open);
+    box.appendChild(links);
+
+    // Two of the three visibilities cannot be embedded at all, and both fail as an empty frame
+    // rather than an error, so the dialog says it here instead of leaving someone to debug
+    // their own page. The cookie half matters: pasting a ?k= link does not rescue it, because a
+    // browser will not set a same-site cookie inside another site's frame.
+    const warning = a.visibility === 'private'
+      ? ' This artifact is private, so another site\'s frame gets a 404 and shows nothing. A ?k= link does not change that: the unlock cookie is same-site, so a browser drops it inside someone else\'s page. Make it public to embed it.'
+      : a.visibility === 'password'
+        ? ' This artifact is password-protected, so another site\'s frame shows nothing. The unlock page refuses to be framed on purpose, so nobody can put your password box inside a page you do not control.'
+        : '';
+    dialog({
+      title: 'Embed “' + a.slug + '”',
+      body: 'Paste this where the artifact should appear. It loads the page without the viewer'
+        + ' toolbar and keeps working after an update. Change width and height to suit the page'
+        + ' you paste it into.' + warning,
       node: box,
       hideConfirm: true,
       cancelText: 'Close',
@@ -2018,6 +2099,11 @@
         menuItem(menu, 'Duplicate…', '', () => openDuplicate(a));
 
         menuItem(menu, 'QR code…', '', () => openQr(a));
+
+        // A redirect answers 301 with no page of its own, so a frame around one either lands on
+        // the target site or comes up empty when that site refuses to be framed. There is
+        // nothing here to embed, the way there is nothing to frame.
+        if (a.type !== 'redirect') menuItem(menu, 'Embed…', '', () => openEmbed(a));
 
         // A hand-edited meta.json can hold anything here, and the row menu is the screen the
         // operator opens to clear it. slice() on a number or an object throws inside the fill

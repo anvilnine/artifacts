@@ -99,6 +99,29 @@ if echo "$body" | grep -q '<iframe'; then fail "frame:false still framed"; fi
 echo "$body" | grep -q "<h1>smoke</h1>" || fail "frame:false body missing content"
 echo "ok: per-item frame off"
 curl -sf -X PATCH "$BASE/api/artifacts/ci-smoke" -H "$AUTH" -H "$JSON" -d '{"frame":null}' > /dev/null
+# T2.5.2: the contract the dashboard's Embed snippet and docs/embedding.md rest on. Three things
+# have to hold at once for a paste into somebody else's page to work. The artifact sends no
+# frame-ancestors and no X-Frame-Options, so a browser lets any page frame it. A frame load with
+# no ?raw=1 still gets the bare artifact, because Sec-Fetch-Dest says it is a frame, so an embed
+# never stacks a second toolbar. And the toolbar page itself refuses to be framed, which is what
+# keeps the unlock prompt (same CSP) out of a page a viewer does not control. Headers go to a
+# file rather than a pipe: grep -q exits on the first match and would SIGPIPE curl under pipefail.
+embed_hdr=$(mktemp)
+curl -s -D "$embed_hdr" -o /dev/null "$BASE/a/ci-smoke?raw=1"
+if grep -qi '^x-frame-options' "$embed_hdr"; then fail "an artifact sends X-Frame-Options and cannot be embedded"; fi
+if grep -i '^content-security-policy' "$embed_hdr" | grep -qi 'frame-ancestors'; then
+  fail "an artifact's CSP names frame-ancestors and cannot be embedded"
+fi
+curl -s -D "$embed_hdr" -o /dev/null "$BASE/a/ci-smoke"
+grep -i '^content-security-policy' "$embed_hdr" | grep -qF "frame-ancestors 'none'" \
+  || fail "the viewer toolbar page can be framed"
+rm "$embed_hdr"
+embed_body=$(mktemp)
+curl -s -H 'Sec-Fetch-Dest: iframe' -o "$embed_body" "$BASE/a/ci-smoke"
+grep -q '<h1>smoke</h1>' "$embed_body" || fail "a frame load without ?raw=1 did not get the bare artifact"
+if grep -q '<iframe' "$embed_body"; then fail "a frame load got the toolbar page and would stack two frames"; fi
+rm "$embed_body"
+echo "ok: an artifact can be embedded on another site, its toolbar page cannot"
 
 # Writes to one slug run one at a time, and a write now has a ceiling: one that never comes back
 # gives the slug back after 30s and answers 503 rather than parking every later write on that
