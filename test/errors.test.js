@@ -8,6 +8,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { ApiError, StorageTimeoutError, clientFacingError } from '../lib/errors.js';
+import { UnsafeKeyError } from '../storage/index.js';
 
 // The error body-parser throws for a body JSON.parse refuses. Strict mode means `null`, `"x"`
 // and `5` land here too, not just broken syntax.
@@ -114,4 +115,16 @@ test('a storage call that ran out of time is a 503 the caller can act on', () =>
 test('any other 5xx still answers a bare 500', () => {
   assert.equal(clientFacingError(new ApiError(500, '/data/artifacts is full')), null);
   assert.equal(clientFacingError(new ApiError(503, 'the database is gone')), null);
+});
+
+// The local backend's realpath guard refuses a write through a symlinked slug directory. The
+// serve path maps that to a 404; the publish path had nothing for it, so an operator whose /data
+// held a symlinked slug got a bare "internal server error" with nothing in it to act on.
+test('a key that resolves outside the store is a 409 naming the slug', () => {
+  const answer = clientFacingError(new UnsafeKeyError('"sym/index.html" resolves outside storage root', 'sym/index.html'));
+  assert.equal(answer.status, 409);
+  assert.match(answer.message, /"sym"/);
+  assert.match(answer.message, /symlink/);
+  // A key-shape refusal from assertSafeKey carries no key, and still must not become a 500.
+  assert.equal(clientFacingError(new UnsafeKeyError('empty key')).status, 409);
 });

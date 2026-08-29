@@ -59,9 +59,16 @@
 // large zip deploy 503 while the extraction kept running.
 export const STORAGE_TIMEOUT_MS = 30_000;
 
-// A key/segment that fails validation. Callers map this to 404 (it only reaches a backend
-// via user-controlled zip sub-paths); it must never surface as a 500.
-export class UnsafeKeyError extends Error {}
+// A key/segment that fails validation, or one the local backend's realpath guard refuses on the
+// way to a write. The serve path maps it to 404; the write path maps it to 409 in
+// lib/errors.js, because a publish that lands on a symlinked slug directory is an operator
+// problem naming one slug, not an internal failure. `key` is set where the thrower knows it.
+export class UnsafeKeyError extends Error {
+  constructor(message, key) {
+    super(message);
+    this.key = key;
+  }
+}
 
 // NUL, other C0 control chars, and DEL — never legitimate in an artifact key.
 const CONTROL_RE = /[\x00-\x1f\x7f]/;

@@ -176,7 +176,11 @@ test('every brand logo is capped so a wide wordmark cannot push the page sideway
 test('the frame bar drops the product name when a logo is there to carry the brand', () => {
   const both = frameBrandSlots(brand({ productName: 'Dropkiln', logoUrl: '/a/brand/l.png' }));
   assert.match(both.BRAND, /<img/);
-  assert.ok(!both.BRAND.includes('Dropkiln'), 'the name repeats the logo');
+  // The name is not drawn twice, but it is the logo's alt: the wordmark is suppressed whenever a
+  // logo is set, so an empty alt left a screen reader with no publisher identity in the bar.
+  assert.match(both.BRAND, /alt="Dropkiln"/);
+  assert.ok(!/>[^<]*Dropkiln/.test(both.BRAND), 'the name is drawn twice');
+  assert.match(frameBrandSlots(brand({ logoUrl: '/a/brand/l.png' })).BRAND, /alt=""/);
 
   const nameOnly = frameBrandSlots(brand({ productName: 'Dropkiln' }));
   assert.match(nameOnly.BRAND, /Dropkiln/);

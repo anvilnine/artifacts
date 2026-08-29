@@ -31,13 +31,16 @@ come up empty for those readers and nobody else. `?raw=1` removes that whole cla
 The link keeps working after a `PUT`: the slug is the address, and the frame reloads the new
 content on the next view.
 
-## Only a public artifact can be embedded
+## Only a public artifact can be embedded on someone else's site
 
 | Visibility | In someone else's frame |
 |---|---|
 | `public` | Renders. |
 | `private` | A `404`, shown as an empty frame. |
 | `password` | Nothing. The unlock page refuses to be framed. |
+
+This table is about a page on another origin. Embedding a public artifact of yours inside another
+page **on this same host** is a different question, and the next section answers it.
 
 A `?k=` capability link in the `src` does not rescue a private artifact. The token exchange sets a
 per-slug unlock cookie, that cookie is `SameSite=Lax`, and a browser will not set or send a
@@ -67,7 +70,17 @@ Everything the server serves also carries `X-Robots-Tag: noindex, nofollow`, emb
 
 The artifact's own [Content Security Policy](api.md) travels with it into the frame, so an
 embedded artifact loads scripts from the same handful of CDNs it loads them from on its own URL.
-Embedding widens nothing.
+Embedding widens nothing across origins.
+
+**On one host it is not that flat.** Every artifact on an install is served from the one origin,
+and `ARTIFACT_CSP` carries `connect-src 'self'`, so script inside a public artifact can `fetch()`
+the body of a private or unlocked artifact on the same host and read it, using the visitor's own
+unlock cookie. That is not new to embedding, and it is not something a remote page can do: it
+takes script running on this origin, which means an artifact you published. But it does mean the
+guarantee reads "another site cannot widen anything", not "a public artifact cannot reach a
+private one". It holds outright once artifacts get their own origin per tenant
+(`<name>.dropkiln.app`), which is where the rename is going. Until then, treat script you publish
+as public as script that can read anything a visitor to this host can unlock.
 
 ## Checking one before you ship it
 

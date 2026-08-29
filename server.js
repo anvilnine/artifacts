@@ -2011,7 +2011,11 @@ app.get('/api/config', requireAuth('read'), (req, res) => {
 
 app.put('/api/config', requireAuth('full'), async (req, res, next) => {
   try {
-    res.json(await config.update(req.body));
+    const saved = await config.update(req.body);
+    // The dashboard shell is cached with the branding already filled in, so a save has to drop
+    // it or the console keeps serving the old name, logo and accent until a restart.
+    dropDashboardCache();
+    res.json(saved);
   } catch (err) {
     next(err);
   }
@@ -2552,8 +2556,10 @@ app.get('/favicon.ico', (req, res) => {
   const icon = dashboardFavicon(config.current.branding);
   if (!icon) return res.status(204).end();
   // no-cache, because a browser that cached the 204 or an old icon would otherwise sit on it
-  // for the rest of the session after the operator changes the branding.
-  res.set('Cache-Control', 'no-cache');
+  // for the rest of the session after the operator changes the branding. nosniff because these
+  // are operator-supplied bytes: DATA_IMAGE_RE already pins the type to one of four raster
+  // formats, so nothing here is reachable, and the header costs nothing.
+  res.set({ 'Cache-Control': 'no-cache', 'X-Content-Type-Options': 'nosniff' });
   if (icon.redirect) return res.redirect(302, icon.redirect);
   res.type(icon.contentType).send(icon.body);
 });
@@ -2566,11 +2572,35 @@ app.get('/healthz', (req, res) => {
   res.type('text/plain').send('ok');
 });
 
+// The dashboard shell with the branding filled in. 119 kB of template, refilled on every
+// request when this landed, plus express's ETag hashing the result: measured 1.85 ms of the
+// server's own time per unauthenticated GET /, where sendFile used to stream the file with a
+// stat-based ETag. The fill only changes when the config does, so it is cached and dropped when
+// the branding is saved.
+let dashboardPageCache = null;
+function dropDashboardCache() {
+  dashboardPageCache = null;
+}
+function dashboardPage() {
+  if (dashboardPageCache === null) {
+    const html = fillShell(DASHBOARD_SHELL, dashboardBrandSlots(config.current.branding));
+    // Set on the response below so express does not hash the body itself on every request. Same
+    // value while the page is the same page, which is what an ETag is for.
+    const tag = `W/"${crypto.createHash('sha1').update(html).digest('base64url')}"`;
+    dashboardPageCache = { html, tag };
+  }
+  return dashboardPageCache;
+}
+
 app.get('/', (req, res) => {
   res.set(APP_HEADERS);
-  // no-cache so a branding change shows on the next load rather than after a hard refresh.
-  res.set('Cache-Control', 'no-cache');
-  res.type('html').send(fillShell(DASHBOARD_SHELL, dashboardBrandSlots(config.current.branding)));
+  // no-store rather than no-cache: this is the one page carrying the admin session, and the
+  // reason no-cache was set here (a branding change showing on the next load) is served just as
+  // well by not writing it to disk at all.
+  res.set('Cache-Control', 'no-store');
+  const page = dashboardPage();
+  res.set('ETag', page.tag);
+  res.type('html').send(page.html);
 });
 
 // Which errors get to name themselves lives in lib/errors.js so a test can hand it the shapes

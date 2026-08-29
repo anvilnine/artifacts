@@ -147,7 +147,7 @@ The three modes:
 | Mode | The page |
 |---|---|
 | `standard` | Our toolbar (title, Open, Download) above the document, browser controls untouched. Inside the viewer frame this toolbar is dropped: see below. |
-| `presentation` | A whole page at a time on a dark backdrop, with a Full screen button in the toolbar. The browser's side panel is asked to go; its toolbar stays, because that toolbar is the page counter and the prev/next of a multi-page deck. Chrome hides it in full screen, which is where a deck is read. |
+| `presentation` | A whole page at a time on a dark backdrop, with a Full screen button in the toolbar. The browser's side panel is asked to go; its toolbar stays, because that toolbar is the page counter of a multi-page deck (Chromium draws a typeable page field and the total, no prev/next buttons). Chrome hides it in full screen, which is where a deck is read. |
 | `minimal` | The document, edge to edge. No toolbar of ours; the browser's is left alone, because with ours gone it is the only way left to reach the file. |
 
 Which of them hides the browser's own controls comes down to `download: false`, which asks in
@@ -155,9 +155,9 @@ every mode (the next section covers that half). `presentation` asks only for the
 So `standard` with downloads off is the document alone, and `minimal` with downloads on still has
 the browser's toolbar over it.
 
-**Presentation with downloads off has no page navigation.** Hiding the file works by asking the
-browser's toolbar to go, and that toolbar is also the page counter and the prev/next. There is no
-way to keep one and not the other: an `<object>` holding a PDF exposes no current page to the
+**Presentation with downloads off has no page counter.** Hiding the file works by asking the
+browser's toolbar to go, and that toolbar is also the page counter. There is no way to keep one
+and not the other: an `<object>` holding a PDF exposes no current page to the
 page around it, and reassigning its `data` to jump to `#page=N` blanks the viewer in Chromium
 rather than moving it. A reader in that combination still moves with the arrow keys and the
 scroll wheel. If page navigation matters more than the buttons, leave `download` on.
@@ -175,7 +175,9 @@ goes, and the framed view is two bars, about 100px.
 
 Nothing is taken away. Unframed (`?raw=1`, or the frame off) our bar is the only one there is and
 it renders in full. `presentation` keeps its bar framed or not, because the Full screen button
-lives nowhere else. `minimal` never had one. And a browser that refuses to render the PDF still
+lives nowhere else, so a framed deck still arrives under the whole three bar stack: the frame's
+44px, ours 44px and the browser's 56px, the same 144px `standard` no longer pays. `minimal` never
+had one. And a browser that refuses to render the PDF still
 gets Open and Download from the fallback in the middle of the page.
 
 An artifact with both defaults stores nothing at all, so `GET /api/artifacts` shows a `pdf` field
