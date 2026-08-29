@@ -66,7 +66,7 @@ rendered before the block existed.
 | `productName` | Plain text, up to 40 chars. Whitespace collapses. | Not a string, over 40 chars, or containing `<` / `>`. |
 | `logoUrl` | A same-origin path starting with a single `/`, or a base64 `data:` URI for a `png`, `jpeg`, `webp` or `gif`. Up to 8192 chars. | Any `http://` or `https://` URL, a `data:image/svg+xml` URI, any other `data:` type, a `javascript:` URL, a protocol-relative `//host/x`, a relative `assets/x`, or quotes, angle brackets, backslashes or spaces anywhere in it. |
 | `faviconUrl` | Same rules as `logoUrl`. | Same as `logoUrl`. |
-| `accentColor` | A fully opaque hex color (`#rgb`, `#rgba`, `#rrggbb`, `#rrggbbaa`) or `rgb()`, `rgba()`, `hsl()`, `hsla()` color. Both argument forms work: `rgb(29, 78, 216)` and `rgb(29 78 216 / 100%)`. | Anything else, color names included, plus any color with an alpha below 1. The value lands inside a `<style>` block, so it is parsed rather than pattern-matched: a shape-only check let `rgb(--)` and `rgba(1,2)` through, and a color the browser cannot parse voids the whole declaration it sits in. |
+| `accentColor` | A fully opaque hex color (`#rgb`, `#rgba`, `#rrggbb`, `#rrggbbaa`) or `rgb()`, `rgba()`, `hsl()`, `hsla()` color that reads at 3:1 against both `#0b0d0f` and white. Both argument forms work: `rgb(29, 78, 216)` and `rgb(29 78 216 / 100%)`. | Anything else, color names included, plus any color with an alpha below 1, plus any color under 3:1 on the dark console or on the light card. The value lands inside a `<style>` block, so it is parsed rather than pattern-matched: a shape-only check let `rgb(--)` and `rgba(1,2)` through, and a color the browser cannot parse voids the whole declaration it sits in. |
 | `footerText` | Plain text, up to 160 chars. Whitespace collapses. | Not a string, over 160 chars, or containing `<` / `>`. |
 
 The error message names the field it refused, for example `branding.accentColor must be a hex color
@@ -119,12 +119,21 @@ the 404 says "Artifact unavailable" and the gate says "Protected artifact" on ev
 because "Dropkiln unavailable" reads as "the service is down" rather than "this link is wrong".
 
 `accentColor` takes over every accent role in a shell at once, the two translucent washes
-included, which `color-mix()` derives from the same value. Each shell carries a light and a dark
-value for its accent, and the dark one is derived as `color-mix(in srgb, <accent> 70%, white)`,
-because one value cannot pass contrast on both a white card and a `#0b0d0f` one. The unlock
-button's label is picked the same way, from the accent's luminance: `#0b0d0f` on a light accent,
-`#ffffff` on a dark one. The error reds are not accent roles: they say "this failed", and a
-blue-branded instance should not get a blue error message.
+included, which `color-mix()` derives from the same value, and it drives the operator console as
+well. Each shell carries a light and a dark value for its accent, and the dark one is derived as
+`color-mix(in srgb, <accent> 70%, white)`. The unlock button's label is picked from the accent's
+luminance, `#0b0d0f` on a light accent and `#ffffff` on a dark one, and the hover fill gets its
+own label the same way, because hovering lightens the fill. The error reds are not accent roles:
+they say "this failed", and a blue-branded instance should not get a blue error message.
+
+**The accent has to read at 3:1 on both grounds, and a value that does not is refused.** One
+value serves the console and the dark half of every shell on `#0b0d0f`, and the light half of
+every shell on a white card, and it fills buttons and paints the brand mark on both. `#050505`
+gave a 1.05:1 button fill on the console, `#fafafa` a 1.04:1 status line on the card: a control
+the reader cannot see. 3:1 is the WCAG line for a component boundary. It leaves a band of
+mid-tones (the built-in `#f0502a` is 5.46:1 on the console and 3.57:1 on the card) and it does
+turn down some colors an operator may think of as ordinary, `#1d4ed8` among them at 2.90:1 on the
+console. The refusal prints both numbers and says whether to go lighter or darker.
 
 The 404, password, markdown and frame pages render per request, so a `PUT` shows on the next
 view. `jsx` artifacts are built once, at publish time, and keep the branding they were built with

@@ -196,7 +196,14 @@ export async function create() {
       if (res.status === 404) return null;
       if (!res.ok) throw new Error(`s3 head ${key}: ${res.status}`);
       const len = res.headers.get('content-length');
-      return { size: len == null ? undefined : Number(len) };
+      // Last-Modified is what the sweep's age floor reads (lib/artifact-files.js). Every s3 and
+      // s3-compatible store sends it on a HEAD; a store that does not leaves mtime undefined and
+      // the sweep keeps the file rather than guessing.
+      const modified = Date.parse(res.headers.get('last-modified') || '');
+      return {
+        size: len == null ? undefined : Number(len),
+        ...(Number.isFinite(modified) ? { mtime: modified } : {}),
+      };
     },
 
     async get(key, { range } = {}) {

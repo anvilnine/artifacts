@@ -69,8 +69,9 @@ It is the one verb that does not talk to a running server. It opens the same sto
 uses, so run it on the host with the server's environment:
 
 ```bash
-DATA_DIR=/data node cli.js sweep            # prints what it would remove, removes nothing
-DATA_DIR=/data node cli.js sweep --apply    # removes it
+DATA_DIR=/data node cli.js sweep                     # prints what it would remove, removes nothing
+DATA_DIR=/data node cli.js sweep --apply             # removes it
+DATA_DIR=/data node cli.js sweep --apply --older-than 1   # and lower the age floor to 1 hour
 # in the container:
 docker compose exec app node cli.js sweep --apply
 ```
@@ -78,9 +79,21 @@ docker compose exec app node cli.js sweep --apply
 Set `STORAGE_BACKEND` and that backend's variables the same way if you are not on the default
 local store. Run it once; it is safe to run again, and a second run finds nothing. It reads
 each `meta.json` and never writes one, and it only removes keys the artifact's own type does
-not own, so a zip site and a record it cannot parse are left alone. Publishing while it runs is
-fine, though a conversion landing in the same second as the sweep is one case it cannot see, so
-the calm moment is the better one.
+not own, so a zip site and a record it cannot parse are left alone.
+
+**Publishing while it runs is safe.** The sweep reads every record up front, so a `PUT` that
+converts an artifact after that read used to have it delete the files the new type had just
+written, leaving a listed artifact with a `meta.json` and no body. Two things stop that now. A
+file is only removed once it is older than 24 hours, which the orphans this verb exists for
+always are and a file a conversion just wrote never is; and the record is read again immediately
+before each delete, so a conversion that landed mid-run is seen. Anything held back is listed
+with the reason, so `--apply` says what it kept as well as what it removed.
+
+`--older-than <hours>` moves that floor, and `--older-than 0` turns it off. Two reasons to reach
+for it. One: the orphans are known-old and you want them gone now, on a host nobody is publishing
+to. Two: the `sqlite` and `postgres` stores keep no timestamp, so the sweep cannot tell how old a
+file is there and keeps everything by default; `--older-than 0` is the only way to sweep those,
+and on those two the mid-run re-read is the only guard left, so run it when nothing is publishing.
 
 ## API keys
 

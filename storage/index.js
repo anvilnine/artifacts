@@ -11,7 +11,10 @@
 //   interface Storage {
 //     getBuffer(key)            -> Buffer | null                 // small reads (meta.json)
 //     get(key, { range })       -> { stream, size } | null       // streamed body for serving
-//     head(key)                 -> { size } | null               // existence / size, no body
+//     head(key)                 -> { size, mtime? } | null       // existence / size, no body
+//                                                                // mtime is epoch ms when the
+//                                                                // store can say; the sweep's
+//                                                                // age floor reads it
 //     put(key, data, { contentType })                            // MUST await a durable, whole-object write
 //     listMetas()               -> [{ slug, buffer }]            // every artifact's meta.json
 //     move(oldSlug, newSlug)                                     // rename a whole namespace
@@ -48,9 +51,12 @@
 // How long one storage call gets to answer. Longer than a healthy call on any of the five
 // backends, and shorter than the default client timeout in curl, most HTTP libraries and a
 // browser fetch, so a caller waiting on a stalled backend hears a code from this server rather
-// than watching its own client give up. The s3 backend puts it on every request it signs, and
-// server.js caps a chained write with it, so a call that never comes back gives the slug back
-// instead of parking every later write to it. One line to change.
+// than watching its own client give up. The s3 backend puts it on every request it signs. One
+// line to change.
+//
+// This is one call, not one handler. A handler that writes 2000 objects gets its own, much
+// longer ceiling: WRITE_CEILING_MS in lib/write-queue.js. Passing this number there answered a
+// large zip deploy 503 while the extraction kept running.
 export const STORAGE_TIMEOUT_MS = 30_000;
 
 // A key/segment that fails validation. Callers map this to 404 (it only reaches a backend

@@ -25,16 +25,45 @@ test('writes to one slug run one at a time', async () => {
 });
 
 // The item: before the ceiling, a put that never settled parked every later PATCH, PUT, DELETE
-// and duplicate on that slug for the life of the process, and nothing logged it.
-test('a write that never comes back frees the slug for the next writer', async () => {
+// and duplicate on that slug for the life of the process, and nothing logged it. The ceiling
+// answers that caller and logs the slug. What it must not do is hand the slug over while the
+// stalled write is still running, which the first version did: see the test below this one.
+test('a write that has not come back answers 503, and the next write waits for it', async () => {
   const queue = createWriteQueue({ ceilingMs: 20 });
-  const hung = queue.withMetaChain('s', never);
-  await assert.rejects(hung, (err) => err instanceof StorageTimeoutError);
+  let release;
+  const stalled = queue.withMetaChain('s', () => new Promise((r) => { release = r; }));
+  await assert.rejects(stalled, (err) => err instanceof StorageTimeoutError);
   let ran = false;
-  await queue.withMetaChain('s', async () => {
-    ran = true;
+  const next = queue.withMetaChain('s', async () => { ran = true; });
+  await new Promise((r) => setTimeout(r, 30));
+  assert.equal(ran, false, 'the next write ran while the stalled one was still in flight');
+  release();
+  await next;
+  assert.equal(ran, true, 'the next write never ran after the stalled one came back');
+});
+
+// A meta write rewrites the whole record. The queue used to build its chain tail from the race
+// rather than from the call, so the slug came free at the ceiling, a later write landed, and the
+// stalled write then put back the snapshot it had read before the timeout. visibility,
+// passwordHash and tokenEpoch all live in that snapshot, so a flip to private or a token
+// rotation could come back undone with a 200 on it.
+test('a write that timed out cannot revert a write that landed after it', async () => {
+  const queue = createWriteQueue({ ceilingMs: 20 });
+  let record = { visibility: 'public', tokenEpoch: 0 };
+  let release;
+  const stalled = queue.withMetaChain('s', async () => {
+    const snapshot = { ...record };
+    await new Promise((r) => { release = r; });
+    record = { ...snapshot, note: 'the stalled write landed' };
   });
-  assert.equal(ran, true, 'the write after the hung one never ran');
+  await assert.rejects(stalled, (err) => err instanceof StorageTimeoutError);
+  const rotate = queue.withMetaChain('s', async () => {
+    record = { ...record, visibility: 'private', tokenEpoch: 1 };
+  });
+  release();
+  await rotate;
+  assert.equal(record.visibility, 'private');
+  assert.equal(record.tokenEpoch, 1);
 });
 
 // 503 with a Retry-After, not a 500: the server is fine, that one storage call is not, and the

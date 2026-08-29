@@ -197,7 +197,14 @@
   #settingsPop::before { right: 84px; }
   #keysPop::before { right: 47px; }
   @media (max-width: 480px) {
-    .popover, #composePop { position: fixed; top: 74px; right: 12px; left: 12px; width: auto; }
+    /* Fixed to the viewport, so the page cannot scroll a tall panel into view: the panel has to
+       scroll itself. Settings grew past the screen when branding landed (1036px of panel in an
+       844px viewport), which left Save below the fold with no way to reach it, and nothing in
+       Settings could be saved on a phone. 74px top plus a 12px tail is the 86px taken off. */
+    .popover, #composePop {
+      position: fixed; top: 74px; right: 12px; left: 12px; width: auto;
+      max-height: calc(100vh - 86px); overflow-y: auto;
+    }
     .popover::before { display: none; }
   }
   .pop-head { display: flex; align-items: center; justify-content: space-between; padding: 14px 16px 10px; }

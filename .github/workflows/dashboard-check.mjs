@@ -41,9 +41,13 @@ const ctype = res.headers.get('content-type') || '';
 if (!ctype.includes('text/html')) fail(`dashboard GET / content-type is '${ctype}', not HTML`);
 const html = await res.text();
 
-for (const marker of ['<div id="lock">', '<div id="app">', '<title>artifacts</title>']) {
+for (const marker of ['<div id="lock">', '<div id="app">']) {
   if (!html.includes(marker)) fail(`dashboard shell is missing ${marker}`);
 }
+// The title is whatever branding.productName says, so the check is that there is one and it is
+// not empty. Asserting the literal `artifacts` turned this whole suite red on any host that had
+// set a product name, which is the headline feature of the branding work.
+if (!/<title>[^<]+<\/title>/.test(html)) fail('dashboard shell has no non-empty <title>');
 // Every inline type the server publishes needs an option inside the compose type select, or
 // that type can only be published through the API, the CLI or MCP. redirect shipped without
 // one (T2.1.7). The list is imported rather than copied here, so a sixth type fails this check

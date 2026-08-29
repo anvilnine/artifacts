@@ -5,7 +5,7 @@ import { parseArgs } from 'node:util';
 
 import AdmZip from 'adm-zip';
 
-import { sweepOrphans } from './lib/artifact-files.js';
+import { sweepOrphans, SWEEP_MIN_AGE_MS } from './lib/artifact-files.js';
 import { brandingPatchFromFlags } from './lib/branding.js';
 import { previewReach } from './lib/social.js';
 import { artifactExpired } from './lib/expiry.js';
@@ -41,7 +41,7 @@ Usage:
   artifacts keys revoke <id>
 
 Maintenance (runs on the server host against its own storage, not over HTTP):
-  artifacts sweep [--apply]
+  artifacts sweep [--apply] [--older-than <hours>]
 
 Connection (flags override env):
   --url   server origin        [env: ARTIFACTS_URL]
@@ -78,6 +78,7 @@ const { values: opts, positionals } = parseArgs({
     'brand-footer': { type: 'string' },
     output: { type: 'string', short: 'o' },
     apply: { type: 'boolean' },
+    'older-than': { type: 'string' },
     png: { type: 'boolean' },
     scale: { type: 'string' },
     margin: { type: 'string' },
@@ -419,11 +420,25 @@ switch (command) {
   // than acting on a bare slug. Safe to run more than once.
   case 'sweep': {
     const apply = Boolean(opts.apply);
+    // Hours, because that is the unit the floor is written in. 0 turns it off, which is the only
+    // way to sweep a store that cannot report a file age.
+    let minAgeMs = SWEEP_MIN_AGE_MS;
+    if (opts['older-than'] !== undefined) {
+      const hours = Number(opts['older-than']);
+      if (!Number.isFinite(hours) || hours < 0) fail('--older-than takes a number of hours (0 turns the age floor off)');
+      minAgeMs = hours * 3_600_000;
+    }
     const storage = await createStorage();
-    const keys = await sweepOrphans(storage, { apply });
-    for (const key of keys) console.log(`${apply ? 'removed' : 'would remove'} ${key}`);
-    const count = `${keys.length} orphaned file${keys.length === 1 ? '' : 's'}`;
-    console.log(apply ? `${count} removed` : `${count} found; re-run with --apply to remove them`);
+    const { found, removed, kept } = await sweepOrphans(storage, { apply, minAgeMs });
+    if (!apply) {
+      for (const key of found) console.log(`would remove ${key}`);
+      const count = `${found.length} orphaned file${found.length === 1 ? '' : 's'}`;
+      console.log(`${count} found; re-run with --apply to remove them`);
+      break;
+    }
+    for (const key of removed) console.log(`removed ${key}`);
+    for (const { key, why } of kept) console.log(`kept ${key}: ${why}`);
+    console.log(`${removed.length} removed, ${kept.length} kept of ${found.length} orphaned file${found.length === 1 ? '' : 's'}`);
     break;
   }
 

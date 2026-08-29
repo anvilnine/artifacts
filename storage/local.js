@@ -170,7 +170,9 @@ export async function createAt(root) {
 
     async head(key) {
       const st = await statFile(resolveKey(key));
-      return st ? { size: st.size } : null;
+      // mtime is what the sweep's age floor reads (lib/artifact-files.js). The stat is already
+      // done here, so it costs nothing.
+      return st ? { size: st.size, mtime: st.mtimeMs } : null;
     },
 
     async get(key, { range } = {}) {
