@@ -13,6 +13,7 @@ import {
   dropIfRefused,
   parseDescription,
   parseOgImage,
+  previewReach,
   socialTags,
 } from '../lib/social.js';
 
@@ -165,4 +166,52 @@ test('the brand logo is the preview image only when the artifact sets none', () 
 test('a site name is escaped on the way into the tag', () => {
   const tags = socialTags({ slug: 'ci-social' }, CANONICAL, { siteName: 'A & "B"', image: '' });
   assert.match(tags, /content="A &amp; &quot;B&quot;">/);
+});
+
+// ---------------------------------------------------------------------------
+// Where a link preview actually shows
+// ---------------------------------------------------------------------------
+//
+// The API, the CLI, the MCP tools and the dashboard all accept description and ogImage for any
+// type, and the list reports them as set. That is only half true: the tags go into a head the
+// server builds, and for an html, jsx, tsx or zip artifact the server builds no head unless the
+// frame is on. Stored bytes go out untouched. Rather than splicing tags into someone's document,
+// every surface that sets a preview says plainly when it will not show.
+
+test('md and pdf carry a preview with or without the frame', () => {
+  for (const type of ['md', 'pdf']) {
+    for (const framed of [true, false]) {
+      const reach = previewReach({ type, framed });
+      assert.equal(reach.shows, true, `${type} framed=${framed}`);
+      assert.equal(reach.why, '');
+    }
+  }
+});
+
+test('an html, jsx, tsx or zip artifact carries a preview only while framed', () => {
+  for (const type of ['html', 'jsx', 'tsx', 'zip']) {
+    assert.equal(previewReach({ type, framed: true }).shows, true, `${type} framed`);
+    const off = previewReach({ type, framed: false });
+    assert.equal(off.shows, false, `${type} unframed`);
+    assert.match(off.why, /frame is off/);
+  }
+});
+
+test('a redirect never carries a preview, framed or not', () => {
+  for (const framed of [true, false]) {
+    const reach = previewReach({ type: 'redirect', framed });
+    assert.equal(reach.shows, false);
+    assert.match(reach.why, /301/);
+  }
+});
+
+test('a type this build does not know is treated as bytes it cannot touch', () => {
+  assert.equal(previewReach({ type: 'wat', framed: false }).shows, false);
+  assert.equal(previewReach({ type: 'wat', framed: true }).shows, true);
+});
+
+test('the reason is one plain sentence a form or a terminal can print as it stands', () => {
+  const why = previewReach({ type: 'html', framed: false }).why;
+  assert.ok(why.length < 200, 'short enough to sit under a field');
+  assert.doesNotMatch(why, /[<>]/, 'no markup, it is printed by a terminal too');
 });

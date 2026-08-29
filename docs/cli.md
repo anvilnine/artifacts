@@ -101,8 +101,21 @@ artifacts preview hello --og-image none        # clear just the image
 Either flag on its own leaves the other field alone. `none` clears a field, the same word `tag` and
 `project` take. The image has to be an absolute `http://` or `https://` URL, and a description is
 capped at 300 characters after whitespace collapses. `artifacts list` marks a row `preview` when
-either field is set. Which pages actually carry the tags is in [formats](formats.md); an artifact
-served with no frame carries its stored bytes untouched, so it carries no tags either.
+either field is set.
+
+Setting a preview that nothing will render prints a warning to stderr:
+
+```
+$ artifacts preview hello --description "Q3 numbers, one page"
+hello description: Q3 numbers, one page
+warning: The frame is off for this artifact, so it serves its file untouched and the preview tags have nowhere to go. Turn the frame on to make the preview show.
+```
+
+The value is stored either way, and `artifacts list` still marks the row. The warning says the tags
+will not reach a reader until the frame is on for that artifact (`artifacts frame hello on`). An md
+or pdf artifact never gets the warning, because the server renders those pages itself and puts the
+tags in the head it builds. A redirect gets a different line: it answers `301` with no page, so a
+preview never shows for one. Which pages carry the tags is in [formats](formats.md#link-previews).
 
 ## Projects
 

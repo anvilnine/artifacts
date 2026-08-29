@@ -7,6 +7,7 @@ import AdmZip from 'adm-zip';
 
 import { sweepOrphans } from './lib/artifact-files.js';
 import { brandingPatchFromFlags } from './lib/branding.js';
+import { previewReach } from './lib/social.js';
 import { artifactExpired } from './lib/expiry.js';
 import { createStorage } from './storage/index.js';
 
@@ -140,6 +141,25 @@ function need(count, hint) {
   if (args.length < count) fail(`usage: artifacts ${command} ${hint}`);
 }
 
+// A preview the server will never render is worth one line on the way out. The two reads are
+// what it takes to know: the artifact's own type and frame setting, and the global frame pair
+// that a per-item null falls back to. Both are read-scoped, and a failure here is not the
+// operator's problem, so it stays quiet rather than turning a successful set into an error.
+async function warnUnreachablePreview(slug) {
+  try {
+    const [items, cfg] = await Promise.all([
+      apiJson('GET', '/api/artifacts'),
+      apiJson('GET', '/api/config'),
+    ]);
+    const item = items.find((a) => a.slug === slug);
+    if (!item) return;
+    const framed = cfg.frame.enabled &&
+      (typeof item.frame === 'boolean' ? item.frame : cfg.frame.default);
+    const reach = previewReach({ type: item.type, framed });
+    if (!reach.shows) console.error(`warning: ${reach.why}`);
+  } catch {}
+}
+
 function parseBool(value, name) {
   if (value === 'true' || value === '1') return true;
   if (value === 'false' || value === '0') return false;
@@ -172,6 +192,7 @@ switch (command) {
       ...(opts.password !== undefined && { password: opts.password }),
     });
     console.log(out.url);
+    if (opts.description || opts['og-image']) await warnUnreachablePreview(out.slug);
     break;
   }
 
@@ -221,6 +242,7 @@ switch (command) {
       ...(opts.password !== undefined && { password: opts.password }),
     });
     console.log(out.url);
+    if (opts.description || opts['og-image']) await warnUnreachablePreview(out.slug);
     break;
   }
 
@@ -378,6 +400,9 @@ switch (command) {
     if ('ogImage' in patch) {
       console.log(patch.ogImage ? `${args[0]} og-image: ${patch.ogImage}` : `${args[0]} og-image cleared`);
     }
+    // Setting a preview that nothing will ever render is the failure worth naming here, so the
+    // warning follows a set and not a clear.
+    if (patch.description || patch.ogImage) await warnUnreachablePreview(args[0]);
     break;
   }
 

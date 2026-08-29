@@ -2075,6 +2075,54 @@ if node "$CLI_DIR/cli.js" preview ci-cli-og --og-image /relative.png > /dev/null
 fi
 node "$CLI_DIR/cli.js" delete ci-cli-og > /dev/null
 echo "ok: cli link preview"
+
+# A preview on an artifact nothing will render it for: the value is stored, and the operator is
+# told on the way out rather than finding out from a chat app that shows nothing. The warning
+# goes to stderr, so `2>&1 >/dev/null` here keeps stderr and drops the url on stdout.
+echo '# cli preview smoke' > "$ZIPDIR/cli.md"
+warn=$(node "$CLI_DIR/cli.js" publish "$ZIPDIR/cli.html" --slug ci-prev-off --visibility public \
+  --frame off --description 'set with the frame off' 2>&1 >/dev/null)
+echo "$warn" | grep -q '^warning: ' || fail "no warning for a preview with the frame off"
+echo "$warn" | grep -q 'frame is off' || fail "the warning does not say why"
+# stored all the same: a warning is not a refusal
+node "$CLI_DIR/cli.js" list | grep 'ci-prev-off' | grep -q 'preview' || fail "the warned preview did not store"
+# and it is telling the truth: nothing renders the tags with the frame off
+prev=$(mktemp)
+curl -s -o "$prev" "$BASE/a/ci-prev-off"
+if grep -q 'og:description' "$prev"; then fail "an unframed html carried preview tags after all"; fi
+# turn the frame on and the same set goes quiet, because now the tags are really there
+node "$CLI_DIR/cli.js" frame ci-prev-off on > /dev/null
+warn=$(node "$CLI_DIR/cli.js" preview ci-prev-off --description 'now framed' 2>&1 >/dev/null)
+[ -z "$warn" ] || fail "still warning after the frame went on: $warn"
+curl -s -o "$prev" "$BASE/a/ci-prev-off"
+grep -q 'og:description' "$prev" || fail "a framed html carries no preview tags"
+# md and pdf are pages the server renders, so they carry the tags with the frame off and are
+# never warned about
+warn=$(node "$CLI_DIR/cli.js" publish "$ZIPDIR/cli.md" --slug ci-prev-md --visibility public \
+  --frame off --description 'md with the frame off' 2>&1 >/dev/null)
+[ -z "$warn" ] || fail "md was warned about a preview it does carry: $warn"
+curl -s -o "$prev" "$BASE/a/ci-prev-md"
+grep -q 'og:description' "$prev" || fail "an unframed md lost its preview tags"
+# $PDF_DIR is cleaned up by the time this runs, so decode the fixture again next to the others
+printf '%s' "$PDF_B64" | base64 -d > "$ZIPDIR/prev.pdf" 2>/dev/null || \
+  printf '%s' "$PDF_B64" | base64 -D > "$ZIPDIR/prev.pdf"
+warn=$(node "$CLI_DIR/cli.js" publish "$ZIPDIR/prev.pdf" --slug ci-prev-pdf --visibility public \
+  --frame off --description 'pdf with the frame off' 2>&1 >/dev/null)
+[ -z "$warn" ] || fail "pdf was warned about a preview it does carry: $warn"
+curl -s -o "$prev" "$BASE/a/ci-prev-pdf"
+grep -q 'og:description' "$prev" || fail "an unframed pdf lost its preview tags"
+# a redirect has no page at all, and says so in its own words rather than blaming the frame
+printf 'https://example.com/' > "$ZIPDIR/cli-redirect.url"
+node "$CLI_DIR/cli.js" publish "$ZIPDIR/cli-redirect.url" --slug ci-prev-red --type redirect \
+  --visibility public > /dev/null
+warn=$(node "$CLI_DIR/cli.js" preview ci-prev-red --description 'never shows' 2>&1 >/dev/null)
+echo "$warn" | grep -q '301' || fail "a redirect preview is not warned about as a redirect"
+if echo "$warn" | grep -q 'frame is off'; then fail "a redirect was blamed on the frame"; fi
+rm -f "$prev"
+for s in ci-prev-off ci-prev-md ci-prev-pdf ci-prev-red; do
+  curl -sf -X DELETE "$BASE/api/artifacts/$s" -H "$AUTH" > /dev/null
+done
+echo "ok: an unreachable link preview is warned about, not silently dropped"
 diff <(qr_local "$BASE/a/ci-cli-2") <(node "$CLI_DIR/cli.js" qr ci-cli-2) > /dev/null \
   || fail "cli qr printed something other than the server's svg"
 diff <(qr_local "$BASE/a/ci-cli-2" 3 0) <(node "$CLI_DIR/cli.js" qr ci-cli-2 --scale 3 --margin 0) > /dev/null \

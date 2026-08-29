@@ -293,11 +293,13 @@ artifact's URL included). Set them on `POST` / `PUT` / `PATCH`, on the zip endpo
 string, from the row menu in the dashboard ("Description…" and "Preview image…"), or with the
 `description` and `ogImage` arguments on the `publish_artifact` and `update_artifact` MCP tools.
 
-The tags land in the two pages the server builds per request:
+The tags land in the three pages the server builds per request:
 
 - The **viewer frame**, which is what a top-level visit to `/a/<slug>` gets while frames are on.
   This covers every type, html included.
 - The **markdown render**, so an md artifact carries them with the frame off too.
+- The **pdf viewer page**, which is what `/a/<slug>` serves for a pdf whether or not the frame is
+  on, so a pdf carries them with the frame off too.
 
 They do not land anywhere else, and that is deliberate. An `html` artifact is served as-is, and a
 `jsx` artifact's page is baked at publish time, so writing tags into either means editing bytes the
@@ -308,9 +310,17 @@ bytes as uploaded is `GET /a/:slug/source`.
 
 Two consequences worth knowing before you set the fields:
 
-- **An html, jsx or zip artifact needs the frame.** With `frame:false` on the artifact, or
+- **An html, jsx, tsx or zip artifact needs the frame.** With `frame:false` on the artifact, or
   `FRAME_ENABLED=false` on the server, nothing wraps those types and no preview tag renders
-  anywhere. The fields still store and still list. Only md carries them with no frame.
+  anywhere. The fields still store and still list. md and pdf carry them with no frame; those
+  four do not.
+
+  Rather than splice tags into a document its author wrote, every surface that sets a preview
+  says when it will not show. The dashboard's "Description…" and "Preview image…" dialogs read
+  the artifact's own frame setting and the global pair, and say the frame is off for this one
+  when it is. `artifacts preview`, `artifacts publish` and `artifacts deploy` print a
+  `warning:` line to stderr after setting a preview that nothing will render. The API and the
+  MCP tools still accept the fields and still report them as set.
 - **A redirect stores them and renders nothing**, because it answers `301` with no page at all.
   Same shape as the `frame` field on a redirect, which is also stored and never used. The dashboard
   hides both items on a redirect row; the API and the MCP tools take them without complaint.

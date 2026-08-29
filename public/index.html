@@ -1950,11 +1950,10 @@
         // stay off that row, unless a value is already stored, in which case hiding the item
         // would leave something set that nothing here can show or clear.
         //
-        // Where the preview shows up depends on the frame for every type except md, and Frame
-        // sits two items above this one, so each dialog says so rather than leaving a user to
-        // set a description that renders nowhere.
-        const previewNote = a.type === 'md' ? ''
-          : ' Shows while this artifact has the top frame on, which is where the tags live.';
+        // Where the preview shows up depends on this artifact's own frame setting, and Frame
+        // sits two items above this one, so each dialog says what is true right now rather than
+        // leaving a user to set a description that renders nowhere.
+        const previewNote = previewNoteFor(a);
         if (a.type !== 'redirect' || a.description || a.ogImage) {
           menuItem(menu, 'Description…', a.description ? 'on' : '', async () => {
             const v = await dialog({
@@ -2106,6 +2105,28 @@
     if (e.key === 'Escape') document.querySelectorAll('.more.open').forEach(closeMenu);
   });
 
+  // The global frame pair, which a per-item `frame` of null falls back to. Seeded with the
+  // server's own defaults so a menu opened before /api/config answers says the same thing the
+  // server would. loadConfig replaces it.
+  let serverFrame = { enabled: true, default: true };
+
+  // Mirrors previewReach() in lib/social.js. The rule: a markdown page and the pdf viewer are
+  // pages the server renders, so their tags are always in the head; html, jsx, tsx and zip serve
+  // the bytes their author published and only carry tags while the frame wraps them; a redirect
+  // answers 301 and has no page at all.
+  function previewNoteFor(a) {
+    if (a.type === 'redirect') {
+      return ' A redirect answers with a 301 and has no page, so this never shows.';
+    }
+    if (a.type === 'md' || a.type === 'pdf') return '';
+    const framed = serverFrame.enabled &&
+      (typeof a.frame === 'boolean' ? a.frame : serverFrame.default);
+    return framed
+      ? ' Shows while this artifact has the top frame on, which is where the tags live.'
+      : ' The frame is off for this artifact, so this will not show. Turn Frame on for it to'
+        + ' make the preview show.';
+  }
+
   // ---- settings (global config) ----
 
   async function loadConfig() {
@@ -2116,6 +2137,7 @@
       if (cfg.baseUrl) serverBaseUrl = cfg.baseUrl;
       $('frameEnabled').checked = !!(cfg.frame && cfg.frame.enabled);
       $('frameDefault').checked = !!(cfg.frame && cfg.frame.default);
+      if (cfg.frame) serverFrame = { enabled: !!cfg.frame.enabled, default: !!cfg.frame.default };
       if (cfg.md) {
         $('mdFont').value = cfg.md.font;
         $('mdWidth').value = cfg.md.width;
@@ -2196,6 +2218,9 @@
     try {
       const res = await fetch('/api/config', { method: 'PUT', headers: headers(), body: JSON.stringify(body) });
       if (res.ok) {
+        // The preview dialogs read this, so a frame change has to reach it now rather than on
+        // the next page load.
+        serverFrame = { enabled: body.frame.enabled, default: body.frame.default };
         el.textContent = 'Saved';
         setTimeout(() => { el.textContent = ''; }, 1500);
       } else {
