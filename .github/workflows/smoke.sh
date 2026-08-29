@@ -685,6 +685,21 @@ curl -s "$BASE/a/ci-conv/source" | grep -q 'step html again' || fail "html conve
 curl -sf -X DELETE "$BASE/api/artifacts/ci-conv" -H "$AUTH" > /dev/null
 echo "ok: every type conversion serves the type it was given"
 
+# T2.1.19: a PUT is a replace, and `type` falls back to html when the body leaves it out, so an
+# update that omits it converts the artifact and drops the source the old type owned. Z kept the
+# behaviour and had the docs say so on every surface that describes a PUT. This is the case that
+# keeps that claim honest. The two exceptions refuse instead, and both are covered where their own
+# blocks are: a pdf answers 400, a zip site answers 400 on any inline PUT.
+curl -sf -X POST "$BASE/api/artifacts" -H "$AUTH" -H "$JSON" \
+  -d '{"content":"# no type given\n\nhi","type":"md","slug":"ci-notype","visibility":"public"}' > /dev/null
+curl -sf -X PUT "$BASE/api/artifacts/ci-notype" -H "$AUTH" -H "$JSON" \
+  -d '{"content":"<h1>became html</h1>"}' > /dev/null
+[ "$(list_field ci-notype type)" = 'html' ] || fail "a PUT with no type left the md artifact as md"
+[ "$(curl -s "$BASE/a/ci-notype/source")" = '<h1>became html</h1>' ] \
+  || fail "the converted artifact does not serve the html it was given"
+curl -sf -X DELETE "$BASE/api/artifacts/ci-notype" -H "$AUTH" > /dev/null
+echo "ok: a PUT with no type converts the artifact to html"
+
 # a copy keeps the target
 dupslug=$(curl -s -X POST "$BASE/api/artifacts/ci-redir/duplicate" -H "$AUTH" -H "$JSON" \
   -d '{"slug":"ci-redir-copy","visibility":"public"}' | sed -n 's/.*"slug":"\([^"]*\)".*/\1/p')
@@ -985,6 +1000,17 @@ expect_code 200 "$code" "zip duplicate asset served"
 # duplicate: omitted fields inherit from the source (ci-zip has tags zipped,site)
 curl -s "$BASE/api/artifacts" -H "$AUTH" | grep -q '"ci-zip-dup"' || fail "zip duplicate not listed"
 echo "ok: duplicate copies zip site + inherits fields"
+
+# T2.1.19: the other exception to "an omitted type converts the artifact". A zip site is many
+# files and a PUT carries one body, so an inline PUT is refused whether or not it names a type,
+# and the site keeps serving.
+for zipput in '{"content":"<h1>flattened</h1>"}' '{"content":"<h1>flattened</h1>","type":"html"}'; do
+  code=$(curl -s -o /dev/null -w '%{http_code}' -X PUT "$BASE/api/artifacts/ci-zip" -H "$AUTH" -H "$JSON" -d "$zipput")
+  expect_code 400 "$code" "inline PUT on a zip site refused: $zipput"
+done
+[ "$(list_field ci-zip type)" = 'zip' ] || fail "the refused PUT changed the zip site's type anyway"
+code=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/a/ci-zip/css/s.css")
+expect_code 200 "$code" "a zip asset after the refused PUT"
 
 curl -sf -X DELETE "$BASE/api/artifacts/ci-dup" -H "$AUTH" > /dev/null
 curl -sf -X DELETE "$BASE/api/artifacts/ci-zip-dup" -H "$AUTH" > /dev/null
