@@ -215,3 +215,17 @@ test('the reason is one plain sentence a form or a terminal can print as it stan
   assert.ok(why.length < 200, 'short enough to sit under a field');
   assert.doesNotMatch(why, /[<>]/, 'no markup, it is printed by a terminal too');
 });
+
+// previewReach only ever saw the combined answer, so with the master switch off it told the
+// operator to turn on a frame that was already on for that artifact.
+test('with frames off for the whole server, the reason says so', () => {
+  const off = previewReach({ type: 'html', framed: false, frameEnabled: false });
+  assert.equal(off.shows, false);
+  assert.match(off.why, /whole server/);
+  assert.doesNotMatch(off.why, /off for this artifact/);
+  // The per-item wording is still what a caller gets when frames are on for the server.
+  assert.match(previewReach({ type: 'html', framed: false, frameEnabled: true }).why, /off for this artifact/);
+  // The switch changes nothing for a page the server renders itself, or for a redirect.
+  assert.equal(previewReach({ type: 'md', framed: false, frameEnabled: false }).shows, true);
+  assert.match(previewReach({ type: 'redirect', framed: false, frameEnabled: false }).why, /301/);
+});

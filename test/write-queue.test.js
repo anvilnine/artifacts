@@ -115,3 +115,25 @@ test('a write under two names takes them in a stable order', async () => {
   ]);
   assert.deepEqual(seen, ['one', 'two']);
 });
+
+// The two-name form used to cap every step, which started the outer slug's clock before the
+// inner slug's queue wait. A rename standing behind two healthy writes on the second name was
+// answered 503 without either of those writes going near the ceiling, and then landed anyway a
+// moment after the caller had been told to retry.
+test('a two-name write is not failed for waiting its turn on the second name', async () => {
+  const queue = createWriteQueue({ ceilingMs: 60 });
+  const busy = [
+    queue.withMetaChain('b', () => new Promise((r) => setTimeout(r, 40))),
+    queue.withMetaChain('b', () => new Promise((r) => setTimeout(r, 40))),
+  ];
+  assert.equal(await queue.withMetaChains(['a', 'b'], async () => 'renamed'), 'renamed');
+  await Promise.all(busy);
+});
+
+// And the ceiling still has to fire when the work itself is what stalls, whichever name it
+// runs under.
+test('a two-name write still hears 503 when its own call stalls', async () => {
+  const queue = createWriteQueue({ ceilingMs: 20 });
+  const hung = queue.withMetaChains(['a', 'b'], never);
+  await assert.rejects(hung, (err) => err instanceof StorageTimeoutError);
+});

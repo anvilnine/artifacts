@@ -499,20 +499,33 @@ function sendStatusCard(res, status, copy) {
     'X-Content-Type-Options': 'nosniff',
     'Referrer-Policy': 'no-referrer',
     'Cache-Control': 'no-cache',
+    // These URLs answer two different bodies depending on Accept, so a shared cache has to key
+    // on it. Without this, one visitor's card could be handed to the next caller's fetch().
+    Vary: 'Accept',
   }).type('html').send(buildStatusHtml(copy));
 }
 
-// A miss on a sub-path. A person who followed a link gets the branded card; an <img>, a range
-// read, curl and fetch() keep the one-line body, because an HTML page in place of an asset is
-// noise to whatever asked for the asset.
-function missing(req, res) {
-  if (wantsHtmlPage(req.headers.accept)) return notFound(res);
-  return res.status(404).type('text/plain').send(NOT_FOUND_TEXT);
+// The one-line body for everything that is not a browser navigation. Same hardening as the card:
+// a plain text 404 is still a response a cache can hold and a sniffer can guess a type for.
+function sendStatusText(res, status, body) {
+  return res.status(status).set({
+    'X-Content-Type-Options': 'nosniff',
+    'Cache-Control': 'no-cache',
+    Vary: 'Accept',
+  }).type('text/plain').send(body);
 }
 
-function expiredSubPath(req, res) {
+// A miss. A person who followed a link gets the branded card; an <img>, a range read, curl and
+// fetch() keep the one-line body, because an HTML page in place of an asset is noise to whatever
+// asked for the asset.
+function missing(req, res) {
+  if (wantsHtmlPage(req.headers.accept)) return notFound(res);
+  return sendStatusText(res, 404, NOT_FOUND_TEXT);
+}
+
+function expiredFor(req, res) {
   if (wantsHtmlPage(req.headers.accept)) return expired(res);
-  return res.status(410).type('text/plain').send(EXPIRED_TEXT);
+  return sendStatusText(res, 410, EXPIRED_TEXT);
 }
 
 // ---------------------------------------------------------------------------
@@ -1656,7 +1669,10 @@ app.get('/a/:slug', async (req, res) => {
   // Expiry is 410 only once the caller has proved access; otherwise a 404 like any other
   // miss, so expiry does not become an existence oracle for a locked artifact.
   if (isExpired(meta)) {
-    return artifactUnlocked(req, meta) ? expired(res) : notFound(res);
+    // Same Accept split as every other dead end. This route sent plain text on origin/main and
+    // was changed to always send the card, which put 3 kB of HTML in front of curl, fetch() and
+    // every embed that had been reading one line.
+    return artifactUnlocked(req, meta) ? expiredFor(req, res) : notFound(res);
   }
   // Visibility gate. password → the unlock prompt (401) until a valid unlock cookie is
   // present. private with no valid cookie → a flat 404 identical to a missing artifact
@@ -1746,7 +1762,7 @@ app.get('/a/:slug/source', async (req, res, next) => {
   // Unlock before expiry so a locked artifact yields the canonical 404, never a 410 that
   // would leak existence.
   if (!artifactUnlocked(req, meta)) return notFound(res);
-  if (isExpired(meta)) return expiredSubPath(req, res);
+  if (isExpired(meta)) return expiredFor(req, res);
   if (meta.type === 'zip') return next(); // zip sites serve /source as a site path
   res.set({ 'X-Content-Type-Options': 'nosniff', 'Referrer-Policy': 'no-referrer' });
   // A redirect's "source" is its target, and the docs say so, so it answers with the same value
@@ -1783,7 +1799,7 @@ app.get('/a/:slug/*', async (req, res) => {
   const meta = SLUG_RE.test(slug) ? await readMeta(slug) : null;
   if (!meta || meta.disabled) return notFound(res);
   if (!artifactUnlocked(req, meta)) return notFound(res);
-  if (isExpired(meta)) return expiredSubPath(req, res);
+  if (isExpired(meta)) return expiredFor(req, res);
   // A pdf artifact owns one sub-path: the file its viewer loads. `?download=1` sends the same
   // bytes as an attachment, which is the direct-download link the viewer's Download button and
   // anything else that wants the file point at.

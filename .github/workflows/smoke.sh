@@ -159,19 +159,35 @@ curl -sf -X PATCH "$BASE/api/artifacts/ci-smoke" -H "$AUTH" -H "$JSON" -d '{"dis
 code=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/a/ci-smoke")
 expect_code 410 "$code" "expired artifact"
 
-# the 410 is a branded page, not the bare string it used to be, and it says expired rather than
+# A browser navigation gets a branded page, not the bare string, and it says expired rather than
 # reusing the 404 copy. A reader who lands on a lapsed link needs to know the link was fine.
 expired_headers=$(mktemp)
 expired_body=$(mktemp)
-code=$(curl -s -D "$expired_headers" -o "$expired_body" -w '%{http_code}' "$BASE/a/ci-smoke")
+code=$(curl -s -H 'Accept: text/html' -D "$expired_headers" -o "$expired_body" -w '%{http_code}' "$BASE/a/ci-smoke")
 expect_code 410 "$code" "expired artifact page"
 grep -qi '^Content-Type: text/html' "$expired_headers" || fail "expired artifact is not HTML"
+grep -qi '^Vary: Accept' "$expired_headers" || fail "expired card has no Vary: Accept"
 grep -q 'Artifact expired' "$expired_body" || fail "expired page copy missing"
 grep -q '<p class="status">410</p>' "$expired_body" || fail "expired page does not show 410"
 grep -q 'Artifact unavailable' "$expired_body" && fail "expired page reuses the 404 copy"
 rm "$expired_headers"
 rm "$expired_body"
 echo "ok: branded artifact-expired page"
+
+# ...and everything that is not a navigation keeps the one line it has always had. curl, fetch()
+# and an embed send Accept: */*, and 3 kB of HTML in place of "artifact expired" is noise to all
+# three. The sub-paths below split the same way; this is the top-level route doing it too.
+expired_plain=$(mktemp)
+expired_plain_headers=$(mktemp)
+code=$(curl -s -D "$expired_plain_headers" -o "$expired_plain" -w '%{http_code}' "$BASE/a/ci-smoke")
+expect_code 410 "$code" "expired artifact for a machine"
+grep -qi '^Content-Type: text/plain' "$expired_plain_headers" || fail "expired artifact is not plain text for a machine"
+grep -qi '^X-Content-Type-Options: nosniff' "$expired_plain_headers" || fail "expired plain body has no nosniff"
+grep -qi '^Vary: Accept' "$expired_plain_headers" || fail "expired plain body has no Vary: Accept"
+grep -q '^artifact expired$' "$expired_plain" || fail "expired body changed for a machine"
+rm "$expired_plain"
+rm "$expired_plain_headers"
+echo "ok: the expired page splits by Accept"
 
 # a sub-path read keeps the plain body for a machine and gives a person the card. curl sends
 # Accept: */*, a browser navigation sends text/html.

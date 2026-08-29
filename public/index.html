@@ -130,9 +130,16 @@
   /* ---- app ---- */
   #app { display: none; max-width: 900px; margin: 0 auto; padding: 36px 20px 80px; }
   header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 26px; }
-  .brand { display: flex; align-items: center; gap: 12px; }
+  /* min-width:0 on both so the name can be clipped rather than forcing the header wider than
+     the screen: a flex item's default min-width is its content. */
+  .brand { display: flex; align-items: center; gap: 12px; min-width: 0; }
+  .brand > div { min-width: 0; }
   .brand .mark { width: 30px; height: 30px; flex: none; }
-  .wordmark { display: block; font-family: var(--f-display); font-size: 21px; font-weight: 700; letter-spacing: -.02em; color: var(--cream); line-height: 1; }
+  /* The product name is the operator's, up to 40 characters. Left to wrap, a 15 character
+     one word name pushed Sign out 50px off a 390px screen and a 40 character one wrapped
+     the header to five lines. One line, clipped with an ellipsis. */
+  .wordmark { display: block; font-family: var(--f-display); font-size: 21px; font-weight: 700; letter-spacing: -.02em; color: var(--cream); line-height: 1;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .tagline { display: block; font-family: var(--f-mono); font-size: 11px; text-transform: uppercase; color: var(--taupe-dim); margin-top: 4px; letter-spacing: .08em; }
 
   #drop {
@@ -215,13 +222,13 @@
   .form { display: flex; flex-direction: column; gap: 12px; }
   .form .row { display: flex; gap: 10px; flex-wrap: wrap; }
   .form .row > * { flex: 1; min-width: 120px; }
-  .form label.f, .settings label.f {
+  .form label.f, .settings label.f, .settings .f {
     display: flex; flex-direction: column; gap: 5px;
     font-family: var(--f-mono); font-size: 11px; font-weight: 500; letter-spacing: .08em; text-transform: uppercase;
     color: var(--taupe);
   }
   .form label.f > input, .form label.f > select, .form label.f > textarea { width: 100%; }
-  .settings label.f > input, .settings label.f > select { width: 100%; }
+  .settings .f > input, .settings .f > select { width: 100%; }
   .form textarea { min-height: 150px; font-family: var(--f-mono); font-size: 13px; resize: vertical; }
   /* A redirect target is one line, so the paste box shrinks instead of leaving 150px of void. */
   .form textarea.oneline { min-height: 44px; }
@@ -249,7 +256,7 @@
   }
   .settings .fielderr:empty { display: none; }
   /* A hint under an input is a sentence, not a label, so it drops the label's uppercase mono. */
-  .settings label.f > .desc {
+  .settings .f > .desc {
     font-family: var(--f-sans); text-transform: none; letter-spacing: 0; font-weight: 400;
     line-height: 1.4; margin-top: 0;
   }
@@ -674,32 +681,42 @@
             </label>
             <h4>Branding</h4>
             <span class="desc">Leave a field blank to keep the built-in look. These reach the viewer frame, the unlock gate, the 404 and 410 pages, markdown and React pages, and link previews.</span>
-            <label class="f">Product name
-              <input type="text" id="brandName" maxlength="40" placeholder="Artifact" autocomplete="off">
-              <span class="fielderr" id="brandErrProductName"></span>
-            </label>
-            <label class="f">Logo
-              <input type="text" id="brandLogo" placeholder="/a/my-logo/logo.png" autocomplete="off" spellcheck="false">
-              <span class="desc">The logo and favicon both take a path on this server, or a data: image URI. Remote URLs are refused: the viewer pages only load images from their own origin, and a hotlinked asset is a third-party request from every page someone opens. No SVG.</span>
-              <span class="fielderr" id="brandErrLogoUrl"></span>
-            </label>
-            <label class="f">Favicon
-              <input type="text" id="brandFavicon" placeholder="/a/my-logo/favicon.png" autocomplete="off" spellcheck="false">
-              <span class="fielderr" id="brandErrFaviconUrl"></span>
-            </label>
-            <label class="f">Accent color
+            <!-- Each branding field is a div rather than a wrapping <label>: a label names its
+                 control from everything inside it, so the hint and the error message became part
+                 of the field's name. The Logo field measured a 46 word name, and the accent text
+                 box had no name at all because the label already named the picker beside it.
+                 Explicit `for`, and the hint and error reach the input through aria-describedby. -->
+            <div class="f">
+              <label for="brandName">Product name</label>
+              <input type="text" id="brandName" maxlength="40" placeholder="Artifact" autocomplete="off" aria-describedby="brandErrProductName">
+              <span class="fielderr" id="brandErrProductName" role="status"></span>
+            </div>
+            <div class="f">
+              <label for="brandLogo">Logo</label>
+              <input type="text" id="brandLogo" placeholder="/a/my-logo/logo.png" autocomplete="off" spellcheck="false" aria-describedby="brandLogoHint brandErrLogoUrl">
+              <span class="desc" id="brandLogoHint">The logo and favicon both take a path on this server, or a data: image URI. Remote URLs are refused: the viewer pages only load images from their own origin, and a hotlinked asset is a third-party request from every page someone opens. No SVG.</span>
+              <span class="fielderr" id="brandErrLogoUrl" role="status"></span>
+            </div>
+            <div class="f">
+              <label for="brandFavicon">Favicon</label>
+              <input type="text" id="brandFavicon" placeholder="/a/my-logo/favicon.png" autocomplete="off" spellcheck="false" aria-describedby="brandErrFaviconUrl">
+              <span class="fielderr" id="brandErrFaviconUrl" role="status"></span>
+            </div>
+            <div class="f">
+              <label for="brandAccent">Accent color</label>
               <span class="colorrow">
                 <input type="color" id="brandAccentPick" value="#c73d1d" aria-label="Pick an accent color">
-                <input type="text" id="brandAccent" placeholder="#c73d1d" autocomplete="off" spellcheck="false">
+                <input type="text" id="brandAccent" placeholder="#c73d1d" autocomplete="off" spellcheck="false" aria-describedby="brandAccentHint brandErrAccentColor">
               </span>
-              <span class="desc">Hex, rgb() or hsl(). The picker only writes hex, so type the other two.</span>
-              <span class="fielderr" id="brandErrAccentColor"></span>
-            </label>
-            <label class="f">Footer line
-              <input type="text" id="brandFooter" maxlength="160" placeholder="Published with Artifact" autocomplete="off">
-              <span class="fielderr" id="brandErrFooterText"></span>
-            </label>
-            <div class="foot"><button id="saveSettings">Save settings</button><span class="saved" id="settingsSaved"></span></div>
+              <span class="desc" id="brandAccentHint">Hex, rgb() or hsl(). The picker only writes hex, so type the other two. It has to read at 3:1 on both the dark console and a white card.</span>
+              <span class="fielderr" id="brandErrAccentColor" role="status"></span>
+            </div>
+            <div class="f">
+              <label for="brandFooter">Footer line</label>
+              <input type="text" id="brandFooter" maxlength="160" placeholder="Published with Artifact" autocomplete="off" aria-describedby="brandErrFooterText">
+              <span class="fielderr" id="brandErrFooterText" role="status"></span>
+            </div>
+            <div class="foot"><button id="saveSettings">Save settings</button><span class="saved" id="settingsSaved" role="status" aria-live="polite"></span></div>
           </div>
         </div>
       </div>
@@ -2214,10 +2231,15 @@
     if (a.type === 'md' || a.type === 'pdf') return '';
     const framed = serverFrame.enabled &&
       (typeof a.frame === 'boolean' ? a.frame : serverFrame.default);
-    return framed
-      ? ' Shows while this artifact has the top frame on, which is where the tags live.'
-      : ' The frame is off for this artifact, so this will not show. Turn Frame on for it to'
-        + ' make the preview show.';
+    if (framed) return ' Shows while this artifact has the top frame on, which is where the tags live.';
+    // With the master switch off, "turn Frame on for it" points at a control that will not help:
+    // the artifact's own frame may already be on.
+    if (!serverFrame.enabled) {
+      return ' Frames are off for the whole server, so this will not show. Turn frames on in'
+        + ' Settings to make the preview show.';
+    }
+    return ' The frame is off for this artifact, so this will not show. Turn Frame on for it to'
+      + ' make the preview show.';
   }
 
   // ---- settings (global config) ----
@@ -2256,16 +2278,49 @@
   };
 
   const brandErrEl = (field) => $('brandErr' + field[0].toUpperCase() + field.slice(1));
+  const brandInputEl = (field) =>
+    $(Object.keys(BRAND_INPUTS).find((id) => BRAND_INPUTS[id] === field));
 
   function clearBrandErrors() {
-    for (const field of Object.values(BRAND_INPUTS)) brandErrEl(field).textContent = '';
+    for (const field of Object.values(BRAND_INPUTS)) {
+      brandErrEl(field).textContent = '';
+      brandInputEl(field).removeAttribute('aria-invalid');
+    }
   }
 
-  // The picker can only hold #rrggbb, so it follows the text field when the text field holds a
-  // hex value and sits on the built-in accent otherwise. rgb() and hsl() stay text-only.
+  // Show one field's refusal. The message span is already a live region and is already named in
+  // the input's aria-describedby, so writing it announces it; aria-invalid says which control is
+  // wrong; and focus moves there, because Save keeps focus otherwise and a screen reader user is
+  // left on a button with nothing to say why nothing happened.
+  function showBrandError(field, message) {
+    brandErrEl(field).textContent = message;
+    const input = brandInputEl(field);
+    input.setAttribute('aria-invalid', 'true');
+    input.focus();
+  }
+
+  // The picker can only hold #rrggbb. Matching #rrggbb alone left the picker sitting on the
+  // built-in orange while #f00, rgb(255,0,0) and hsl(0 100% 50%) were the colour being saved,
+  // which reads as "the accent is orange". The browser resolves any colour CSS takes, so the
+  // swatch follows all four forms; an empty or unparseable field falls back to the built-in.
+  const accentProbe = document.createElement('span');
   function syncAccentPicker() {
     const value = $('brandAccent').value.trim();
-    $('brandAccentPick').value = /^#[0-9a-f]{6}$/i.test(value) ? value : '#c73d1d';
+    let hex = '';
+    if (value) {
+      accentProbe.style.color = '';
+      accentProbe.style.color = value;
+      if (accentProbe.style.color) {
+        document.body.appendChild(accentProbe);
+        const rgb = getComputedStyle(accentProbe).color.match(/\d+(\.\d+)?/g);
+        accentProbe.remove();
+        if (rgb && rgb.length >= 3) {
+          hex = '#' + rgb.slice(0, 3)
+            .map((n) => Math.round(Number(n)).toString(16).padStart(2, '0')).join('');
+        }
+      }
+    }
+    $('brandAccentPick').value = hex || '#c73d1d';
   }
 
   $('brandAccent').addEventListener('input', syncAccentPicker);
@@ -2303,8 +2358,8 @@
     for (const field of ['logoUrl', 'faviconUrl']) {
       const problem = localAssetError(branding[field]);
       if (problem) {
-        brandErrEl(field).textContent = problem;
         el.textContent = 'Save failed';
+        showBrandError(field, problem);
         return;
       }
     }
@@ -2323,8 +2378,8 @@
         // naming a field the operator then has to go find.
         const named = /^branding\.([A-Za-z]+)\s+(.*)$/s.exec(d.error || '');
         if (named && Object.values(BRAND_INPUTS).includes(named[1])) {
-          brandErrEl(named[1]).textContent = named[2];
           el.textContent = 'Save failed';
+          showBrandError(named[1], named[2]);
         } else {
           el.textContent = d.error || 'Save failed';
         }

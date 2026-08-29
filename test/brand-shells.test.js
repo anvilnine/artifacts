@@ -183,6 +183,14 @@ test('the frame bar drops the product name when a logo is there to carry the bra
   assert.match(nameOnly.BRAND_STYLE, /@media \(max-width: 560px\)/);
 });
 
+// The wordmark went at 560px and the logo did not, so at 390px a 120px logo left the artifact's
+// own title 79px for 140px of text.
+test('a framed logo shrinks on a narrow screen, the way the wordmark disappears', () => {
+  const style = frameBrandSlots(brand({ logoUrl: '/a/brand/l.png' })).BRAND_STYLE;
+  assert.match(style, /max-width: 120px/);
+  assert.match(style, /@media \(max-width: 560px\) \{ #brand img \{ max-width: 56px; \} \}/);
+});
+
 test('a footer line renders under the two chrome pages', () => {
   const b = brand({ footerText: 'Published with Dropkiln' });
   assert.match(passwordBrandSlots(b).FOOTER, /Published with Dropkiln/);

@@ -156,7 +156,7 @@ async function warnUnreachablePreview(slug) {
     if (!item) return;
     const framed = cfg.frame.enabled &&
       (typeof item.frame === 'boolean' ? item.frame : cfg.frame.default);
-    const reach = previewReach({ type: item.type, framed });
+    const reach = previewReach({ type: item.type, framed, frameEnabled: cfg.frame.enabled });
     if (!reach.shows) console.error(`warning: ${reach.why}`);
   } catch {}
 }
