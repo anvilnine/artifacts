@@ -88,7 +88,9 @@
     <button id="hide" type="button" title="Hide this frame">&#9650; Hide</button>
   </div>
 
-  <iframe id="frame" src="{{RAW_URL}}" title="{{TITLE}}"></iframe>
+  <!-- allow="fullscreen" so the PDF shell's Full screen button does not depend on the default
+       Permissions Policy for fullscreen still being "self". -->
+  <iframe id="frame" src="{{RAW_URL}}" title="{{TITLE}}" allow="fullscreen"></iframe>
 
   <button id="reveal" type="button" title="Show the frame">&#9660; Frame</button>
 

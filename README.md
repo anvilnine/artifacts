@@ -5,7 +5,7 @@
 </p>
 
 <p align="center">
-  POST HTML, a React component, Markdown, or a zipped static site. Get back an unguessable URL on your own domain.
+  POST HTML, a React component, Markdown, a PDF, or a zipped static site. Get back an unguessable URL on your own domain.
 </p>
 
 <p align="center">
@@ -41,12 +41,13 @@ It runs as one container with a single admin account and, by default, no databas
 
 ## Features
 
-- **Content types.** HTML, JSX/TSX (a single React component, no build step), Markdown, and zipped static sites.
+- **Content types.** HTML, JSX/TSX (a single React component, no build step), Markdown, PDF, and zipped static sites.
 - **Agent-native, human-friendly.** A built-in MCP server lets Claude Code, Codex, or any MCP client publish with one tool call. Humans get a drag-and-drop web UI at `/` (behind an admin login) and a [CLI](docs/cli.md).
 - **Two-tier auth.** An admin logs into the dashboard with a password; CLI and MCP carry scoped, revocable [API keys](docs/auth.md) (`read` / `publish` / `full`) with optional expiry, so you never share one master secret.
 - **Private by default, with per-artifact visibility.** A new artifact is `private`, shared through a signed capability link (`?k=…`) you can rotate to revoke. Switch any artifact to `public` (anyone with the bare link) or password-protected. Nothing is discoverable by default: unguessable slugs, `noindex` everywhere. See [visibility](docs/api.md#visibility).
 - **Optional viewer frame.** A slim top toolbar (title, copy link, hide) like Claude, Gemini, and ChatGPT artifacts. Toggle it globally in Settings or per artifact; `?raw=1` serves the bare content. Redirects are never framed.
 - **Markdown render settings.** Pick the reading font, content width, base font size, and starting theme for every Markdown artifact in Settings. Markdown renders from its source on each view, so a change shows on existing artifacts too. Framed Markdown gets a navbar button that cycles Auto, Light, and Dark for that reader. See [docs/formats.md](docs/formats.md#markdown-render-settings).
+- **PDF hosting.** Publish a PDF and it gets a viewer page plus a direct-download link. Three per-artifact viewer modes (standard, presentation, minimal) and a download toggle that removes the viewer's buttons. The toggle is a convenience, not protection: the file's URL still answers with the bytes. See [docs/formats.md](docs/formats.md#pdf).
 - **Redirects.** `type: "redirect"` turns a slug into a short link that answers an HTTP 301 at the server, where other hosts fall back to a JavaScript bounce. The target must be an absolute http(s) URL and cannot carry credentials, and the response is uncacheable, so repointing the slug takes effect on the next visit. Repoint one from the row menu in the dashboard, or with a `PUT`. Read the cost of running an open redirector on your domain first: [docs/formats.md](docs/formats.md#redirects).
 - **QR code per artifact.** Every artifact has a QR of its permanent URL, from the row menu in the dashboard, `GET /api/artifacts/:slug/qr`, or `artifacts qr <slug>`. SVG or PNG, generated in-process: no QR library, no third-party image service, nothing about your artifacts leaves the box. See [the API reference](docs/api.md).
 - **Organize by project.** Group artifacts built for the same project into collapsible sections, with a search box across project, title, slug, tags, and a redirect's target. Tags stay for cross-cutting labels.

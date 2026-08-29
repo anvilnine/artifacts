@@ -63,6 +63,16 @@
     transition: border-color .12s, box-shadow .12s, background .12s;
   }
   input:hover, select:hover, textarea:hover { border-color: var(--rim-strong, var(--taupe)); }
+  /* A file input draws its own button, and the browser default is a light-grey slab in the
+     middle of a dark dialog. Same shape as the other controls instead. */
+  input[type=file] { padding: 7px 9px; font-size: 13px; cursor: pointer; }
+  input[type=file]::file-selector-button {
+    margin-right: 10px; padding: 6px 11px; border-radius: var(--r-md);
+    border: 1px solid var(--rim); background: var(--cocoa-hi); color: var(--sand);
+    font-family: inherit; font-size: 12px; font-weight: 600; cursor: pointer;
+    transition: border-color .12s, background .12s, color .12s;
+  }
+  input[type=file]:hover::file-selector-button { border-color: var(--rose); color: var(--cream); }
   input::placeholder, textarea::placeholder { color: var(--taupe-dim); }
   /* selects: drop native chrome, draw one consistent molten-neutral chevron */
   select {
@@ -559,6 +569,7 @@
                   <option value="jsx">jsx</option>
                   <option value="tsx">tsx</option>
                   <option value="md">md</option>
+                  <option value="pdf">pdf</option>
                   <option value="redirect">redirect</option>
                 </select>
               </label>
@@ -601,6 +612,9 @@
             </div>
             <label class="f" id="contentField"><span id="contentLabel">Content</span>
               <textarea id="content" placeholder="Paste HTML, a React component with a default export, or Markdown…" spellcheck="false"></textarea>
+            </label>
+            <label class="f" id="pdfField" style="display:none">PDF file
+              <input id="pdfFile" type="file" accept=".pdf,application/pdf">
             </label>
             <div class="browse" id="browseRow">or <a href="#" id="browseLink">browse files</a> to upload instead</div>
             <div class="foot"><button id="publish">Publish</button></div>
@@ -676,9 +690,9 @@
 
   <div id="drop">
     <strong>Drop files to publish</strong> &nbsp;·&nbsp; or click to browse
-    <div class="hint">.html · .jsx · .tsx · .md · .zip. Published instantly, link copied to your clipboard.</div>
+    <div class="hint">.html · .jsx · .tsx · .md · .pdf · .zip. Published instantly, link copied to your clipboard.</div>
   </div>
-  <input id="file" type="file" accept=".html,.htm,.jsx,.tsx,.md,.markdown,.zip" multiple hidden>
+  <input id="file" type="file" accept=".html,.htm,.jsx,.tsx,.md,.markdown,.pdf,.zip" multiple hidden>
 
   <div id="results"></div>
 
@@ -723,7 +737,19 @@
     html: 'html', htm: 'html',
     jsx: 'jsx', tsx: 'tsx',
     md: 'md', markdown: 'md',
+    pdf: 'pdf',
   };
+
+  // The server's PDF cap (PDF_MAX_BYTES in lib/pdf.js), checked here as well because a bigger
+  // file never reaches it: base64 costs 4 bytes for every 3, so anything over about 7.5 MB
+  // trips the 10 MB JSON body limit first and comes back as "body too large", which mentions
+  // neither PDFs nor 7 MB.
+  const PDF_MAX_BYTES = 7 * 1024 * 1024;
+  function pdfTooBig(file) {
+    if (file.size <= PDF_MAX_BYTES) return null;
+    return 'PDF too large: ' + (file.size / (1024 * 1024)).toFixed(1) + ' MB, over the 7 MB cap ('
+      + PDF_MAX_BYTES + ' bytes).';
+  }
 
   // ---- login / setup ----
 
@@ -834,15 +860,33 @@
     return { ok: res.ok, status: res.status, data };
   }
 
+  // A PDF goes up base64-encoded in the same `content` field the text types use. FileReader
+  // rather than btoa(): btoa needs the whole file as one string of char codes, which blows the
+  // call stack somewhere around a megabyte. The server strips the data: prefix.
+  function readDataUrl(file) {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(reader.result);
+      reader.onerror = () => reject(reader.error);
+      reader.readAsDataURL(file);
+    });
+  }
+
   async function publishFile(file) {
     const ext = (file.name.split('.').pop() || '').toLowerCase();
     const type = TYPE_BY_EXT[ext];
     if (!type && ext !== 'zip') {
-      return addResult(file.name, 'Unsupported type .' + ext + ' (html/jsx/tsx/md/zip only)', false);
+      return addResult(file.name, 'Unsupported type .' + ext + ' (html/jsx/tsx/md/pdf/zip only)', false);
+    }
+    if (type === 'pdf') {
+      const tooBig = pdfTooBig(file);
+      if (tooBig) return addResult(file.name, tooBig, false);
     }
 
     const isZip = ext === 'zip';
-    const payload = isZip ? await file.arrayBuffer() : await file.text();
+    const payload = isZip ? await file.arrayBuffer()
+      : type === 'pdf' ? await readDataUrl(file)
+      : await file.text();
     const send = (slug) => isZip
       ? publishZip(payload, slug, file.name)
       : publish({ content: payload, type, slug, title: file.name });
@@ -902,18 +946,36 @@
   // a Location header and never reaches the frame branch.
   const CONTENT_PLACEHOLDER = $('content').placeholder;
   function syncComposeType() {
-    const redirect = $('type').value === 'redirect';
+    const kind = $('type').value;
+    const redirect = kind === 'redirect';
+    // A PDF is bytes, so there is nothing to paste: the content box gives way to a file
+    // picker, and the drop zone below would only publish the same file a second time.
+    const pdf = kind === 'pdf';
     $('contentLabel').textContent = redirect ? 'Target URL' : 'Content';
     $('content').placeholder = redirect ? 'https://example.com/where-it-goes' : CONTENT_PLACEHOLDER;
     $('content').classList.toggle('oneline', redirect);
+    $('contentField').style.display = pdf ? 'none' : '';
+    $('pdfField').style.display = pdf ? '' : 'none';
     $('frameField').style.display = redirect ? 'none' : '';
-    $('browseRow').style.display = redirect ? 'none' : '';
+    $('browseRow').style.display = redirect || pdf ? 'none' : '';
   }
   $('type').addEventListener('change', syncComposeType);
 
   $('publish').addEventListener('click', () => busy($('publish'), duplicateSource ? 'Copying…' : 'Publishing…', async () => {
     if (duplicateSource) return doDuplicate();
     const body = { content: $('content').value, type: $('type').value };
+    // What the result line calls this publish. A PDF was picked, not pasted, so it goes by
+    // its filename.
+    let label = 'pasted ' + body.type;
+    if (body.type === 'pdf') {
+      const picked = $('pdfFile').files[0];
+      if (!picked) { toast('Choose a PDF file.', true); return; }
+      const tooBig = pdfTooBig(picked);
+      if (tooBig) { toast(tooBig, true); return; }
+      label = picked.name;
+      body.content = await readDataUrl(picked); // the server strips the data: prefix
+      if (!$('title').value) body.title = picked.name;
+    }
     if ($('slug').value) body.slug = $('slug').value;
     if ($('title').value) body.title = $('title').value;
     // Frame is hidden for a redirect, so never send a stale value the select still holds.
@@ -928,9 +990,10 @@
     }
     const r = await publish(body);
     if (r.ok) {
-      addResult('pasted ' + body.type, r.data.url, true);
+      addResult(label, r.data.url, true);
       navigator.clipboard.writeText(r.data.url).catch(() => {});
       $('content').value = '';
+      $('pdfFile').value = '';
       composeTags.setTags([]);
       $('project').value = '';
       $('password').value = '';
@@ -939,7 +1002,7 @@
       closePops();
       loadList();
     } else {
-      addResult('pasted ' + body.type, r.data.error || ('HTTP ' + r.status), false);
+      addResult(label, r.data.error || ('HTTP ' + r.status), false);
     }
   }));
 
@@ -1008,6 +1071,7 @@
   function setDuplicateUI(on) {
     $('typeField').style.display = on ? 'none' : '';
     $('contentField').style.display = on ? 'none' : '';
+    if (on) $('pdfField').style.display = 'none'; // a copy brings its own bytes
     $('browseRow').style.display = on ? 'none' : '';
     $('publish').textContent = on ? 'Create copy' : 'Publish';
     $('composeTitle').textContent = on ? 'Duplicate artifact' : 'New artifact';
@@ -1782,6 +1846,44 @@
           patchItem(a, { frame: v === 'auto' ? null : v === 'on' },
             { frame: v === 'auto' ? undefined : v === 'on' });
         });
+
+        // A pdf gets its own viewer controls: how the page presents the document, and whether
+        // the page offers the file. Both are viewer-level only, which the download dialog says
+        // out loud, because /a/<slug>/file.pdf still answers with the bytes either way.
+        if (a.type === 'pdf') {
+          const pdfMode = (a.pdf && a.pdf.mode) || 'standard';
+          const pdfDownload = !(a.pdf && a.pdf.download === false);
+          menuItem(menu, 'PDF view: ' + pdfMode + '…', '', async () => {
+            const v = await dialog({
+              title: 'PDF view for “' + a.slug + '”',
+              body: 'How the viewer page presents the document.',
+              choices: [
+                { value: 'standard', label: 'Standard (toolbar, browser controls)' },
+                { value: 'presentation', label: 'Presentation (one page at a time, full screen)' },
+                { value: 'minimal', label: 'Minimal (document only, no toolbar)' },
+              ],
+              current: pdfMode,
+            });
+            if (v === null || v === pdfMode) return;
+            patchItem(a, { pdf: { mode: v } }, { pdf: { mode: v, download: pdfDownload } });
+          });
+          menuItem(menu, 'PDF download: ' + (pdfDownload ? 'on' : 'off') + '…', '', async () => {
+            const v = await dialog({
+              title: 'PDF download for “' + a.slug + '”',
+              body: 'Off removes the Open and Download buttons from the viewer page and asks the'
+                + " browser to hide its own toolbar. It is not protection: the file's URL still"
+                + ' answers with the bytes to anyone who knows it.',
+              choices: [
+                { value: 'on', label: 'On (offer the file)' },
+                { value: 'off', label: 'Off (viewer buttons removed)' },
+              ],
+              current: pdfDownload ? 'on' : 'off',
+            });
+            if (v === null || (v === 'on') === pdfDownload) return;
+            patchItem(a, { pdf: { download: v === 'on' } },
+              { pdf: { mode: pdfMode, download: v === 'on' } });
+          });
+        }
 
         menuItem(menu, 'Tags…', '', async () => {
           const v = await dialog({

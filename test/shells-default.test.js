@@ -6,8 +6,10 @@
 // has changed. So this fills each current shell with the all-empty branding slots and compares
 // the whole file against the render origin/main served, kept under test/fixtures/shells-default.
 //
-// Refresh a fixture only when the untouched page is meant to change:
-//   git show origin/main:shells/<file> > test/fixtures/shells-default/<file>
+// Refresh a fixture only when the untouched page is meant to change, by re-rendering the shell
+// with nothing branded and writing that out:
+//   node -e "…fillShell(readFileSync('shells/<file>'), <name>BrandSlots(NONE))…"
+// Then read the diff. It should show your change and nothing else.
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';

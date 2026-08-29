@@ -1,0 +1,191 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<title>{{TITLE}}</title>
+{{SOCIAL}}
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  :root {
+    color-scheme: light dark;
+    --bar-bg: #ffffff;
+    --bar-fg: #1f2328;
+    --bar-muted: #59636e;
+    --bar-border: #d8d2cc;
+    --bar-hover: #f0ece7;
+    --page-bg: #f0ece7;
+    --link: #c73d1d;
+  }
+  /* Dark = Anvil Nine "Molten Steel", the same tokens the viewer frame and the markdown
+     shell use, so a PDF page reads like the rest of the chrome. */
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bar-bg: #101317; --bar-fg: #edeae4; --bar-muted: #9da3a9;
+      --bar-border: #242b33; --bar-hover: #1b2026;
+      --page-bg: #0b0d0f; --link: #ff7550;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bar-bg: #101317; --bar-fg: #edeae4; --bar-muted: #9da3a9;
+    --bar-border: #242b33; --bar-hover: #1b2026;
+    --page-bg: #0b0d0f; --link: #ff7550;
+  }
+  :root[data-theme="light"] {
+    --bar-bg: #ffffff; --bar-fg: #1f2328; --bar-muted: #59636e;
+    --bar-border: #d8d2cc; --bar-hover: #f0ece7;
+    --page-bg: #f0ece7; --link: #c73d1d;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; }
+  body {
+    display: flex; flex-direction: column;
+    background: var(--page-bg); color: var(--bar-fg);
+    font-family: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  }
+
+  #bar {
+    flex: 0 0 auto;
+    display: flex; align-items: center; gap: 8px;
+    height: 44px; padding: 0 12px;
+    background: var(--bar-bg); color: var(--bar-fg);
+    border-bottom: 1px solid var(--bar-border);
+  }
+  #title {
+    flex: 1 1 auto; min-width: 0;
+    font-size: 14px; font-weight: 600;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .act {
+    flex: 0 0 auto;
+    display: inline-flex; align-items: center; gap: 5px;
+    padding: 5px 10px; border-radius: 6px;
+    border: 1px solid var(--bar-border); background: transparent;
+    color: var(--bar-muted); font-size: 13px; font-family: inherit;
+    text-decoration: none; cursor: pointer;
+  }
+  .act:hover { background: var(--bar-hover); color: var(--bar-fg); }
+
+  #stage { flex: 1 1 auto; position: relative; min-height: 0; }
+  #doc { width: 100%; height: 100%; border: 0; display: block; }
+
+  /* minimal: the document and nothing else. The bar is left out of the markup, so this only
+     has to take the page background back to plain. */
+  body.mode-minimal { background: var(--bar-bg); }
+
+  /* presentation: a whole page at a time on a dark backdrop, whatever the reader's theme.
+     The bar stays because it holds the full-screen button. */
+  body.mode-presentation { background: #0b0d0f; }
+  body.mode-presentation #bar { background: #101317; color: #edeae4; border-bottom-color: #242b33; }
+  body.mode-presentation .act { border-color: #242b33; color: #9da3a9; }
+  body.mode-presentation .act:hover { background: #1b2026; color: #edeae4; }
+  body.mode-presentation #stage { padding: 0; }
+
+  /* Shown by the browser when it refuses application/pdf outright, and moved out of the
+     <object> by the probe below when a browser takes the type and then paints nothing.
+     Everything the toolbar offers is repeated here, so a reader who never sees the document
+     still has a way to open it. */
+  #fallback {
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    gap: 12px; height: 100%; padding: 32px 20px; text-align: center;
+  }
+  #fallback p { margin: 0; max-width: 34ch; color: var(--bar-muted); font-size: 14px; line-height: 1.5; }
+  #fallback .act { border-color: var(--link); color: var(--link); }
+
+  /* Under about 480px the title alone fills the bar, so the labels drop to their icons. */
+  @media (max-width: 480px) {
+    #title { font-size: 13px; }
+    .act { padding: 5px 8px; }
+    .act .label { display: none; }
+  }
+</style>
+</head>
+<body>
+  {{BAR}}
+
+  <div id="stage">
+    <!-- onload as an attribute, not a listener added below: the file can finish loading
+         before the parser reaches the script at the end of the body, and a listener added
+         after the event has fired would read as a browser that painted nothing. -->
+    <object id="doc" data="{{EMBED_URL}}" type="application/pdf" title="{{TITLE}}"
+            onload="this.dataset.loaded = '1'">
+      <div id="fallback">
+        <p>{{FALLBACK_TEXT}}</p>
+        {{FALLBACK_LINKS}}
+      </div>
+    </object>
+  </div>
+
+  <script>
+    document.body.className = 'mode-{{MODE}}';
+
+    // Inside the viewer frame the toolbar above already names the artifact, so the title here
+    // would be the same words twice. Unframed (?raw=1, frame off) it is the only one there is.
+    var titleEl = document.getElementById('title');
+    if (titleEl && window.parent !== window) titleEl.textContent = '';
+
+    // A browser that will not render a PDF is supposed to show the <object>'s children, and
+    // some do. Others accept application/pdf, reserve the whole box, paint nothing in it, and
+    // never reach the children, which leaves the reader a blank white page under a toolbar.
+    // The load event is what tells the two apart: a browser that rendered the file fires it,
+    // one that only took the space does not. The wait starts after the page itself has
+    // finished loading, so a slow download is not mistaken for a blank frame.
+    (function () {
+      var obj = document.getElementById('doc');
+      var stage = document.getElementById('stage');
+      var fallback = document.getElementById('fallback');
+      if (!obj || !stage || !fallback) return;
+      function probe() {
+        setTimeout(function () {
+          if (obj.dataset.loaded) return;
+          stage.appendChild(fallback); // out of the object, where it will actually be drawn
+          obj.remove();
+        }, 1500);
+      }
+      if (document.readyState === 'complete') probe();
+      else window.addEventListener('load', probe);
+    })();
+
+    // Presentation mode: hand the whole screen to the document. Inside the viewer frame this
+    // is our own iframe going full screen, which is the element the reader can see.
+    var fs = document.getElementById('fullscreen');
+    if (fs) {
+      fs.addEventListener('click', function () {
+        var target = document.documentElement;
+        if (document.fullscreenElement) document.exitFullscreen();
+        else if (target.requestFullscreen) target.requestFullscreen();
+      });
+      // The same button leaves full screen, so it has to say so. Driven by the event rather
+      // than the click, because Escape and the browser's own control also end it.
+      document.addEventListener('fullscreenchange', function () {
+        var on = !!document.fullscreenElement;
+        var label = fs.querySelector('.label');
+        fs.title = on ? 'Leave full screen' : 'Show the document full screen';
+        fs.setAttribute('aria-label', fs.title);
+        if (label) label.textContent = on ? 'Exit' : 'Full screen';
+      });
+    }
+
+    // Follow the viewer frame's theme button the way the markdown shell does: the frame posts
+    // the choice into this document, and a same-tab change lands through localStorage.
+    (function () {
+      var root = document.documentElement;
+      function apply(t) {
+        if (t === 'dark' || t === 'light') root.setAttribute('data-theme', t);
+        else root.removeAttribute('data-theme');
+      }
+      try { apply(localStorage.getItem('artifactTheme')); } catch (e) {}
+      window.addEventListener('message', function (e) {
+        if (e.origin !== window.location.origin) return;
+        if (e.data && e.data.artifactTheme) apply(e.data.artifactTheme);
+      });
+      window.addEventListener('storage', function (e) {
+        if (e.key === 'artifactTheme') apply(e.newValue);
+      });
+    })();
+  </script>
+</body>
+</html>

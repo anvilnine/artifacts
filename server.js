@@ -37,6 +37,13 @@ import { ApiError, clientFacingError } from './lib/errors.js';
 import { artifactExpired } from './lib/expiry.js';
 import { qrPng, qrSvg } from './lib/qr.js';
 import {
+  parsePdfContent,
+  parsePdfSettings,
+  pdfSettings,
+  pdfSettingsForMeta,
+  pdfViewerFlags,
+} from './lib/pdf.js';
+import {
   parseRedirectTarget,
   resolveRedirectTarget,
   pointsAtOwnSlug,
@@ -145,6 +152,7 @@ function frameActive(meta) {
 const JSX_SHELL = await fs.readFile(path.join(__dirname, 'shells', 'jsx.html'), 'utf8');
 const MD_SHELL = await fs.readFile(path.join(__dirname, 'shells', 'md.html'), 'utf8');
 const FRAME_SHELL = await fs.readFile(path.join(__dirname, 'shells', 'frame.html'), 'utf8');
+const PDF_SHELL = await fs.readFile(path.join(__dirname, 'shells', 'pdf.html'), 'utf8');
 const PASSWORD_SHELL = await fs.readFile(path.join(__dirname, 'shells', 'password.html'), 'utf8');
 const NOT_FOUND_SHELL = await fs.readFile(path.join(__dirname, 'shells', 'not-found.html'), 'utf8');
 
@@ -288,6 +296,81 @@ function buildMdHtml(source, meta, mdCfg = config.current.md, branding = config.
     FONTSIZE: MD_SIZE_PX[mdCfg.size],
     THEME: mdCfg.theme,
     CONTENT: marked.parse(source),
+  });
+}
+
+// The two URLs a pdf artifact's viewer points at. Absolute paths, not relative ones: inside
+// the viewer frame the shell is loaded from /a/<slug>?raw=1, where a relative "file.pdf"
+// would resolve to /a/file.pdf.
+function pdfFileUrl(slug) {
+  return `/a/${slug}/file.pdf`;
+}
+
+// The filename a download lands on. The slug is re-checked rather than trusted, the way the
+// SOURCE_EXT lookup on the /source route is: every slug the server writes matches SLUG_RE, but
+// meta.json can be hand-edited, and this value lands inside a quoted header where a slug
+// carrying a quote picks the reader's filename and extension.
+function pdfDownloadName(meta) {
+  return SLUG_RE.test(meta.slug) ? `${meta.slug}.pdf` : 'download.pdf';
+}
+
+// Whether `?download=` on the file route is asking for an attachment. Only a truthy value is:
+// the docs name `?download=1`, and reading a bare `?download=0` as a yes was the surprising
+// direction. A repeated parameter arrives as an array and is not a yes either.
+function wantsPdfDownload(value) {
+  if (typeof value !== 'string') return false;
+  const v = value.trim().toLowerCase();
+  return v !== '' && v !== '0' && v !== 'false' && v !== 'no' && v !== 'off';
+}
+
+// A viewer page for a pdf artifact, built per request the way the markdown one is. The bytes
+// themselves never pass through here: the page is a shell around an <object> that fetches
+// them, so a 7 MB PDF is streamed by serveObject and not held in a string.
+//
+// The per-artifact controls (mode, download) decide which pieces of the page exist at all
+// rather than hiding them with CSS: a Download button that is only display:none is still a URL
+// in the markup, and the toggle would read as weaker than it is.
+function buildPdfHtml(meta) {
+  const title = escapeHtml(meta.title || meta.slug);
+  const fileUrl = pdfFileUrl(meta.slug);
+  const downloadUrl = `${fileUrl}?download=1`;
+  const flags = pdfViewerFlags(pdfSettings(meta));
+
+  // aria-label as well as title on each one: under 480px the CSS drops the .label span to
+  // display:none, which takes the text out of the accessible name, and a touch screen has no
+  // hover for the tooltip to appear on. Without it a screen reader reads out the glyph.
+  const openBtn = `<a class="act" id="open" href="${fileUrl}" target="_blank" rel="noopener" title="Open the PDF in a new tab" aria-label="Open the PDF in a new tab">&#8599;&nbsp;<span class="label">Open</span></a>`;
+  const downloadBtn = `<a class="act" id="download" href="${downloadUrl}" download title="Download the PDF" aria-label="Download the PDF">&#8681;&nbsp;<span class="label">Download</span></a>`;
+  const fullscreenBtn = `<button class="act" id="fullscreen" type="button" title="Show the document full screen" aria-label="Show the document full screen">&#9974;&nbsp;<span class="label">Full screen</span></button>`;
+
+  const actions = [];
+  if (flags.fullscreen) actions.push(fullscreenBtn);
+  if (flags.download) actions.push(openBtn, downloadBtn);
+  // A bar with no buttons is 44px of white strip and a border: inside the viewer frame the
+  // shell blanks the title too, so standard mode with downloads off drew an empty box that
+  // read as a rendering fault. Nothing to hold means nothing to draw.
+  const bar = flags.bar && actions.length
+    ? `<div id="bar">\n    <span id="title">${title}</span>\n    ${actions.join('\n    ')}\n  </div>`
+    : '';
+
+  return fillShell(PDF_SHELL, {
+    TITLE: title,
+    SOCIAL: socialTags(meta, canonicalUrl(meta)),
+    MODE: flags.mode,
+    BAR: bar,
+    // Escaped because the open parameters are joined with "&", which is a bare ampersand
+    // inside an attribute otherwise.
+    EMBED_URL: escapeHtml(fileUrl + flags.hash),
+    // The <object>'s fallback is what a browser that refuses application/pdf shows, and what
+    // the shell's probe swaps in when a browser accepts the type and then paints nothing.
+    // With downloads off there is nothing to offer there, and saying so beats a page that
+    // looks broken.
+    FALLBACK_TEXT: flags.download
+      ? 'This browser will not show a PDF on the page. Open it in a new tab or save it instead.'
+      : 'This browser will not show a PDF on the page, and downloads are off for this artifact.',
+    FALLBACK_LINKS: flags.download
+      ? `<a class="act" href="${fileUrl}" target="_blank" rel="noopener">Open the PDF</a>\n        <a class="act" href="${downloadUrl}" download>Download the PDF</a>`
+      : '',
   });
 }
 
@@ -663,12 +746,18 @@ async function saveArtifact(input, opts = {}) {
   return withMetaChain(finalSlug, () => storeArtifact(finalSlug, input, opts));
 }
 
-async function storeArtifact(finalSlug, { content, type = 'html', title, description, ogImage, expiresAt, frame, tags, project, visibility, password }, { replace = false, keyId = null } = {}) {
+async function storeArtifact(finalSlug, input, { replace = false, keyId = null } = {}) {
+  const { content, type = 'html', title, description, ogImage, expiresAt, frame, tags, project, visibility, password, pdf } = input;
   if (typeof content !== 'string' || !content.trim()) {
     throw new ApiError(400, 'content (non-empty string) is required');
   }
   if (frame !== undefined && typeof frame !== 'boolean') {
     throw new ApiError(400, 'frame must be a boolean');
+  }
+  // Viewer settings for a pdf. Refused on any other type rather than stored and ignored: there
+  // is no page here they could apply to, and a stored value nothing reads is a lie in the row.
+  if (pdf !== undefined && type !== 'pdf') {
+    throw new ApiError(400, 'pdf viewer settings only apply to a pdf artifact');
   }
   if (visibility !== undefined && !VISIBILITIES.includes(visibility)) {
     throw new ApiError(400, 'visibility must be public, private, or password');
@@ -694,6 +783,17 @@ async function storeArtifact(finalSlug, { content, type = 'html', title, descrip
   if (existing?.type === 'zip') {
     throw new ApiError(400, 'cannot replace a zip site with inline content; delete and re-upload');
   }
+  // A replace that names no type falls back to html, which deletes the files the old type
+  // owned. For md, jsx and redirect the caller was holding the source anyway; for a pdf the
+  // bytes are gone and nothing can put them back, so this one direction has to be asked for
+  // out loud. T2.1.19 is the general item about that fallback; this only shuts the door where
+  // the loss cannot be undone.
+  if (existing?.type === 'pdf' && input.type === undefined) {
+    throw new ApiError(
+      400,
+      'cannot replace a pdf without a type: pass type "pdf" to send new bytes, or another type to convert it and delete the file',
+    );
+  }
 
   // A PUT that omits the title keeps the one already stored, the way it keeps tags and project.
   // Falling back to the slug instead threw the title away on every content-only update: the CLI
@@ -705,7 +805,11 @@ async function storeArtifact(finalSlug, { content, type = 'html', title, descrip
   else if (type === 'jsx' || type === 'tsx') html = buildJsxHtml(content, finalTitle);
   // md renders at serve time from source.md; nothing baked here.
   // redirect stores the normalized target and nothing else; the serve path reads it back.
-  const body = type === 'redirect' ? parseRedirectTarget(content, { publishing: true }) : content;
+  // pdf is the one type whose body is not text: `content` carries base64 and what gets stored
+  // is the decoded Buffer, so the bytes a reader downloads are the bytes that were uploaded.
+  let body = content;
+  if (type === 'redirect') body = parseRedirectTarget(content, { publishing: true });
+  else if (type === 'pdf') body = parsePdfContent(content);
   // A redirect that points at its own slug answers its own 301, so a visitor's browser hops
   // until it gives up. Refused here rather than at serve time: the link is dead either way,
   // and the publisher is the one who can fix it.
@@ -720,7 +824,7 @@ async function storeArtifact(finalSlug, { content, type = 'html', title, descrip
     await storage.put(`${finalSlug}/index.html`, html, { contentType: 'text/html; charset=utf-8' });
   }
   await storage.put(`${finalSlug}/source.${SOURCE_EXT[type]}`, body, {
-    contentType: 'text/plain; charset=utf-8',
+    contentType: type === 'pdf' ? 'application/pdf' : 'text/plain; charset=utf-8',
   });
   const meta = {
     ...existing,
@@ -748,6 +852,10 @@ async function storeArtifact(finalSlug, { content, type = 'html', title, descrip
   }
   if (expiresAt !== undefined) meta.expiresAt = expiry;
   if (frame !== undefined) meta.frame = frame;
+  // A pdf keeps whatever it already had when the field is left out, the way tags and project
+  // do; converting away from pdf drops the settings, since nothing would read them again.
+  if (type !== 'pdf') delete meta.pdf;
+  else if (pdf !== undefined) meta.pdf = pdfSettingsForMeta(parsePdfSettings(pdf, pdfSettings(existing)));
   if (tagList !== undefined) meta.tags = tagList.length ? tagList : undefined;
   if (projectName !== undefined) meta.project = projectName || undefined;
   // Both keep their stored value when the field is absent, the way tags and project do, so a
@@ -855,6 +963,22 @@ async function copyArtifact(sourceSlug, targetSlug, body, keyId) {
     throw new ApiError(400, 'password is required when visibility is "password"');
   }
 
+  // A copy keeps the original's viewer settings, the way it keeps the frame, and takes an
+  // override from the body the way every other setting on this endpoint does. The source is
+  // read through the tolerant reader the serve path uses, so a hand-edited value does not
+  // travel into a fresh record; the override goes through the strict parser, so a mode the
+  // server does not understand is a 400 here the way it is on POST, PUT and PATCH. Settled
+  // before copySlug so a refused value costs no bytes.
+  let pdfMeta;
+  if (source.type === 'pdf') {
+    const current = pdfSettings(source);
+    pdfMeta = pdfSettingsForMeta(
+      body.pdf !== undefined ? parsePdfSettings(body.pdf, current) : current,
+    );
+  } else if (body.pdf !== undefined) {
+    throw new ApiError(400, 'pdf viewer settings only apply to a pdf artifact');
+  }
+
   // A copy is a publish, so it answers to the publish rules, and it answers to them here,
   // before anything is written. The target is read off the original, so a refusal leaves no
   // bytes to clean up.
@@ -912,6 +1036,7 @@ async function copyArtifact(sourceSlug, targetSlug, body, keyId) {
   if (summary) meta.description = summary;
   if (previewImage) meta.ogImage = previewImage;
   if (frame !== undefined) meta.frame = frame;
+  if (pdfMeta !== undefined) meta.pdf = pdfMeta;
   if (visibility === 'password') {
     meta.visibility = 'password';
     meta.password = await hashPassword(body.password);
@@ -944,7 +1069,7 @@ function seedTokenEpoch(meta) {
 // (tokenEpoch) are dropped, and hasPassword exposes state without the hash.
 const PUBLIC_META_FIELDS = [
   'slug', 'type', 'title', 'files', 'target', 'description', 'ogImage', 'createdAt', 'updatedAt',
-  'expiresAt', 'frame', 'tags', 'project', 'visibility', 'disabled',
+  'expiresAt', 'frame', 'tags', 'project', 'visibility', 'disabled', 'pdf',
 ];
 function publicMeta(meta) {
   const out = {};
@@ -1024,6 +1149,13 @@ async function parsePatch(patch, meta) {
     } else {
       throw new ApiError(400, 'frame must be a boolean or null');
     }
+  }
+
+  if (patch.pdf !== undefined) {
+    if (meta.type !== 'pdf') {
+      throw new ApiError(400, 'pdf viewer settings only apply to a pdf artifact');
+    }
+    changes.pdf = pdfSettingsForMeta(parsePdfSettings(patch.pdf, pdfSettings(meta)));
   }
 
   if (patch.expiresAt !== undefined) {
@@ -1133,6 +1265,7 @@ async function applyPatch(slug, patch, newSlug) {
     if (changes.frame === null) delete meta.frame;
     else meta.frame = changes.frame;
   }
+  if ('pdf' in changes) meta.pdf = changes.pdf;
   if ('expiresAt' in changes) meta.expiresAt = changes.expiresAt;
   if ('tags' in changes) meta.tags = changes.tags;
   if ('project' in changes) meta.project = changes.project;
@@ -1505,6 +1638,13 @@ app.get('/a/:slug', async (req, res) => {
     res.set('Cache-Control', 'no-cache'); // reflect global config changes on next view
     return res.type('html').send(renderMd(slug, meta, buf.toString('utf8'), config.current.md));
   }
+  if (meta.type === 'pdf') {
+    // The viewer page, not the file. The bytes live one path down at /a/<slug>/file.pdf,
+    // which is what the shell's <object> loads and what a direct link points at.
+    if (!(await storage.head(`${slug}/source.pdf`).catch(() => null))) return notFound(res);
+    res.set('Cache-Control', 'no-cache'); // the page reflects a settings change on next view
+    return res.type('html').send(buildPdfHtml(meta));
+  }
   serveObject(req, res, `${slug}/index.html`);
 });
 
@@ -1526,6 +1666,18 @@ app.get('/a/:slug/source', async (req, res, next) => {
     if (target === null) return notFound(res);
     return res.type('text/plain; charset=utf-8').send(target);
   }
+  // A pdf's source is the file that was uploaded, so it answers with the PDF itself rather
+  // than the text/plain every other type gets. As an attachment: the point of /source is to
+  // hand the bytes over, and Content-Disposition also keeps the response from being rendered
+  // by a plugin on the artifact origin.
+  if (meta.type === 'pdf') {
+    // The full artifact headers, not the two set above: this is the one /source that is served
+    // as its own type rather than forced to text/plain, so it gets the same policy the file
+    // route gets. The two above are a subset of them.
+    res.set(ARTIFACT_HEADERS);
+    res.set('Content-Disposition', `attachment; filename="${pdfDownloadName(meta)}"`);
+    return serveObject(req, res, `${slug}/source.pdf`);
+  }
   // meta.type comes off disk unvalidated, and a bare SOURCE_EXT lookup walks the prototype, so a
   // hand-edited "constructor" built a key out of a function body. Same guard ownedKeys uses.
   if (!Object.hasOwn(SOURCE_EXT, meta.type)) return notFound(res);
@@ -1541,6 +1693,17 @@ app.get('/a/:slug/*', async (req, res) => {
   if (!meta || meta.disabled) return notFound(res);
   if (!artifactUnlocked(req, meta)) return notFound(res);
   if (isExpired(meta)) return res.status(410).type('text/plain').send('artifact expired');
+  // A pdf artifact owns one sub-path: the file its viewer loads. `?download=1` sends the same
+  // bytes as an attachment, which is the direct-download link the viewer's Download button and
+  // anything else that wants the file point at.
+  if (meta.type === 'pdf') {
+    if (req.params[0] !== 'file.pdf') return notFound(res);
+    res.set(ARTIFACT_HEADERS);
+    if (wantsPdfDownload(req.query.download)) {
+      res.set('Content-Disposition', `attachment; filename="${pdfDownloadName(meta)}"`);
+    }
+    return serveObject(req, res, `${slug}/source.pdf`);
+  }
   if (meta.type !== 'zip') return notFound(res);
   res.set(ARTIFACT_HEADERS);
 
@@ -1945,10 +2108,10 @@ function createMcpServer(scopes = SCOPES, keyId = null) {
     {
       title: 'Publish artifact',
       description:
-        'Publish an HTML, JSX/TSX (single React component with default export), or Markdown artifact. Returns the share URL: bare for public, or a ?k= capability link for private and password, which opens the artifact on its own. Omit slug for a random unguessable one. type "redirect" instead publishes a short link: content is the absolute http(s) target, and the URL answers 301 once the visibility gate has let the request through.',
+        'Publish an HTML, JSX/TSX (single React component with default export), or Markdown artifact. Returns the share URL: bare for public, or a ?k= capability link for private and password, which opens the artifact on its own. Omit slug for a random unguessable one. type "redirect" instead publishes a short link: content is the absolute http(s) target, and the URL answers 301 once the visibility gate has let the request through. type "pdf" takes base64 bytes in content; prefer the CLI or the REST endpoint for that, because a multi-megabyte base64 string fills your context with nothing you can read.',
       inputSchema: {
-        content: z.string().describe('Full source of the artifact, or the target URL when type is "redirect"'),
-        type: z.enum(['html', 'jsx', 'tsx', 'md', 'redirect']).default('html'),
+        content: z.string().describe('Full source of the artifact, the target URL when type is "redirect", or base64-encoded bytes when type is "pdf"'),
+        type: z.enum(['html', 'jsx', 'tsx', 'md', 'pdf', 'redirect']).default('html'),
         slug: z
           .string()
           .optional()
@@ -2000,11 +2163,18 @@ function createMcpServer(scopes = SCOPES, keyId = null) {
     {
       title: 'Update artifact',
       description:
-        'Rewrite an existing artifact by slug. Only type resets when omitted: it becomes html, and changing the type deletes the files the old type owned, so pass it on every update of a jsx, tsx, md or redirect artifact. Every other field, title included, keeps its current value. Returns the share URL, tokened for private and password artifacts.',
+        'Rewrite an existing artifact by slug. Only type resets when omitted: it becomes html, and changing the type deletes the files the old type owned, so pass it on every update of a jsx, tsx, md, pdf or redirect artifact. A pdf refuses the update outright when type is omitted, because its bytes cannot be rebuilt from a reply. Every other field, title included, keeps its current value. Returns the share URL, tokened for private and password artifacts.',
       inputSchema: {
         slug: z.string(),
         content: z.string(),
-        type: z.enum(['html', 'jsx', 'tsx', 'md', 'redirect']).default('html'),
+        // Optional rather than .default('html') the way publish_artifact has it: a default is
+        // filled in by the schema, so the server could not tell "type omitted" from "type
+        // html", and a pdf rewrote itself as HTML with its bytes deleted before anything got
+        // to refuse. Omitted still means html for every other type.
+        type: z
+          .enum(['html', 'jsx', 'tsx', 'md', 'pdf', 'redirect'])
+          .optional()
+          .describe('Omit and the artifact is rewritten as html, deleting the files the old type owned. A pdf refuses the call instead, because its bytes cannot be rebuilt from a reply'),
         title: z.string().optional(),
         description: z
           .string()

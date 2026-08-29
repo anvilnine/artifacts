@@ -10,14 +10,15 @@ import { artifactExpired } from './lib/expiry.js';
 const USAGE = `artifacts — publish to a self-hosted artifacts instance
 
 Usage:
-  artifacts publish <file> [--slug s] [--title t] [--tags a,b] [--project p] [--description d] [--og-image url] [--expires ISO] [--type html|jsx|tsx|md|redirect] [--frame on|off] [--visibility public|private|password] [--password pw]
+  artifacts publish <file> [--slug s] [--title t] [--tags a,b] [--project p] [--description d] [--og-image url] [--expires ISO] [--type html|jsx|tsx|md|pdf|redirect] [--frame on|off] [--visibility public|private|password] [--password pw]
   artifacts deploy <dir|zip> [--slug s] [--title t] [--tags a,b] [--project p] [--description d] [--og-image url] [--expires ISO] [--visibility public|private|password] [--password pw]
-  artifacts update <slug> <file> [--title t] [--tags a,b] [--project p] [--description d] [--og-image url] [--type html|jsx|tsx|md|redirect]
+  artifacts update <slug> <file> [--title t] [--tags a,b] [--project p] [--description d] [--og-image url] [--type html|jsx|tsx|md|pdf|redirect]
   artifacts list [--tag t] [--project p]
   artifacts rename <slug> <new-slug>
   artifacts disable <slug>
   artifacts enable <slug>
   artifacts frame <slug> <on|off|default>
+  artifacts pdf <slug> <standard|presentation|minimal|download-on|download-off|default>
   artifacts visibility <slug> <public|private|password> [--password pw]
   artifacts rotate <slug>
   artifacts expire <slug> <ISO-date|never>
@@ -39,7 +40,7 @@ Connection (flags override env):
 The key can be a managed key (scoped) or the bootstrap ARTIFACTS_API_KEY.
 Minting keys (keys create/list/revoke) requires the bootstrap admin key.`;
 
-const EXT_TYPES = { '.html': 'html', '.htm': 'html', '.jsx': 'jsx', '.tsx': 'tsx', '.md': 'md', '.markdown': 'md' };
+const EXT_TYPES = { '.html': 'html', '.htm': 'html', '.jsx': 'jsx', '.tsx': 'tsx', '.md': 'md', '.markdown': 'md', '.pdf': 'pdf' };
 
 const { values: opts, positionals } = parseArgs({
   options: {
@@ -108,8 +109,14 @@ function fail(message) {
 function inferType(file) {
   if (opts.type) return opts.type;
   const type = EXT_TYPES[path.extname(file).toLowerCase()];
-  if (!type) fail(`cannot infer type from "${file}" — pass --type html|jsx|tsx|md|redirect`);
+  if (!type) fail(`cannot infer type from "${file}": pass --type html|jsx|tsx|md|pdf|redirect`);
   return type;
+}
+
+// The bytes to send as `content`. A pdf is binary, and the API takes it base64-encoded in the
+// same field every other type uses, so the read encoding is the only thing that differs.
+function readContent(file, type) {
+  return fs.readFile(file, type === 'pdf' ? 'base64' : 'utf8');
 }
 
 function need(count, hint) {
@@ -131,10 +138,11 @@ switch (command) {
     if (opts.visibility !== undefined && !['public', 'private', 'password'].includes(opts.visibility)) {
       fail('--visibility must be public, private, or password');
     }
-    const content = await fs.readFile(args[0], 'utf8');
+    const publishType = inferType(args[0]);
+    const content = await readContent(args[0], publishType);
     const out = await apiJson('POST', '/api/artifacts', {
       content,
-      type: inferType(args[0]),
+      type: publishType,
       ...(opts.slug && { slug: opts.slug }),
       ...(opts.title && { title: opts.title }),
       ...(opts.tags !== undefined && { tags: opts.tags }),
@@ -182,10 +190,11 @@ switch (command) {
 
   case 'update': {
     need(2, '<slug> <file> [--title t] [--type t]');
-    const content = await fs.readFile(args[1], 'utf8');
+    const updateType = inferType(args[1]);
+    const content = await readContent(args[1], updateType);
     const out = await apiJson('PUT', `/api/artifacts/${args[0]}`, {
       content,
-      type: inferType(args[1]),
+      type: updateType,
       ...(opts.title && { title: opts.title }),
       ...(opts.tags !== undefined && { tags: opts.tags }),
       ...(opts.project !== undefined && { project: opts.project }),
@@ -238,6 +247,21 @@ switch (command) {
     need(1, '<slug>');
     await apiJson('PATCH', `/api/artifacts/${args[0]}`, { disabled: command === 'disable' });
     console.log(`${args[0]} ${command}d`);
+    break;
+  }
+
+  case 'pdf': {
+    need(2, '<slug> <standard|presentation|minimal|download-on|download-off|default>');
+    const modes = ['standard', 'presentation', 'minimal'];
+    const setting = args[1];
+    let value;
+    if (setting === 'default') value = null;
+    else if (setting === 'download-on') value = { download: true };
+    else if (setting === 'download-off') value = { download: false };
+    else if (modes.includes(setting)) value = { mode: setting };
+    else fail(`pdf value must be ${modes.join(', ')}, download-on, download-off, or default`);
+    await apiJson('PATCH', `/api/artifacts/${args[0]}`, { pdf: value });
+    console.log(`${args[0]} pdf ${setting}`);
     break;
   }
 
@@ -384,12 +408,16 @@ switch (command) {
 
   case 'source': {
     need(1, '<slug> [-o file]');
-    const text = await api('GET', `/a/${args[0]}/source`, { auth: false });
+    // Read as bytes, the way qr does: a pdf artifact's source is the file itself, and
+    // decoding it as text would write a corrupt copy to -o.
+    const res = await fetch(`${url}/a/${args[0]}/source`);
+    const body = Buffer.from(await res.arrayBuffer());
+    if (!res.ok) fail(`${res.status} ${res.statusText}: ${body.toString('utf8').trim()}`);
     if (opts.output) {
-      await fs.writeFile(opts.output, text);
+      await fs.writeFile(opts.output, body);
       console.log(opts.output);
     } else {
-      process.stdout.write(text);
+      process.stdout.write(body);
     }
     break;
   }

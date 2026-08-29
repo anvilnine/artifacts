@@ -53,6 +53,134 @@ export default function Demo() {
 
 Note: rendering uses esm.sh + Tailwind CDN, so artifacts need internet to render and take ~1–3 s on first load.
 
+## PDF
+
+Upload a PDF and it gets a viewer page of its own at `/a/{slug}`, plus two direct links to the
+file. The bytes go up base64-encoded in the same `content` field every other type uses:
+
+```bash
+curl -s -X POST https://artifacts.example.com/api/artifacts \
+  -H "Authorization: Bearer $ARTIFACTS_API_KEY" -H 'Content-Type: application/json' \
+  -d "{\"type\":\"pdf\",\"slug\":\"q3-report\",\"content\":\"$(base64 < q3.pdf | tr -d '\n')\"}"
+```
+
+The CLI infers the type from the extension, so `artifacts publish q3.pdf` does the same thing, and
+the dashboard takes a dropped `.pdf` or a file picked from the New artifact form.
+
+Three URLs per artifact:
+
+| URL | What it serves |
+|---|---|
+| `/a/{slug}` | the viewer page (framed like every other type; `?raw=1` for the bare one) |
+| `/a/{slug}/file.pdf` | the PDF itself, `application/pdf`, rendered inline |
+| `/a/{slug}/file.pdf?download=1` | the same bytes with `Content-Disposition: attachment` |
+
+`GET /a/{slug}/source` also hands over the file, as an attachment, the way `/source` returns the
+uploaded bytes for every other type. Nothing else under the slug resolves: any other sub-path is a
+404.
+
+`?download=` takes a truthy value. `?download=1` and `?download=yes` attach; `?download=0`,
+`?download=false` and a bare `?download=` render inline like no parameter at all.
+
+Rules:
+
+- The type check is two markers, both at publish time, both a 400. The decoded body has to start
+  with the 5 bytes `%PDF-`, and it has to carry `%%EOF` somewhere in its last 1 KB, which is what
+  catches a truncated upload: base64 cut short still decodes and still starts with `%PDF-`. Past
+  those two the file is taken as given. Nothing here parses the document, so a PDF that is corrupt
+  in the middle, encrypted, or built by something that writes broken xref tables publishes fine and
+  is the caller's problem.
+- Max 7 MB per PDF, measured on the decoded bytes. The publish body parser stops at 10 MB of JSON
+  and base64 costs 4 bytes for every 3, so 7 MB of PDF is about 9.33 MB of request. Above roughly
+  7.5 MB decoded the body parser answers first, with its own `body too large` message that names
+  neither PDFs nor the cap; the dashboard checks the size before it uploads for that reason.
+- A `PUT` of a PDF has to name `type` (`"pdf"` to send new bytes, another type to convert it).
+  Omitting `type` on any other artifact rewrites it as html; on a PDF that would delete bytes
+  nothing can rebuild, so it is refused instead. `PUT` with no `pdf` field keeps the stored viewer
+  settings; `{"pdf": null}` clears them.
+- A `data:application/pdf;base64,` prefix and the line breaks `base64` writes are both accepted, so
+  a browser's `FileReader.readAsDataURL` output goes straight in.
+- Everything else works the same as any other type: rename, tags, project, expiry, visibility,
+  disable, duplicate, QR codes, link previews.
+
+### The viewer, and what it does not do
+
+The viewer page is a thin shell: a toolbar with Open and Download, and an `<object>` that points at
+`/a/{slug}/file.pdf`. The rendering is the browser's own PDF viewer, which is where the page
+controls come from (page navigation, zoom, rotate, print, save).
+
+This is a deliberate v1. Bundling [pdf.js](https://mozilla.github.io/pdf.js/) would mean vendoring
+about 1.7 MB of minified JavaScript into a repo with no build step, plus a hand-written toolbar to
+replace the one the browser already ships. The tradeoff is that the toolbar looks different in
+Chrome, Firefox and Safari, and that a browser with no built-in PDF viewer shows nothing.
+
+For that last case the `<object>` carries fallback content: a line of text and the same Open and
+Download links. A browser that refuses `application/pdf` outright shows it on its own. A browser
+that accepts the type, takes the space and then paints nothing never reaches the children, so the
+shell also watches for that: if the `<object>` has not fired its load event 1.5 seconds after the
+page finishes loading, the script moves the fallback out of the object and drops the object. That
+covers the blank-frame case measured in headless WebKit, and the one Chrome on Android has shown
+historically. Which browsers land where is not something this repo has measured across the field,
+so treat the fallback as the safety net rather than a list.
+
+### Viewer controls
+
+Two per-artifact settings, both on the `pdf` field of `POST` / `PUT` / `PATCH`, in the dashboard
+row menu ("PDF view…" and "PDF download…"), and on the CLI (`artifacts pdf <slug> <setting>`):
+
+- **`mode`**: `standard` (the default), `presentation`, or `minimal`.
+- **`download`**: `true` (the default) or `false`.
+
+```bash
+curl -s -X PATCH https://artifacts.example.com/api/artifacts/q3-report \
+  -H "Authorization: Bearer $ARTIFACTS_API_KEY" -H 'Content-Type: application/json' \
+  -d '{"pdf":{"mode":"presentation","download":false}}'
+```
+
+A patch naming one key leaves the other alone. `{"pdf": null}` hands the artifact back to both
+defaults, the way `{"frame": null}` does. A value the server does not understand, and an unknown
+key, are both a `400` rather than a silent drop. So is `pdf` on an artifact that is not a pdf:
+there is no viewer page for it to apply to.
+
+The three modes:
+
+| Mode | The page |
+|---|---|
+| `standard` | Our toolbar (title, Open, Download) above the document, browser controls untouched. |
+| `presentation` | A whole page at a time on a dark backdrop, with a Full screen button in the toolbar. The browser's own toolbar is asked to go, so slides are not framed by chrome. |
+| `minimal` | The document, edge to edge. No toolbar of ours; the browser's is left alone, because with ours gone it is the only way left to reach the file. |
+
+Which of them hides the browser's own controls comes down to two things: `presentation` always
+asks for them to go, and `download: false` asks in every mode (the next section covers that half).
+So `standard` with downloads off is the document alone, and `minimal` with downloads on still has
+the browser's toolbar over it.
+
+A bar of ours with nothing in it is never drawn. `standard` with downloads off has no buttons left,
+and inside the viewer frame the title is already in the frame's own bar, so the mode renders the
+document with no bar rather than an empty strip.
+
+An artifact with both defaults stores nothing at all, so `GET /api/artifacts` shows a `pdf` field
+only on an artifact somebody configured.
+
+### What "disable download" actually does
+
+**It is not protection.** With `download: false` the viewer page drops its Open and Download
+buttons and the embedded file's URL asks the browser to hide its own toolbar. That is the whole
+mechanism, and it stops a reader who clicks. It stops nobody else:
+
+- `https://artifacts.example.com/a/{slug}/file.pdf` still answers with the bytes, and so does
+  `/a/{slug}/source`. Both are in the page source of the viewer, and the viewer is the only reason
+  the reader had a URL to begin with.
+- The `#toolbar=0` hint is an old Acrobat open parameter. Chrome's built-in viewer reads it;
+  Firefox and Safari ignore it, so their own toolbars, download button and print button included,
+  are still there.
+- Any browser can print or save a page it has rendered.
+
+Use it to keep a viewer on the page rather than in a downloads folder. Do not use it on a document
+that would hurt you if a reader kept a copy: if the reader can see it, the reader has it. The
+protection that does exist here is [visibility](api.md#visibility), which decides who reaches the
+artifact at all.
+
 ## Zip sites
 
 A zipped static project (HTML + CSS + JS + images) served under `/a/{slug}/`. Upload via the web UI (drop a `.zip`), the [CLI](cli.md) (`artifacts deploy ./dir`), or the [zip endpoint](api.md#zip-sites-multi-file-static-projects) — validation rules and limits are documented there.
