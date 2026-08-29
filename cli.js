@@ -378,6 +378,9 @@ switch (command) {
           k.disabled && 'disabled',
           k.expiresAt && `expires ${k.expiresAt.slice(0, 10)}`,
           k.lastUsedAt ? `used ${k.lastUsedAt.slice(0, 10)}` : 'never used',
+          // Only when there are any: most keys have none, and "0 redirects" on every line
+          // hides the one line where the number is worth looking at.
+          k.redirects && `${k.redirects} redirect${k.redirects === 1 ? '' : 's'}`,
         ].filter(Boolean);
         console.log(`${k.id}\t${k.name}\t${k.scopes.join('/')}\t${k.prefix}…\t[${flags.join(', ')}]`);
       }

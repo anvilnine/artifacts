@@ -36,6 +36,29 @@ list_field() { # list_field <slug> <field>
 code=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/api/artifacts" -H "$JSON" -d '{"content":"<h1>x</h1>","type":"html"}')
 expect_code 401 "$code" "unauth publish"
 
+# a body body-parser refuses -> 400 that names the format, not a 500. express.json() is in
+# strict mode, so a bare `null`, `"x"` or `5` is refused before any route runs. Answering 500
+# told the caller "the server broke" for a typo, and a retry loop keyed on 5xx retried a
+# request that can never succeed.
+for badbody in 'null' '"x"' '5' '{"content":'; do
+  code=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/api/artifacts" -H "$AUTH" -H "$JSON" -d "$badbody")
+  expect_code 400 "$code" "malformed body refused: $badbody"
+done
+curl -s -X POST "$BASE/api/artifacts" -H "$AUTH" -H "$JSON" -d 'null' | grep -qF 'invalid JSON body' \
+  || fail "the 400 does not name the problem"
+# ...while a body the parser accepts and the route refuses still answers on the route's own
+# terms, so the new parser branch did not swallow the messages every other 400 carries
+curl -s -X POST "$BASE/api/artifacts" -H "$AUTH" -H "$JSON" -d '{"type":"html"}' | grep -qF 'content (non-empty string) is required' \
+  || fail "a valid body with a bad field lost its own message"
+# nothing about the server leaks either way
+if curl -s -X POST "$BASE/api/artifacts" -H "$AUTH" -H "$JSON" -d 'null' | grep -qi 'syntaxerror\|at position\|/data/'; then
+  fail "the 400 leaked the parser's internals"
+fi
+echo "ok: a malformed body answers 400 naming the problem"
+# The other half of that handler, a real internal error answering a bare 500 with nothing about
+# itself, has no trigger from outside a healthy server: every reachable throw is an ApiError.
+# It is covered in test/errors.test.js rather than faked here.
+
 # missing artifact -> branded HTML 404
 notfound_headers=$(mktemp)
 notfound_body=$(mktemp)
@@ -451,6 +474,60 @@ code=$(curl -s -o /dev/null -w '%{http_code}' -X PUT "$BASE/api/artifacts/ci-red
   -d '{"content":"https://alice:s3cret@example.com/x","type":"redirect"}')
 expect_code 400 "$code" "repointing at credentials refused"
 echo "ok: redirect target credentials refused"
+
+# a redirect pointing at its own slug loops until the visitor's browser gives up. The server
+# never follows a target, so nothing amplifies, but the link is dead and only the publisher can
+# fix it, so it is refused on the way in. Every shape that reaches the same 301 counts: the bare
+# path, the trailing slash, a query, and the other scheme (a proxy terminates TLS and the origin
+# behind it answers on the other one).
+for self in "$BASE/a/ci-redir-self" "$BASE/a/ci-redir-self/" "$BASE/a/ci-redir-self?x=1"; do
+  code=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/api/artifacts" -H "$AUTH" -H "$JSON" \
+    -d "{\"content\":\"$self\",\"type\":\"redirect\",\"slug\":\"ci-redir-self\"}")
+  expect_code 400 "$code" "self-referencing redirect refused: $self"
+done
+curl -s -X POST "$BASE/api/artifacts" -H "$AUTH" -H "$JSON" \
+  -d "{\"content\":\"$BASE/a/ci-redir-self\",\"type\":\"redirect\",\"slug\":\"ci-redir-self\"}" \
+  | grep -qF 'cannot point at its own slug' || fail "the self-reference 400 does not say what is wrong"
+# a target on this server that reaches a different slug is somebody else's problem, not a loop
+curl -sf -X POST "$BASE/api/artifacts" -H "$AUTH" -H "$JSON" \
+  -d "{\"content\":\"$BASE/a/ci-redir\",\"type\":\"redirect\",\"slug\":\"ci-redir-hop\",\"visibility\":\"public\"}" > /dev/null
+# ...and so is repointing an existing one at itself
+code=$(curl -s -o /dev/null -w '%{http_code}' -X PUT "$BASE/api/artifacts/ci-redir-hop" -H "$AUTH" -H "$JSON" \
+  -d "{\"content\":\"$BASE/a/ci-redir-hop\",\"type\":\"redirect\"}")
+expect_code 400 "$code" "repointing a redirect at itself refused"
+# the rename closes the same loop with no target changing: ci-redir-hop points at ci-redir, so
+# renaming it to ci-redir would be a self-reference if the name were free
+code=$(curl -s -o /dev/null -w '%{http_code}' -X PATCH "$BASE/api/artifacts/ci-redir-hop" -H "$AUTH" -H "$JSON" \
+  -d '{"slug":"ci-redir-hop-2"}')
+expect_code 200 "$code" "a rename away from the target still works"
+curl -sf -X POST "$BASE/api/artifacts" -H "$AUTH" -H "$JSON" \
+  -d "{\"content\":\"$BASE/a/ci-redir-gone\",\"type\":\"redirect\",\"slug\":\"ci-redir-rename\",\"visibility\":\"public\"}" > /dev/null
+code=$(curl -s -o /dev/null -w '%{http_code}' -X PATCH "$BASE/api/artifacts/ci-redir-rename" -H "$AUTH" -H "$JSON" \
+  -d '{"slug":"ci-redir-gone"}')
+expect_code 400 "$code" "renaming a redirect onto its own target refused"
+[ "$(list_field ci-redir-rename target)" = "$BASE/a/ci-redir-gone" ] || fail "the refused rename moved the artifact anyway"
+curl -sf -X DELETE "$BASE/api/artifacts/ci-redir-rename" -H "$AUTH" > /dev/null
+curl -sf -X DELETE "$BASE/api/artifacts/ci-redir-hop-2" -H "$AUTH" > /dev/null
+# a duplicate lands on a slug the caller picks, so a target that was somebody else's problem on
+# the original is a loop on the copy. The check runs before any bytes are copied, so the refusal
+# leaves nothing behind at the target name.
+curl -sf -X POST "$BASE/api/artifacts" -H "$AUTH" -H "$JSON" \
+  -d "{\"content\":\"$BASE/a/ci-redir-dup-dst\",\"type\":\"redirect\",\"slug\":\"ci-redir-dup-src\",\"visibility\":\"public\"}" > /dev/null
+code=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/api/artifacts/ci-redir-dup-src/duplicate" -H "$AUTH" -H "$JSON" \
+  -d '{"slug":"ci-redir-dup-dst","visibility":"public"}')
+expect_code 400 "$code" "duplicating a redirect onto its own target refused"
+curl -s -X POST "$BASE/api/artifacts/ci-redir-dup-src/duplicate" -H "$AUTH" -H "$JSON" \
+  -d '{"slug":"ci-redir-dup-dst","visibility":"public"}' \
+  | grep -qF 'cannot point at its own slug' || fail "the duplicate 400 does not say what is wrong"
+code=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/a/ci-redir-dup-dst")
+expect_code 404 "$code" "the refused duplicate published the artifact anyway"
+# a copy onto any other name is still a copy
+curl -sf -X POST "$BASE/api/artifacts/ci-redir-dup-src/duplicate" -H "$AUTH" -H "$JSON" \
+  -d '{"slug":"ci-redir-dup-ok","visibility":"public"}' > /dev/null
+[ "$(list_field ci-redir-dup-ok target)" = "$BASE/a/ci-redir-dup-dst" ] || fail "the copy lost its target"
+curl -sf -X DELETE "$BASE/api/artifacts/ci-redir-dup-ok" -H "$AUTH" > /dev/null
+curl -sf -X DELETE "$BASE/api/artifacts/ci-redir-dup-src" -H "$AUTH" > /dev/null
+echo "ok: self-referencing redirects refused at publish, repoint, rename and duplicate"
 
 # non-http targets are refused at publish time, so they can never reach a Location header
 for bad in 'javascript:alert(1)' 'JaVaScRiPt:alert(1)' 'data:text/html,<script>x</script>' '//evil.example' '/relative/path' 'not a url'; do
@@ -919,6 +996,69 @@ expect_code 401 "$code" "revoked key refused"
 curl -sf -X DELETE "$BASE/api/keys/$fullid" -H "$AUTH" > /dev/null
 echo "ok: managed key lifecycle"
 
+# --- how many redirects one key has minted. Nothing caps it: a cap changes what an existing
+# key is allowed to do, which is the operator's call. The count is what tells them to make it,
+# so a leaked publish-scoped key that starts hosting phishing hops shows as a number that does
+# not match what the key is for. ---
+key_field() { # key_field <key-id> <field>
+  curl -s "$BASE/api/keys" -H "$AUTH" | node -e '
+    let s = "";
+    process.stdin.on("data", (d) => { s += d; }).on("end", () => {
+      const row = JSON.parse(s).find((k) => k.id === process.argv[1]);
+      const v = row ? row[process.argv[2]] : undefined;
+      process.stdout.write(v === undefined ? "" : String(v));
+    });' "$1" "$2"
+}
+resp=$(curl -s -X POST "$BASE/api/keys" -H "$AUTH" -H "$JSON" -d '{"name":"ci-hop-key","scopes":["publish"]}')
+hopkey=$(printf '%s' "$resp" | sed -n 's/.*"key":"\([^"]*\)".*/\1/p')
+hopid=$(printf '%s' "$resp" | sed -n 's/.*"id":"\([^"]*\)".*/\1/p')
+[ -n "$hopkey" ] || fail "hop key create returned no key"
+HOPAUTH="Authorization: Bearer $hopkey"
+# the create response carries the same fields a list row does, so a client can drop it straight
+# into the key list without a second fetch
+printf '%s' "$resp" | grep -qF '"redirects":0' || fail "the key create response has no redirects field"
+[ "$(key_field "$hopid" redirects)" = "0" ] || fail "a fresh key does not start at 0 redirects"
+for n in 1 2 3; do
+  curl -sf -X POST "$BASE/api/artifacts" -H "$HOPAUTH" -H "$JSON" \
+    -d "{\"content\":\"https://example.com/hop-$n\",\"type\":\"redirect\",\"slug\":\"ci-hop-$n\"}" > /dev/null
+done
+# a page is not a hop, so it must not move the number
+curl -sf -X POST "$BASE/api/artifacts" -H "$HOPAUTH" -H "$JSON" \
+  -d '{"content":"<h1>page</h1>","type":"html","slug":"ci-hop-page"}' > /dev/null
+[ "$(key_field "$hopid" redirects)" = "3" ] || fail "redirect count wrong: $(key_field "$hopid" redirects)"
+# a replace is the same artifact, not a new hop
+curl -sf -X PUT "$BASE/api/artifacts/ci-hop-1" -H "$HOPAUTH" -H "$JSON" \
+  -d '{"content":"https://example.com/hop-1b","type":"redirect"}' > /dev/null
+[ "$(key_field "$hopid" redirects)" = "3" ] || fail "a replace double-counted"
+# deleting one takes it off the count, so the number tracks the stored records
+curl -sf -X DELETE "$BASE/api/artifacts/ci-hop-3" -H "$AUTH" > /dev/null
+[ "$(key_field "$hopid" redirects)" = "2" ] || fail "a delete did not come off the count"
+# the bootstrap key names no key, so its redirects land in nobody's total
+curl -sf -X POST "$BASE/api/artifacts" -H "$AUTH" -H "$JSON" \
+  -d '{"content":"https://example.com/hop-boot","type":"redirect","slug":"ci-hop-boot"}' > /dev/null
+[ "$(key_field "$hopid" redirects)" = "2" ] || fail "a bootstrap-key redirect was billed to a managed key"
+# a duplicate is a new hop and belongs to whoever made the copy. Billed to nobody, a key could
+# mint hops all day through /duplicate while its count stood still.
+curl -sf -X POST "$BASE/api/artifacts/ci-hop-1/duplicate" -H "$HOPAUTH" -H "$JSON" \
+  -d '{"slug":"ci-hop-copy"}' > /dev/null
+[ "$(key_field "$hopid" redirects)" = "3" ] || fail "a duplicate was not billed to the key that made it: $(key_field "$hopid" redirects)"
+# a replace by a principal with no key of its own keeps the name already on the record. The
+# replace case above uses the key that published, so it never exercised this: here the bootstrap
+# key repoints the managed key's hop, which is the first move an operator makes on finding a
+# leaked key, and it used to erase the count that showed them the leak.
+curl -sf -X PUT "$BASE/api/artifacts/ci-hop-1" -H "$AUTH" -H "$JSON" \
+  -d '{"content":"https://example.com/hop-1c","type":"redirect"}' > /dev/null
+[ "$(key_field "$hopid" redirects)" = "3" ] || fail "a bootstrap PUT erased the key's attribution: $(key_field "$hopid" redirects)"
+# and the key id never rides out on the artifact list, which every read-scoped key can call
+if curl -s "$BASE/api/artifacts" -H "$AUTH" | grep -q '"keyId"'; then fail "the artifact list leaked keyId"; fi
+curl -sf -X DELETE "$BASE/api/artifacts/ci-hop-copy" -H "$AUTH" > /dev/null
+curl -sf -X DELETE "$BASE/api/artifacts/ci-hop-boot" -H "$AUTH" > /dev/null
+curl -sf -X DELETE "$BASE/api/artifacts/ci-hop-page" -H "$AUTH" > /dev/null
+curl -sf -X DELETE "$BASE/api/artifacts/ci-hop-2" -H "$AUTH" > /dev/null
+curl -sf -X DELETE "$BASE/api/artifacts/ci-hop-1" -H "$AUTH" > /dev/null
+curl -sf -X DELETE "$BASE/api/keys/$hopid" -H "$AUTH" > /dev/null
+echo "ok: per-key redirect count"
+
 # --- admin session: the cookie the dashboard runs on. Placed before the login burst below,
 # which spends the per-IP failure budget for the next 15 minutes. ---
 ADMIN_USER=${ARTIFACTS_ADMIN_USERNAME:-}
@@ -1048,6 +1188,102 @@ curl -s -c /tmp/pwjar -o /dev/null -X POST "$BASE/a/cap-pw/unlock" -H "$JSON" -d
 body=$(curl -s -b /tmp/pwjar "$BASE/a/cap-pw?raw=1")
 echo "$body" | grep -q 'pw body' || fail "password unlock cookie did not serve body"
 echo "ok: password mode unlock round-trip"
+
+# --- branding: one config change rebrands every shell, no shell file touched ---
+# This block writes the config, so it saves what the target already had and puts it back at the
+# end, the way the md.width check above does. Two reasons: a self-host that runs the suite
+# against its own instance should not come out of it white-labelled as "Smokebrand", and the
+# built-in-look assertions below are only true on an instance nobody has branded yet.
+brand_before=$(curl -s "$BASE/api/config" -H "$AUTH" \
+  | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>process.stdout.write(JSON.stringify(JSON.parse(s).branding)))')
+[ -n "$brand_before" ] || fail "config did not report a branding block"
+if [ "$brand_before" = '{"productName":"","logoUrl":"","faviconUrl":"","accentColor":"","footerText":""}' ]; then
+  host_branded=no
+else
+  host_branded=yes
+  echo "note: this host is already branded, skipping the built-in-look assertions"
+fi
+
+curl -sf -X POST "$BASE/api/artifacts" -H "$AUTH" -H "$JSON" \
+  -d '{"content":"# brand smoke\n\nhi","type":"md","slug":"ci-brand-md","visibility":"public"}' > /dev/null
+curl -sf -X POST "$BASE/api/artifacts" -H "$AUTH" -H "$JSON" \
+  -d '{"content":"export default function A(){ return <div>brand</div>; }","type":"jsx","slug":"ci-brand-jsx","visibility":"public"}' > /dev/null
+if [ "$host_branded" = no ]; then
+  curl -s "$BASE/a/ci-brand-md?raw=1" | grep -q -- '--link: #c73d1d' || fail "md page is not on the default link color"
+  curl -s "$BASE/a/ci-brand-jsx?raw=1" | grep -qF "'Artifact error: '" || fail "jsx page is not on the default error label"
+  if curl -s "$BASE/a/ci-brand-md" | grep -q 'og:site_name'; then fail "og:site_name rendered with no product name set"; fi
+  echo "ok: shells render the built-in branding by default"
+fi
+
+curl -sf -X PUT "$BASE/api/config" -H "$AUTH" -H "$JSON" \
+  -d '{"branding":{"productName":"Smokebrand","logoUrl":"/brand/logo.png","faviconUrl":"/brand/f.ico","accentColor":"#0055ff","footerText":"Published with Smokebrand"}}' > /dev/null
+curl -s "$BASE/api/config" -H "$AUTH" | grep -q '"productName":"Smokebrand"' || fail "branding did not persist"
+
+body=$(curl -s "$BASE/a/does-not-exist-zzz")
+echo "$body" | grep -q '#0055ff' || fail "404 page kept the built-in accent color"
+echo "$body" | grep -q 'Published with Smokebrand' || fail "404 page missing the branded footer"
+echo "$body" | grep -q '<img class="mark" src="/brand/logo.png"' || fail "404 page kept the built-in mark"
+# The product name is the name of the product, not a count noun for what it publishes. A viewer
+# on a dead link reads "Artifact unavailable" on every install, branded or not.
+echo "$body" | grep -q 'Artifact unavailable' || fail "404 page put the product name where the noun goes"
+body=$(curl -s "$BASE/a/cap-pw")
+echo "$body" | grep -q '#0055ff' || fail "password page kept the built-in accent color"
+echo "$body" | grep -q '<link rel="icon" href="/brand/f.ico">' || fail "password page missing the branded favicon"
+echo "$body" | grep -q 'Protected artifact' || fail "password page put the product name where the noun goes"
+body=$(curl -s "$BASE/a/ci-brand-md?raw=1")
+echo "$body" | grep -q -- '--link: #0055ff' || fail "md page kept the built-in link color"
+echo "$body" | grep -q '<link rel="icon" href="/brand/f.ico">' || fail "md page missing the branded favicon"
+# html and jsx pages are built once, at publish time, so this one is published after the
+# rebrand. An artifact published earlier keeps the branding it was built with until it is
+# republished; its frame, being rendered per request, rebrands either way.
+curl -sf -X POST "$BASE/api/artifacts" -H "$AUTH" -H "$JSON" \
+  -d '{"content":"export default function A(){ return <div>brand</div>; }","type":"jsx","slug":"ci-brand-jsx-2","visibility":"public"}' > /dev/null
+body=$(curl -s "$BASE/a/ci-brand-jsx-2?raw=1")
+echo "$body" | grep -qF '"Smokebrand error: "' || fail "jsx page kept the built-in error label"
+echo "$body" | grep -q '<link rel="icon" href="/brand/f.ico">' || fail "jsx page missing the branded favicon"
+if [ "$host_branded" = no ]; then
+  curl -s "$BASE/a/ci-brand-jsx?raw=1" | grep -qF "'Artifact error: '" || fail "an older jsx page changed under it"
+fi
+echo "ok: branding rebrands the 404, password, md, jsx and frame shells"
+
+# share-link tags: the site name shows, and the logo stands in for a missing preview image
+body=$(curl -s "$BASE/a/ci-brand-md")
+echo "$body" | grep -q '<meta property="og:site_name" content="Smokebrand">' || fail "share tags missing og:site_name"
+echo "$body" | grep -qF "<meta property=\"og:image\" content=\"$BASE/brand/logo.png\">" || fail "share tags missing the brand logo fallback"
+echo "$body" | grep -q 'twitter:card" content="summary_large_image"' || fail "share tags kept the small card with an image set"
+echo "$body" | grep -q 'Smokebrand' || fail "frame bar missing the product name"
+echo "ok: branding reaches the share-link tags"
+
+# a refused value -> 400 naming the field, and nothing written
+out=$(curl -s -o /dev/null -w '%{http_code}' -X PUT "$BASE/api/config" -H "$AUTH" -H "$JSON" -d '{"branding":{"accentColor":"red; } body { display: none"}}')
+expect_code 400 "$out" "invalid accentColor rejected"
+curl -s "$BASE/api/config" -H "$AUTH" | grep -q '"accentColor":"#0055ff"' || fail "a refused branding PUT still wrote"
+echo "ok: branding validation"
+
+# a remote logo -> 400. The chrome pages carry `img-src 'self' data:`, so an absolute URL is
+# accepted by the API and then refused by the viewer's own browser, and on the 404 that means no
+# mark at all, because the logo replaces the built-in one.
+out=$(curl -s -o /dev/null -w '%{http_code}' -X PUT "$BASE/api/config" -H "$AUTH" -H "$JSON" -d '{"branding":{"logoUrl":"https://cdn.example.com/l.png"}}')
+expect_code 400 "$out" "remote logoUrl rejected"
+out=$(curl -s -o /dev/null -w '%{http_code}' -X PUT "$BASE/api/config" -H "$AUTH" -H "$JSON" -d '{"branding":{"logoUrl":"data:image/svg+xml;base64,AAAA"}}')
+expect_code 400 "$out" "inline SVG logoUrl rejected"
+out=$(curl -s -o /dev/null -w '%{http_code}' -X PUT "$BASE/api/config" -H "$AUTH" -H "$JSON" -d '{"branding":{"accentColor":"rgba(0,0,0,0)"}}')
+expect_code 400 "$out" "see-through accentColor rejected"
+echo "ok: brand asset and accent policy"
+
+# put back exactly what this host had, rather than clearing five fields it may have set
+curl -sf -X PUT "$BASE/api/config" -H "$AUTH" -H "$JSON" -d "{\"branding\":$brand_before}" > /dev/null
+curl -s "$BASE/api/config" -H "$AUTH" | grep -qF "$brand_before" || fail "branding restore did not put the stored block back"
+if [ "$host_branded" = no ]; then
+  # not just the wording: a bug that left accentColor set while the copy read right would pass
+  # on the copy alone.
+  curl -s "$BASE/a/does-not-exist-zzz" | grep -q -- '--accent: #c73d1d' || fail "branding reset did not restore the built-in accent"
+  curl -s "$BASE/a/ci-brand-md?raw=1" | grep -q -- '--link: #c73d1d' || fail "branding reset did not restore the built-in md link color"
+fi
+curl -sf -X DELETE "$BASE/api/artifacts/ci-brand-md" -H "$AUTH" > /dev/null
+curl -sf -X DELETE "$BASE/api/artifacts/ci-brand-jsx" -H "$AUTH" > /dev/null
+curl -sf -X DELETE "$BASE/api/artifacts/ci-brand-jsx-2" -H "$AUTH" > /dev/null
+echo "ok: branding reset to the built-in defaults"
 
 curl -sf -X DELETE "$BASE/api/artifacts/cap-one" -H "$AUTH" > /dev/null
 curl -sf -X DELETE "$BASE/api/artifacts/cap-pw" -H "$AUTH" > /dev/null

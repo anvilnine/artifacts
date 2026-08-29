@@ -251,6 +251,9 @@ with a `Location` header and never reaches the viewer frame.
 Rules:
 
 - The target must be an absolute `http://` or `https://` URL. Anything else is a 400 at publish time, so a `javascript:` or `data:` target can never reach a viewer's browser.
+- The target cannot point back at the slug being published. That link answers its own 301, so a visitor's browser hops until it gives up on an error page, and only the publisher can fix it. Refused on `POST`, on a `PUT` that repoints the slug, on a `POST /api/artifacts/:slug/duplicate` that copies a hop onto the slug it points at, and on a `PATCH` that renames a redirect onto the slug it already targets. "Points back" means this server's own `/a/<slug>` on the `BASE_URL` host, either scheme, either case, with or without a trailing slash, a trailing dot on the host, or a query.
+
+  This check catches the typo, not the attacker. It only fires when the target spells the server the way `BASE_URL` spells it, so a deploy that never set `BASE_URL` is comparing against the default `http://localhost:<port>` and no real target ever matches: the check is off. Any other name or IP that reaches the same server walks past it, and so do two artifacts pointing at each other and a target on another host that redirects back here (both need a lookup a single publish does not have). Anyone who wants a loop can still publish one. Someone who pasted the wrong URL gets told.
 - The target cannot carry a username or password. A redirect is a public hop: the credentials would show in the dashboard row, come back from the list API to every `read` key, and reach the target host from anyone who follows the link. A target already stored with credentials keeps redirecting, so an upgrade takes nothing off the air.
 - The stored target is the normalized URL, not the bytes you sent: surrounding whitespace goes, the scheme and host lowercase, and everything else percent-encodes. The 2048-character cap is measured on that normalized value.
 - The response carries `Cache-Control: no-store`. A browser would otherwise pin a 301 for good and strand returning visitors on the old target, so `no-store` is what makes repointing the slug with a `PUT` take effect on the next visit.
@@ -278,7 +281,9 @@ Publishing one turns your domain into an open redirector for that slug. Anyone w
 - Your domain stops being safe to put in anyone's URL allowlist. OAuth `redirect_uri` prefix checks, SSO return-URL filters, and mail or proxy link filters that trust the whole domain can all be walked through a redirect artifact.
 - A phishing link can wear your domain. The slug is unguessable, so the link has to leak or be handed out first, but once it is out it looks like you.
 
-The server never fetches the target. A target on `localhost`, a private range, or `169.254.169.254` only reaches whoever clicks the link, so there is no server-side request forgery here. A target pointing back at its own slug loops until the visitor's browser gives up, which is a nuisance for that visitor and nothing more.
+The server never fetches the target. A target on `localhost`, a private range, or `169.254.169.254` only reaches whoever clicks the link, so there is no server-side request forgery here.
+
+`GET /api/keys` carries a `redirects` count per managed key, so you can see how many hops each key has minted and spot one that has started doing something it was not made for. The count is of stored redirects: a delete takes one off it, a `PUT` that repoints a slug is the same hop rather than a new one, and a duplicate is a new hop billed to the key that made the copy. Disabled and expired redirects still count, because the record is still there and is one `PATCH` away from serving again. Redirects published with the bootstrap `ARTIFACTS_API_KEY` or from a dashboard session are in nobody's count, because neither names a key, and a `PUT` from either one leaves the original key's name on the record rather than clearing it. Nothing is capped: a cap changes what an existing key is allowed to do, which is your call to make, and the count is what tells you to make it.
 
 ## Link previews
 

@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="robots" content="noindex, nofollow">
-<title>{{TITLE}}</title>{{FAVICON}}
+<title>{{TITLE}}</title>
 {{SOCIAL}}
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -18,8 +18,8 @@
     /* Light theme: clean paper, kept readable as the escape from dark. */
     --fg: #1f2328;
     --bg: #ffffff;
-    --link: {{LINK}};
-    --code: {{CODE}};
+    --link: #c73d1d;
+    --code: #7c2413;
     --codebg: #f4ede9;
     --quote: #59636e;
     --border: #d8d2cc;
@@ -29,15 +29,15 @@
      Auto: follow the OS unless an explicit data-theme=light override is set. */
   @media (prefers-color-scheme: dark) {
     :root:not([data-theme="light"]) {
-      --fg: #cfccc5; --bg: #0b0d0f; --link: {{LINK_DARK}};
-      --code: {{CODE_DARK}}; --codebg: #15191e; --quote: #9da3a9;
+      --fg: #cfccc5; --bg: #0b0d0f; --link: #ff7550;
+      --code: #ff9d80; --codebg: #15191e; --quote: #9da3a9;
       --border: #242b33; --border-strong: #333d47;
     }
   }
   /* Forced dark, regardless of OS. */
   :root[data-theme="dark"] {
-    --fg: #cfccc5; --bg: #0b0d0f; --link: {{LINK_DARK}};
-    --code: {{CODE_DARK}}; --codebg: #15191e; --quote: #9da3a9;
+    --fg: #cfccc5; --bg: #0b0d0f; --link: #ff7550;
+    --code: #ff9d80; --codebg: #15191e; --quote: #9da3a9;
     --border: #242b33; --border-strong: #333d47;
   }
   body {
@@ -55,7 +55,7 @@
   pre { background: var(--codebg); border: 1px solid var(--border); padding: 16px; border-radius: 6px; overflow-x: auto; }
   code { color: var(--code); background: var(--codebg); padding: 0.2em 0.4em; border-radius: 4px; font-size: 0.9em; line-height: 1.5; font-family: 'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, monospace; }
   pre code { padding: 0; background: none; color: inherit; }
-  blockquote { margin: 0; padding-left: 16px; border-left: 2px solid {{QUOTE_BORDER}}; color: var(--quote); }
+  blockquote { margin: 0; padding-left: 16px; border-left: 2px solid #2ba3cc; color: var(--quote); }
   img { max-width: 100%; }
   table { border-collapse: collapse; display: block; overflow-x: auto; }
   table th, table td { border: 1px solid var(--border); padding: 6px 13px; }
