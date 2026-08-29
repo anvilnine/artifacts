@@ -17,7 +17,7 @@ import { randomUUID } from 'node:crypto';
 
 import { AwsClient } from 'aws4fetch';
 
-import { assertSafeKey } from './index.js';
+import { assertSafeKey, STORAGE_TIMEOUT_MS } from './index.js';
 
 // Mirror of server.js SLUG_RE — used to skip anything in a bucket that is not an artifact
 // namespace (e.g. the boot-probe prefix, or unrelated objects sharing the bucket).
@@ -78,6 +78,20 @@ export async function create() {
     return `${endpoint}/${bucket}/${encodeKey(prefix + key)}`;
   }
 
+  // Every signed call gets a deadline. aws4fetch hands its init through to fetch, so an
+  // AbortSignal is all it takes. Without one a stalled endpoint held the request open for the
+  // life of the process, and a stalled write took the slug's whole write queue with it: every
+  // later PATCH, PUT, DELETE and duplicate on that slug parked behind it while reads kept
+  // working, so the artifact looked healthy and could not be managed.
+  //
+  // get() is the one call this does not wrap. Its body is piped straight to the viewer, so a
+  // slow reader holds the response open and a deadline here would cut a healthy download in
+  // half. A read that never answers is bounded by the write queue's ceiling instead
+  // (lib/write-queue.js), which is the same number.
+  function send(url, init = {}) {
+    return client.fetch(url, { ...init, signal: AbortSignal.timeout(STORAGE_TIMEOUT_MS) });
+  }
+
   // Drain a response body we don't need, so the underlying socket is released.
   async function drain(res) {
     try {
@@ -97,7 +111,7 @@ export async function create() {
       u.searchParams.set('prefix', fullPrefix);
       if (delimiter) u.searchParams.set('delimiter', delimiter);
       if (token) u.searchParams.set('continuation-token', token);
-      const res = await client.fetch(u.toString());
+      const res = await send(u.toString());
       if (!res.ok) {
         await drain(res);
         throw new Error(`s3 list failed: ${res.status}`);
@@ -137,7 +151,7 @@ export async function create() {
   }
 
   async function copyObject(srcKey, destKey) {
-    const res = await client.fetch(objectUrl(destKey), {
+    const res = await send(objectUrl(destKey), {
       method: 'PUT',
       headers: { 'x-amz-copy-source': `/${bucket}/${encodeKey(prefix + srcKey)}` },
     });
@@ -150,7 +164,7 @@ export async function create() {
 
   async function deleteKeys(keys) {
     for (const key of keys) {
-      const res = await client.fetch(objectUrl(key), { method: 'DELETE' });
+      const res = await send(objectUrl(key), { method: 'DELETE' });
       if (!res.ok && res.status !== 404) {
         await drain(res);
         throw new Error(`s3 delete ${key}: ${res.status}`);
@@ -164,7 +178,7 @@ export async function create() {
     streams: true,
 
     async getBuffer(key) {
-      const res = await client.fetch(objectUrl(key));
+      const res = await send(objectUrl(key));
       if (res.status === 404) {
         await drain(res);
         return null;
@@ -177,7 +191,7 @@ export async function create() {
     },
 
     async head(key) {
-      const res = await client.fetch(objectUrl(key), { method: 'HEAD' });
+      const res = await send(objectUrl(key), { method: 'HEAD' });
       await drain(res);
       if (res.status === 404) return null;
       if (!res.ok) throw new Error(`s3 head ${key}: ${res.status}`);
@@ -208,7 +222,7 @@ export async function create() {
       const body = typeof data === 'string' ? Buffer.from(data) : data;
       const headers = {};
       if (contentType) headers['Content-Type'] = contentType;
-      const res = await client.fetch(objectUrl(key), { method: 'PUT', headers, body });
+      const res = await send(objectUrl(key), { method: 'PUT', headers, body });
       if (!res.ok) {
         const detail = await res.text().catch(() => '');
         throw new Error(`s3 put ${key}: ${res.status} ${detail}`.trim());
@@ -281,7 +295,7 @@ export async function create() {
       let lastErr;
       for (let attempt = 0; attempt < 4; attempt++) {
         try {
-          const put = await client.fetch(url, { method: 'PUT', body: Buffer.from('ok') });
+          const put = await send(url, { method: 'PUT', body: Buffer.from('ok') });
           // 4xx is a hard config error (bad creds, missing bucket, denied) — fail fast, no
           // retry. Only network errors and 5xx are transient and worth backing off on.
           if (put.status >= 400 && put.status < 500) {
@@ -295,7 +309,7 @@ export async function create() {
             throw new Error(`transient S3 error ${put.status}`);
           }
           await drain(put);
-          const del = await client.fetch(url, { method: 'DELETE' });
+          const del = await send(url, { method: 'DELETE' });
           await drain(del); // best-effort; a leftover probe object is harmless
           return;
         } catch (err) {

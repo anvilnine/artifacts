@@ -11,7 +11,7 @@ import { z } from 'zod';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 
-import { createStorage, UnsafeKeyError } from './storage/index.js';
+import { createStorage, STORAGE_TIMEOUT_MS, UnsafeKeyError } from './storage/index.js';
 import { createRateLimiter } from './ratelimit.js';
 import {
   createAuthStore,
@@ -34,6 +34,7 @@ import {
 import { SOURCE_EXT, dropOrphanObjects, dropStaleObjects } from './lib/artifact-files.js';
 import { createConfigStore } from './lib/config.js';
 import { ApiError, clientFacingError } from './lib/errors.js';
+import { createWriteQueue } from './lib/write-queue.js';
 import { artifactExpired } from './lib/expiry.js';
 import { qrPng, qrSvg } from './lib/qr.js';
 import {
@@ -683,40 +684,10 @@ function parseExpiresAt(value) {
 // cannot make. The five call sites below keep the short local name.
 const isExpired = artifactExpired;
 
-// Every meta write rewrites the whole record, so a write that started from a snapshot taken
-// before another write landed puts that snapshot back and the other one's field is gone. Two
-// PATCHes to one slug did it in one process without any unusual timing, and the dashboard
-// sends a one-field PATCH per control. Chain the read-modify-write per slug, the way
-// lib/auth.js chains auth.json: each one reloads meta inside the chain, so it changes what
-// the backend holds rather than what the request found when it arrived.
-//
-// This covers one process. Two replicas sharing an s3 or postgres store can still write
-// inside the same window and lose a field; what cannot happen any more is the corrupt
-// meta.json that took the artifact out of every route, because the object write itself is
-// now whole (storage/local.js) or already was (s3, postgres, sqlite).
-const metaWriteChains = new Map();
-function withMetaChain(slug, run) {
-  const prev = metaWriteChains.get(slug) || Promise.resolve();
-  const result = prev.then(run);
-  // The chain holds `tail`, which swallows the rejection, so a write that throws (a 404 on a
-  // missing slug, a 409 on a taken one) does not stop the next caller from running.
-  const tail = result.then(() => {}, () => {});
-  metaWriteChains.set(slug, tail);
-  // Drop the entry once nothing is queued behind it, or the map grows one key per slug the
-  // process ever wrote.
-  tail.then(() => {
-    if (metaWriteChains.get(slug) === tail) metaWriteChains.delete(slug);
-  });
-  return result;
-}
-
-// A rename and a copy write under two names, so they hold both chains. Sorted and de-duplicated
-// first: two renames that cross (a to b while b to a) would otherwise take the two chains in
-// opposite orders and wait on each other forever.
-function withMetaChains(slugs, run) {
-  const keys = [...new Set(slugs)].sort();
-  return keys.reduceRight((next, key) => () => withMetaChain(key, next), run)();
-}
+// Writes to one slug run one at a time, and one write gets STORAGE_TIMEOUT_MS to come back
+// before the queue gives the slug back. Why both, and what a caller hears when the ceiling
+// fires, is in lib/write-queue.js.
+const { withMetaChain, withMetaChains } = createWriteQueue({ ceilingMs: STORAGE_TIMEOUT_MS });
 
 // A slug arriving in a JSON body can be a number, and SLUG_RE coerces it on the way through.
 // `123` and `"123"` name one directory and are two different chain keys, so two writers to that
@@ -2470,6 +2441,8 @@ app.get('/', (req, res) => {
 app.use((err, req, res, next) => {
   const answer = clientFacingError(err);
   if (answer) {
+    // A storage call that ran out of time names how long to wait; nothing else here does.
+    if (answer.retryAfter) res.set('Retry-After', String(answer.retryAfter));
     return res.status(answer.status).json({ error: answer.message });
   }
   console.error(err);

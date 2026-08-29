@@ -45,6 +45,14 @@
 // old type's objects AFTER meta.json names the new one, so a crash mid-conversion leaves the
 // old record whole rather than a listed artifact whose body is gone.
 
+// How long one storage call gets to answer. Longer than a healthy call on any of the five
+// backends, and shorter than the default client timeout in curl, most HTTP libraries and a
+// browser fetch, so a caller waiting on a stalled backend hears a code from this server rather
+// than watching its own client give up. The s3 backend puts it on every request it signs, and
+// server.js caps a chained write with it, so a call that never comes back gives the slug back
+// instead of parking every later write to it. One line to change.
+export const STORAGE_TIMEOUT_MS = 30_000;
+
 // A key/segment that fails validation. Callers map this to 404 (it only reaches a backend
 // via user-controlled zip sub-paths); it must never surface as a 500.
 export class UnsafeKeyError extends Error {}

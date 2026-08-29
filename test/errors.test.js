@@ -7,7 +7,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { ApiError, clientFacingError } from '../lib/errors.js';
+import { ApiError, StorageTimeoutError, clientFacingError } from '../lib/errors.js';
 
 // The error body-parser throws for a body JSON.parse refuses. Strict mode means `null`, `"x"`
 // and `5` land here too, not just broken syntax.
@@ -98,4 +98,20 @@ test('a status that is not a number is not a status', () => {
   err.status = '400';
   err.expose = true;
   assert.equal(clientFacingError(err), null);
+});
+
+// The one 5xx this handler speaks for. Every other 5xx answers a bare 500, because its message
+// can carry whatever a backend said about this server's disks or database; this one is a
+// sentence this repo wrote, and the caller needs it to know a retry is worth making.
+test('a storage call that ran out of time is a 503 the caller can act on', () => {
+  const answer = clientFacingError(new StorageTimeoutError('the storage backend did not answer'));
+  assert.equal(answer.status, 503);
+  assert.equal(answer.message, 'the storage backend did not answer');
+  assert.ok(answer.retryAfter > 0);
+});
+
+// A 5xx ApiError that is not the timeout still says nothing.
+test('any other 5xx still answers a bare 500', () => {
+  assert.equal(clientFacingError(new ApiError(500, '/data/artifacts is full')), null);
+  assert.equal(clientFacingError(new ApiError(503, 'the database is gone')), null);
 });

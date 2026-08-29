@@ -100,6 +100,28 @@ echo "$body" | grep -q "<h1>smoke</h1>" || fail "frame:false body missing conten
 echo "ok: per-item frame off"
 curl -sf -X PATCH "$BASE/api/artifacts/ci-smoke" -H "$AUTH" -H "$JSON" -d '{"frame":null}' > /dev/null
 
+# Writes to one slug run one at a time, and a write now has a ceiling: one that never comes back
+# gives the slug back after 30s and answers 503 rather than parking every later write on that
+# slug for the life of the process (lib/write-queue.js). A stalled backend cannot be provoked
+# from out here, so this covers the half that can be: the queue passes a burst of writes to one
+# slug, and the write after the burst still lands.
+curl -sf -X POST "$BASE/api/artifacts" -H "$AUTH" -H "$JSON" \
+  -d '{"content":"<h1>queue</h1>","type":"html","slug":"ci-queue","visibility":"public"}' > /dev/null
+queued=$(mktemp)
+for n in 1 2 3 4 5; do
+  curl -s -o /dev/null -w '%{http_code}\n' -X PATCH "$BASE/api/artifacts/ci-queue" \
+    -H "$AUTH" -H "$JSON" -d "{\"description\":\"queued $n\"}" >> "$queued" &
+done
+wait
+ok_writes=$(grep -c '^200$' "$queued" || true)
+[ "$ok_writes" = "5" ] || fail "a queued write did not answer 200: $(tr '\n' ' ' < "$queued")"
+rm "$queued"
+curl -sf -X PATCH "$BASE/api/artifacts/ci-queue" -H "$AUTH" -H "$JSON" \
+  -d '{"description":"after the burst"}' > /dev/null
+[ "$(list_field ci-queue description)" = 'after the burst' ] || fail "the write after the burst did not land"
+curl -sf -X DELETE "$BASE/api/artifacts/ci-queue" -H "$AUTH" > /dev/null
+echo "ok: five writes to one slug, and the one after them, all land"
+
 # source endpoint -> 200
 code=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/a/ci-smoke/source")
 expect_code 200 "$code" "source endpoint"
