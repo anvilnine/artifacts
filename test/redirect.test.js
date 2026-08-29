@@ -10,6 +10,9 @@ import assert from 'node:assert/strict';
 import {
   parseRedirectTarget,
   resolveRedirectTarget,
+  pointsAtOwnSlug,
+  storedTargetPointsAtSlug,
+  countRedirectsByKey,
   MAX_REDIRECT_TARGET_LEN,
 } from '../lib/redirect.js';
 
@@ -121,4 +124,104 @@ test('the resolver returns a parsed target, so a caller cannot ship a raw stored
   // CRLF cannot survive: new URL strips it, so no caller can split a header with a stored value.
   const target = await resolveRedirectTarget({ meta: { target: 'https://example.com/x\r\nX-Injected: 1' }, readSource: async () => null });
   assert.doesNotMatch(target, /[\r\n]/);
+});
+
+// --- self-referencing targets, and how many redirects a key has published ---
+
+test('a target pointing at its own slug on this server is a self-reference', () => {
+  const base = 'https://links.example.com';
+  for (const target of [
+    'https://links.example.com/a/hop',
+    'https://links.example.com/a/hop/',
+    'https://links.example.com/a/hop?x=1',
+    'https://links.example.com/a/hop#top',
+    // express decodes the slug out of the path, so an encoded one reaches the same artifact
+    'https://links.example.com/a/%68op',
+    // the scheme is not what makes it this server: a proxy terminates TLS and the origin
+    // behind it still answers on the other one
+    'http://links.example.com/a/hop',
+    // express routes case-insensitively unless `case sensitive routing` is on, so an
+    // upper-case path reaches the same artifact and loops the same way
+    'https://links.example.com/A/HOP',
+    'https://links.example.com/a/Hop',
+    // a trailing dot is the same name to DNS, so this reaches this server too
+    'https://links.example.com./a/hop',
+  ]) {
+    assert.equal(pointsAtOwnSlug(target, 'hop', base), true, `${target} should be a self-reference`);
+  }
+});
+
+test('a target that reaches somewhere else is not a self-reference', () => {
+  const base = 'https://links.example.com';
+  for (const target of [
+    'https://links.example.com/a/other', // another slug, which may not even exist
+    'https://links.example.com/a/hop/source', // serves the target as text, no loop
+    'https://links.example.com/hop', // not an artifact path
+    'https://example.com/a/hop', // another host that happens to use the same layout
+    'https://links.example.com:8443/a/hop', // another port is another server
+    // one segment holding an encoded slash, which express matches raw: /a%2fhop is not the
+    // route /a/:slug, so it is a 404 rather than a hop back here
+    'https://links.example.com/a%2fhop',
+    'https://links.example.com/a%2Fhop',
+    // the literal part of the route is matched raw too, so an encoded "a" reaches nothing
+    'https://links.example.com/%61/hop',
+    'not a url',
+  ]) {
+    assert.equal(pointsAtOwnSlug(target, 'hop', base), false, `${target} should pass`);
+  }
+});
+
+test('a self-reference check with nothing to compare against refuses nothing', () => {
+  assert.equal(pointsAtOwnSlug('https://links.example.com/a/hop', 'hop', ''), false);
+  assert.equal(pointsAtOwnSlug('https://links.example.com/a/hop', '', 'https://links.example.com'), false);
+  assert.equal(pointsAtOwnSlug('https://links.example.com/a/hop', 'hop', 'not a url'), false);
+});
+
+test('a rename is checked against the target the serve path would follow', async () => {
+  const base = 'https://links.example.com';
+  const fromBody = async () => Buffer.from('https://links.example.com/a/hop');
+
+  // meta carries the target, which is the normal case
+  assert.equal(
+    await storedTargetPointsAtSlug({
+      meta: { type: 'redirect', target: 'https://links.example.com/a/hop' },
+      readSource: async () => null,
+      slug: 'hop',
+      baseUrl: base,
+    }),
+    'https://links.example.com/a/hop',
+  );
+
+  // a redirect published before meta.target existed keeps its target in source.url only.
+  // Reading meta.target straight off the record makes this new URL(undefined), which throws
+  // inside the check and lets the rename close the loop.
+  assert.equal(
+    await storedTargetPointsAtSlug({ meta: { type: 'redirect' }, readSource: fromBody, slug: 'hop', baseUrl: base }),
+    'https://links.example.com/a/hop',
+  );
+
+  // a rename somewhere else is fine, and so is a record with no usable target at all
+  assert.equal(
+    await storedTargetPointsAtSlug({ meta: { type: 'redirect' }, readSource: fromBody, slug: 'other', baseUrl: base }),
+    null,
+  );
+  assert.equal(
+    await storedTargetPointsAtSlug({ meta: { type: 'redirect' }, readSource: async () => null, slug: 'hop', baseUrl: base }),
+    null,
+  );
+});
+
+test('redirects are counted per key, and nothing else is', () => {
+  const counts = countRedirectsByKey([
+    { slug: 'a', type: 'redirect', keyId: 'k1' },
+    { slug: 'b', type: 'redirect', keyId: 'k1' },
+    { slug: 'c', type: 'redirect', keyId: 'k2' },
+    { slug: 'd', type: 'html', keyId: 'k1' }, // not a redirect
+    { slug: 'e', type: 'redirect' }, // published by the bootstrap key or a session
+    { slug: 'f', type: 'redirect', keyId: 42 }, // a hand edit, not a key id
+  ]);
+  assert.equal(counts.get('k1'), 2);
+  assert.equal(counts.get('k2'), 1);
+  assert.equal(counts.get('k3'), undefined);
+  assert.equal(counts.size, 2);
 });
