@@ -92,8 +92,9 @@ Rules:
   is the caller's problem.
 - Max 7 MB per PDF, measured on the decoded bytes. The publish body parser stops at 10 MB of JSON
   and base64 costs 4 bytes for every 3, so 7 MB of PDF is about 9.33 MB of request. Above roughly
-  7.5 MB decoded the body parser answers first, with its own `body too large` message that names
-  neither PDFs nor the cap; the dashboard checks the size before it uploads for that reason.
+  7.5 MB decoded the body parser answers first, with a `body too large` message that names the
+  10 MB request limit rather than the 7 MB PDF cap; the dashboard checks the size before it
+  uploads for that reason.
 - A `PUT` of a PDF has to name `type` (`"pdf"` to send new bytes, another type to convert it).
   Omitting `type` on any other artifact rewrites it as html; on a PDF that would delete bytes
   nothing can rebuild, so it is refused instead. `PUT` with no `pdf` field keeps the stored viewer

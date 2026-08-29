@@ -2274,6 +2274,10 @@ floodbody=$(mktemp)
 code=$(curl -s -o "$floodbody" -w '%{http_code}' -X GET "$BASE/healthz" -H "$JSON" \
   --data-binary "@$bigbody")
 expect_code 413 "$code" "a GET carrying a body is capped like any other body"
+# and the 413 names the limit that applied, not the 10 MB one this caller was already under
+grep -q 'the limit on this request is 256 kb' "$floodbody" \
+  || fail "the 413 does not name the limit that applied: $(cat "$floodbody")"
+echo "ok: the 413 names the limit that actually applied"
 
 # A read key is the weakest credential an operator can issue. It gets the same small parser: it
 # cannot publish, so it has no use for a 10 MB buffer, and it used to get one and then a 403.

@@ -144,7 +144,7 @@ Uploaded HTML runs in the browser. That is the whole point, so the model is buil
 - **Serve artifacts from their own origin.** Point artifact URLs at a domain that hosts nothing else, so a published page can never touch the dashboard's session cookie.
 - **Writes need a scoped API key.** Publishing carries a bearer key; the admin dashboard uses a separate HttpOnly, SameSite=Strict session cookie.
 - **Reads rely on unguessable slugs.** Public artifacts are reachable by anyone with the link and carry `noindex`, but there is no listing to browse. Don't publish secrets.
-- **Credential routes are throttled.** Login and unlock rate-limit per client IP and hash passwords off the event loop. The publish routes cap large bodies per client IP (20 a minute over 256 kB), checked before the body is parsed. Put a CDN or edge limiter in front for volumetric attacks.
+- **Credential routes are throttled.** Login and unlock rate-limit per client IP and hash passwords off the event loop. A caller below `publish` scope gets a 256 kB body parser instead of the 10 MB one, and a cap of 20 large bodies a minute per client IP, both checked before the body is parsed. Put a CDN or edge limiter in front for volumetric attacks.
 
 Full threat model in [SECURITY.md](SECURITY.md).
 

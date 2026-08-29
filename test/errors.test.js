@@ -64,6 +64,24 @@ test('a body past the limit is a 413 naming the limits', () => {
   assert.match(answer.message, /body too large/);
 });
 
+// The message used to name all four parsers, so a 300 kB body refused at 256 kB was told to cut
+// to 10 MB, a limit it was already under. raw-body puts the limit that actually applied on the
+// error; the message reads it off there.
+test('the 413 names the limit that applied, not every limit there is', () => {
+  const refusedAt = (limit) => {
+    const err = new Error('request entity too large');
+    err.status = 413;
+    err.expose = true;
+    err.type = 'entity.too.large';
+    err.limit = limit;
+    return clientFacingError(err).message;
+  };
+  assert.equal(refusedAt(256 * 1024), 'body too large: the limit on this request is 256 kb');
+  assert.equal(refusedAt(16 * 1024), 'body too large: the limit on this request is 16 kb');
+  assert.equal(refusedAt(10 * 1024 * 1024), 'body too large: the limit on this request is 10 mb');
+  assert.equal(refusedAt(50 * 1024 * 1024), 'body too large: the limit on this request is 50 mb');
+});
+
 test('an encoding body-parser cannot decode is a 415', () => {
   const err = new Error('unsupported content encoding "br"');
   err.status = 415;

@@ -137,3 +137,39 @@ test('a two-name write still hears 503 when its own call stalls', async () => {
   const hung = queue.withMetaChains(['a', 'b'], never);
   await assert.rejects(hung, (err) => err instanceof StorageTimeoutError);
 });
+
+// The ceiling used to be set up inside the chain step, so it only ran once the step started. A
+// caller whose own write was running got its 503; a caller queued behind a wedged write never
+// started, so it heard nothing at all. server.js sets no server.timeout, so that socket stays
+// open for the life of the process, and the 503 the write in front got tells its caller to
+// retry into the same silence.
+test('a caller queued behind a write that never comes back hears the same 503', async () => {
+  const queue = createWriteQueue({ ceilingMs: 20 });
+  const wedged = queue.withMetaChain('s', never);
+  let ran = false;
+  const queued = queue.withMetaChain('s', async () => { ran = true; return 'ok'; });
+  await assert.rejects(wedged, (err) => err instanceof StorageTimeoutError);
+  await assert.rejects(queued, (err) => err instanceof StorageTimeoutError);
+  await new Promise((r) => setTimeout(r, 30));
+  assert.equal(ran, false, 'the queued write ran after its caller was told to retry');
+});
+
+// Same for a rename, which holds two names and can be stuck behind a wedged write on either.
+test('a rename queued behind a write that never comes back hears the same 503', async () => {
+  const queue = createWriteQueue({ ceilingMs: 20 });
+  const wedged = queue.withMetaChain('b', never);
+  const rename = queue.withMetaChains(['a', 'b'], async () => 'renamed');
+  await assert.rejects(wedged, (err) => err instanceof StorageTimeoutError);
+  await assert.rejects(rename, (err) => err instanceof StorageTimeoutError);
+});
+
+// Only a stalled storage call travels down the queue. A 404 on a missing slug or a 409 on a
+// taken one belongs to the caller that made it: the slug came free straight after, so the next
+// writer runs and gets its own answer.
+test('an ordinary failure does not travel down the queue', async () => {
+  const queue = createWriteQueue({ ceilingMs: 1000 });
+  const failed = queue.withMetaChain('s', async () => { throw new Error('slug "x" already exists'); });
+  const behind = queue.withMetaChain('s', async () => 'ok');
+  await assert.rejects(failed, /already exists/);
+  assert.equal(await behind, 'ok');
+});
