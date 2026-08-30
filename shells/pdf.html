@@ -124,8 +124,19 @@
 
     // Inside the viewer frame the toolbar above already names the artifact, so the title here
     // would be the same words twice. Unframed (?raw=1, frame off) it is the only one there is.
+    var framed = window.parent !== window;
     var titleEl = document.getElementById('title');
-    if (titleEl && window.parent !== window) titleEl.textContent = '';
+    if (titleEl && framed) titleEl.textContent = '';
+
+    // And with the title gone, standard mode's bar is Open and Download over a browser toolbar
+    // that already has download and print. Three bars stacked is about 144px before the page
+    // starts, two of them nearly empty, so this one goes when it is framed. The server decides
+    // which modes may: presentation keeps its bar for the full-screen button. A browser that
+    // will not render the PDF still gets Open and Download, from the fallback below.
+    if (framed && '{{HIDE_BAR_IN_FRAME}}') {
+      var barEl = document.getElementById('bar');
+      if (barEl) barEl.remove();
+    }
 
     // A browser that will not render a PDF is supposed to show the <object>'s children, and
     // some do. Others accept application/pdf, reserve the whole box, paint nothing in it, and

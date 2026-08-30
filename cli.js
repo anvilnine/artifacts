@@ -5,7 +5,11 @@ import { parseArgs } from 'node:util';
 
 import AdmZip from 'adm-zip';
 
+import { sweepOrphans, SWEEP_MIN_AGE_MS } from './lib/artifact-files.js';
+import { brandingPatchFromFlags } from './lib/branding.js';
+import { previewReach } from './lib/social.js';
 import { artifactExpired } from './lib/expiry.js';
+import { createStorage } from './storage/index.js';
 
 const USAGE = `artifacts — publish to a self-hosted artifacts instance
 
@@ -29,9 +33,15 @@ Usage:
   artifacts source <slug> [-o file]
   artifacts qr <slug> [--png] [--scale n] [--margin n] [-o file]
   artifacts config [--frame-enabled true|false] [--frame-default true|false]
+                   [--brand-name <text|none>] [--brand-logo <path|data-uri|none>]
+                   [--brand-favicon <path|data-uri|none>] [--brand-accent <color|none>]
+                   [--brand-footer <text|none>]
   artifacts keys list
   artifacts keys create <name> [--scopes read,publish,full] [--expires ISO]
   artifacts keys revoke <id>
+
+Maintenance (runs on the server host against its own storage, not over HTTP):
+  artifacts sweep [--apply] [--older-than <hours>]
 
 Connection (flags override env):
   --url   server origin        [env: ARTIFACTS_URL]
@@ -61,7 +71,14 @@ const { values: opts, positionals } = parseArgs({
     password: { type: 'string' },
     'frame-enabled': { type: 'string' },
     'frame-default': { type: 'string' },
+    'brand-name': { type: 'string' },
+    'brand-logo': { type: 'string' },
+    'brand-favicon': { type: 'string' },
+    'brand-accent': { type: 'string' },
+    'brand-footer': { type: 'string' },
     output: { type: 'string', short: 'o' },
+    apply: { type: 'boolean' },
+    'older-than': { type: 'string' },
     png: { type: 'boolean' },
     scale: { type: 'string' },
     margin: { type: 'string' },
@@ -80,7 +97,9 @@ if (opts.help || !command) {
 const url = (opts.url || process.env.ARTIFACTS_URL || '').replace(/\/$/, '');
 const key = opts.key || process.env.ARTIFACTS_API_KEY;
 
-if (!url) fail('server URL required: pass --url or set ARTIFACTS_URL');
+// Every verb but `sweep` talks to a running instance. `sweep` opens the configured store
+// directly, so it needs the server's env (DATA_DIR / STORAGE_BACKEND) and no URL at all.
+if (!url && command !== 'sweep') fail('server URL required: pass --url or set ARTIFACTS_URL');
 
 async function api(method, apiPath, { body, contentType, auth = true } = {}) {
   if (auth && !key) fail('API key required: pass --key or set ARTIFACTS_API_KEY');
@@ -123,6 +142,25 @@ function need(count, hint) {
   if (args.length < count) fail(`usage: artifacts ${command} ${hint}`);
 }
 
+// A preview the server will never render is worth one line on the way out. The two reads are
+// what it takes to know: the artifact's own type and frame setting, and the global frame pair
+// that a per-item null falls back to. Both are read-scoped, and a failure here is not the
+// operator's problem, so it stays quiet rather than turning a successful set into an error.
+async function warnUnreachablePreview(slug) {
+  try {
+    const [items, cfg] = await Promise.all([
+      apiJson('GET', '/api/artifacts'),
+      apiJson('GET', '/api/config'),
+    ]);
+    const item = items.find((a) => a.slug === slug);
+    if (!item) return;
+    const framed = cfg.frame.enabled &&
+      (typeof item.frame === 'boolean' ? item.frame : cfg.frame.default);
+    const reach = previewReach({ type: item.type, framed, frameEnabled: cfg.frame.enabled });
+    if (!reach.shows) console.error(`warning: ${reach.why}`);
+  } catch {}
+}
+
 function parseBool(value, name) {
   if (value === 'true' || value === '1') return true;
   if (value === 'false' || value === '0') return false;
@@ -155,6 +193,7 @@ switch (command) {
       ...(opts.password !== undefined && { password: opts.password }),
     });
     console.log(out.url);
+    if (opts.description || opts['og-image']) await warnUnreachablePreview(out.slug);
     break;
   }
 
@@ -204,6 +243,7 @@ switch (command) {
       ...(opts.password !== undefined && { password: opts.password }),
     });
     console.log(out.url);
+    if (opts.description || opts['og-image']) await warnUnreachablePreview(out.slug);
     break;
   }
 
@@ -301,8 +341,15 @@ switch (command) {
     const frame = {};
     if (opts['frame-enabled'] !== undefined) frame.enabled = parseBool(opts['frame-enabled'], '--frame-enabled');
     if (opts['frame-default'] !== undefined) frame.default = parseBool(opts['frame-default'], '--frame-default');
-    const out = Object.keys(frame).length
-      ? await apiJson('PUT', '/api/config', { frame })
+    // Both blocks go in one PUT. The server merges a partial branding object, so a run that
+    // sets one field leaves the other four as they were, and `--brand-name none` clears it.
+    const branding = brandingPatchFromFlags(opts);
+    const patch = {
+      ...(Object.keys(frame).length && { frame }),
+      ...(Object.keys(branding).length && { branding }),
+    };
+    const out = Object.keys(patch).length
+      ? await apiJson('PUT', '/api/config', patch)
       : await apiJson('GET', '/api/config');
     console.log(JSON.stringify(out, null, 2));
     break;
@@ -354,6 +401,9 @@ switch (command) {
     if ('ogImage' in patch) {
       console.log(patch.ogImage ? `${args[0]} og-image: ${patch.ogImage}` : `${args[0]} og-image cleared`);
     }
+    // Setting a preview that nothing will ever render is the failure worth naming here, so the
+    // warning follows a set and not a clear.
+    if (patch.description || patch.ogImage) await warnUnreachablePreview(args[0]);
     break;
   }
 
@@ -361,6 +411,34 @@ switch (command) {
     need(1, '<slug>');
     await apiJson('DELETE', `/api/artifacts/${args[0]}`);
     console.log(`${args[0]} deleted`);
+    break;
+  }
+
+  // The one-time cleanup for an install that has been converting artifacts since before the
+  // server pruned the old type's files. Prints what it would remove and removes nothing;
+  // --apply removes it, the way the destructive verbs above take an explicit argument rather
+  // than acting on a bare slug. Safe to run more than once.
+  case 'sweep': {
+    const apply = Boolean(opts.apply);
+    // Hours, because that is the unit the floor is written in. 0 turns it off, which is the only
+    // way to sweep a store that cannot report a file age.
+    let minAgeMs = SWEEP_MIN_AGE_MS;
+    if (opts['older-than'] !== undefined) {
+      const hours = Number(opts['older-than']);
+      if (!Number.isFinite(hours) || hours < 0) fail('--older-than takes a number of hours (0 turns the age floor off)');
+      minAgeMs = hours * 3_600_000;
+    }
+    const storage = await createStorage();
+    const { found, removed, kept } = await sweepOrphans(storage, { apply, minAgeMs });
+    if (!apply) {
+      for (const key of found) console.log(`would remove ${key}`);
+      const count = `${found.length} orphaned file${found.length === 1 ? '' : 's'}`;
+      console.log(`${count} found; re-run with --apply to remove them`);
+      break;
+    }
+    for (const key of removed) console.log(`removed ${key}`);
+    for (const { key, why } of kept) console.log(`kept ${key}: ${why}`);
+    console.log(`${removed.length} removed, ${kept.length} kept of ${found.length} orphaned file${found.length === 1 ? '' : 's'}`);
     break;
   }
 

@@ -92,8 +92,9 @@ Rules:
   is the caller's problem.
 - Max 7 MB per PDF, measured on the decoded bytes. The publish body parser stops at 10 MB of JSON
   and base64 costs 4 bytes for every 3, so 7 MB of PDF is about 9.33 MB of request. Above roughly
-  7.5 MB decoded the body parser answers first, with its own `body too large` message that names
-  neither PDFs nor the cap; the dashboard checks the size before it uploads for that reason.
+  7.5 MB decoded the body parser answers first, with a `body too large` message that names the
+  10 MB request limit rather than the 7 MB PDF cap; the dashboard checks the size before it
+  uploads for that reason.
 - A `PUT` of a PDF has to name `type` (`"pdf"` to send new bytes, another type to convert it).
   Omitting `type` on any other artifact rewrites it as html; on a PDF that would delete bytes
   nothing can rebuild, so it is refused instead. `PUT` with no `pdf` field keeps the stored viewer
@@ -146,18 +147,39 @@ The three modes:
 
 | Mode | The page |
 |---|---|
-| `standard` | Our toolbar (title, Open, Download) above the document, browser controls untouched. |
-| `presentation` | A whole page at a time on a dark backdrop, with a Full screen button in the toolbar. The browser's own toolbar is asked to go, so slides are not framed by chrome. |
+| `standard` | Our toolbar (title, Open, Download) above the document, browser controls untouched. Inside the viewer frame this toolbar is dropped: see below. |
+| `presentation` | A whole page at a time on a dark backdrop, with a Full screen button in the toolbar. The browser's side panel is asked to go; its toolbar stays, because that toolbar is the page counter of a multi-page deck (Chromium draws a typeable page field and the total, no prev/next buttons). Chrome hides it in full screen, which is where a deck is read. |
 | `minimal` | The document, edge to edge. No toolbar of ours; the browser's is left alone, because with ours gone it is the only way left to reach the file. |
 
-Which of them hides the browser's own controls comes down to two things: `presentation` always
-asks for them to go, and `download: false` asks in every mode (the next section covers that half).
+Which of them hides the browser's own controls comes down to `download: false`, which asks in
+every mode (the next section covers that half). `presentation` asks only for the side panel to go.
 So `standard` with downloads off is the document alone, and `minimal` with downloads on still has
 the browser's toolbar over it.
+
+**Presentation with downloads off has no page counter.** Hiding the file works by asking the
+browser's toolbar to go, and that toolbar is also the page counter. There is no way to keep one
+and not the other: an `<object>` holding a PDF exposes no current page to the
+page around it, and reassigning its `data` to jump to `#page=N` blanks the viewer in Chromium
+rather than moving it. A reader in that combination still moves with the arrow keys and the
+scroll wheel. If page navigation matters more than the buttons, leave `download` on.
 
 A bar of ours with nothing in it is never drawn. `standard` with downloads off has no buttons left,
 and inside the viewer frame the title is already in the frame's own bar, so the mode renders the
 document with no bar rather than an empty strip.
+
+**Inside the viewer frame, `standard` drops our toolbar entirely.** Framed, a PDF used to arrive
+under three stacked bars: the frame's own (44px), ours (44px) and the browser's PDF toolbar
+(56px), about 144px at 1200px wide before the document started. Ours was the one earning least.
+Its title is already blank there, because the frame's bar above says the same words, so what was
+left was Open and Download over a browser toolbar that already carries download and print. It now
+goes, and the framed view is two bars, about 100px.
+
+Nothing is taken away. Unframed (`?raw=1`, or the frame off) our bar is the only one there is and
+it renders in full. `presentation` keeps its bar framed or not, because the Full screen button
+lives nowhere else, so a framed deck still arrives under the whole three bar stack: the frame's
+44px, ours 44px and the browser's 56px, the same 144px `standard` no longer pays. `minimal` never
+had one. And a browser that refuses to render the PDF still
+gets Open and Download from the fallback in the middle of the page.
 
 An artifact with both defaults stores nothing at all, so `GET /api/artifacts` shows a `pdf` field
 only on an artifact somebody configured.
@@ -188,8 +210,8 @@ A zipped static project (HTML + CSS + JS + images) served under `/a/{slug}/`. Up
 ### Custom not-found page
 
 Put a `404.html` at the root of the zip and any miss under `/a/{slug}/` serves it with a 404
-status: a missing file, a missing directory, a directory with no `index.html`. Without one, a miss
-is a plain-text `not found`. The page is served the same way as the rest of the site, so relative
+status: a missing file, a missing directory, a directory with no `index.html`. Without one, a miss is the branded 404
+card for a browser navigation and a plain-text `not found` for an asset read or a script. The page is served the same way as the rest of the site, so relative
 asset URLs inside it resolve against `/a/{slug}/`. Most static site generators already emit a
 `404.html`, so this needs no extra work for an Astro or Eleventy build.
 
@@ -257,6 +279,7 @@ Rules:
 - The target cannot carry a username or password. A redirect is a public hop: the credentials would show in the dashboard row, come back from the list API to every `read` key, and reach the target host from anyone who follows the link. A target already stored with credentials keeps redirecting, so an upgrade takes nothing off the air.
 - The stored target is the normalized URL, not the bytes you sent: surrounding whitespace goes, the scheme and host lowercase, and everything else percent-encodes. The 2048-character cap is measured on that normalized value.
 - The response carries `Cache-Control: no-store`. A browser would otherwise pin a 301 for good and strand returning visitors on the old target, so `no-store` is what makes repointing the slug with a `PUT` take effect on the next visit.
+- Repointing a redirect with a `PUT` has to carry `type: "redirect"`. A `PUT` that leaves `type` out rewrites the slug as an html page holding the target URL as its body, and the redirect stops answering 301. The CLI sends the type for you when you name it (`artifacts update pricing new-target.txt --type redirect`); the row menu's Edit target action sends it too.
 - Redirects skip the viewer frame, and `?raw=1` does not change that. `GET /a/:slug/source` returns the stored target as plain text.
 - The 301 carries `Referrer-Policy: no-referrer`, so the target never learns which slug sent the visitor. That also keeps a `?k=` capability token out of the referrer on the hop.
 - Visibility works the same as every other type. A private redirect with no capability link answers 404 on every path and never sends `Location`.
@@ -293,11 +316,13 @@ artifact's URL included). Set them on `POST` / `PUT` / `PATCH`, on the zip endpo
 string, from the row menu in the dashboard ("Description…" and "Preview image…"), or with the
 `description` and `ogImage` arguments on the `publish_artifact` and `update_artifact` MCP tools.
 
-The tags land in the two pages the server builds per request:
+The tags land in the three pages the server builds per request:
 
 - The **viewer frame**, which is what a top-level visit to `/a/<slug>` gets while frames are on.
   This covers every type, html included.
 - The **markdown render**, so an md artifact carries them with the frame off too.
+- The **pdf viewer page**, which is what `/a/<slug>` serves for a pdf whether or not the frame is
+  on, so a pdf carries them with the frame off too.
 
 They do not land anywhere else, and that is deliberate. An `html` artifact is served as-is, and a
 `jsx` artifact's page is baked at publish time, so writing tags into either means editing bytes the
@@ -308,9 +333,17 @@ bytes as uploaded is `GET /a/:slug/source`.
 
 Two consequences worth knowing before you set the fields:
 
-- **An html, jsx or zip artifact needs the frame.** With `frame:false` on the artifact, or
+- **An html, jsx, tsx or zip artifact needs the frame.** With `frame:false` on the artifact, or
   `FRAME_ENABLED=false` on the server, nothing wraps those types and no preview tag renders
-  anywhere. The fields still store and still list. Only md carries them with no frame.
+  anywhere. The fields still store and still list. md and pdf carry them with no frame; those
+  four do not.
+
+  Rather than splice tags into a document its author wrote, every surface that sets a preview
+  says when it will not show. The dashboard's "Description…" and "Preview image…" dialogs read
+  the artifact's own frame setting and the global pair, and say the frame is off for this one
+  when it is. `artifacts preview`, `artifacts publish` and `artifacts deploy` print a
+  `warning:` line to stderr after setting a preview that nothing will render. The API and the
+  MCP tools still accept the fields and still report them as set.
 - **A redirect stores them and renders nothing**, because it answers `301` with no page at all.
   Same shape as the `frame` field on a redirect, which is also stored and never used. The dashboard
   hides both items on a redirect row; the API and the MCP tools take them without complaint.

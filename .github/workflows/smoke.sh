@@ -99,6 +99,51 @@ if echo "$body" | grep -q '<iframe'; then fail "frame:false still framed"; fi
 echo "$body" | grep -q "<h1>smoke</h1>" || fail "frame:false body missing content"
 echo "ok: per-item frame off"
 curl -sf -X PATCH "$BASE/api/artifacts/ci-smoke" -H "$AUTH" -H "$JSON" -d '{"frame":null}' > /dev/null
+# T2.5.2: the contract the dashboard's Embed snippet and docs/embedding.md rest on. Three things
+# have to hold at once for a paste into somebody else's page to work. The artifact sends no
+# frame-ancestors and no X-Frame-Options, so a browser lets any page frame it. A frame load with
+# no ?raw=1 still gets the bare artifact, because Sec-Fetch-Dest says it is a frame, so an embed
+# never stacks a second toolbar. And the toolbar page itself refuses to be framed, which is what
+# keeps the unlock prompt (same CSP) out of a page a viewer does not control. Headers go to a
+# file rather than a pipe: grep -q exits on the first match and would SIGPIPE curl under pipefail.
+embed_hdr=$(mktemp)
+curl -s -D "$embed_hdr" -o /dev/null "$BASE/a/ci-smoke?raw=1"
+if grep -qi '^x-frame-options' "$embed_hdr"; then fail "an artifact sends X-Frame-Options and cannot be embedded"; fi
+if grep -i '^content-security-policy' "$embed_hdr" | grep -qi 'frame-ancestors'; then
+  fail "an artifact's CSP names frame-ancestors and cannot be embedded"
+fi
+curl -s -D "$embed_hdr" -o /dev/null "$BASE/a/ci-smoke"
+grep -i '^content-security-policy' "$embed_hdr" | grep -qF "frame-ancestors 'none'" \
+  || fail "the viewer toolbar page can be framed"
+rm "$embed_hdr"
+embed_body=$(mktemp)
+curl -s -H 'Sec-Fetch-Dest: iframe' -o "$embed_body" "$BASE/a/ci-smoke"
+grep -q '<h1>smoke</h1>' "$embed_body" || fail "a frame load without ?raw=1 did not get the bare artifact"
+if grep -q '<iframe' "$embed_body"; then fail "a frame load got the toolbar page and would stack two frames"; fi
+rm "$embed_body"
+echo "ok: an artifact can be embedded on another site, its toolbar page cannot"
+
+# Writes to one slug run one at a time, and a write now has a ceiling: one that never comes back
+# gives the slug back after 30s and answers 503 rather than parking every later write on that
+# slug for the life of the process (lib/write-queue.js). A stalled backend cannot be provoked
+# from out here, so this covers the half that can be: the queue passes a burst of writes to one
+# slug, and the write after the burst still lands.
+curl -sf -X POST "$BASE/api/artifacts" -H "$AUTH" -H "$JSON" \
+  -d '{"content":"<h1>queue</h1>","type":"html","slug":"ci-queue","visibility":"public"}' > /dev/null
+queued=$(mktemp)
+for n in 1 2 3 4 5; do
+  curl -s -o /dev/null -w '%{http_code}\n' -X PATCH "$BASE/api/artifacts/ci-queue" \
+    -H "$AUTH" -H "$JSON" -d "{\"description\":\"queued $n\"}" >> "$queued" &
+done
+wait
+ok_writes=$(grep -c '^200$' "$queued" || true)
+[ "$ok_writes" = "5" ] || fail "a queued write did not answer 200: $(tr '\n' ' ' < "$queued")"
+rm "$queued"
+curl -sf -X PATCH "$BASE/api/artifacts/ci-queue" -H "$AUTH" -H "$JSON" \
+  -d '{"description":"after the burst"}' > /dev/null
+[ "$(list_field ci-queue description)" = 'after the burst' ] || fail "the write after the burst did not land"
+curl -sf -X DELETE "$BASE/api/artifacts/ci-queue" -H "$AUTH" > /dev/null
+echo "ok: five writes to one slug, and the one after them, all land"
 
 # source endpoint -> 200
 code=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/a/ci-smoke/source")
@@ -113,6 +158,47 @@ expect_code 404 "$code" "disabled artifact"
 curl -sf -X PATCH "$BASE/api/artifacts/ci-smoke" -H "$AUTH" -H "$JSON" -d '{"disabled":false,"expiresAt":"2020-01-01"}' > /dev/null
 code=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/a/ci-smoke")
 expect_code 410 "$code" "expired artifact"
+
+# A browser navigation gets a branded page, not the bare string, and it says expired rather than
+# reusing the 404 copy. A reader who lands on a lapsed link needs to know the link was fine.
+expired_headers=$(mktemp)
+expired_body=$(mktemp)
+code=$(curl -s -H 'Accept: text/html' -D "$expired_headers" -o "$expired_body" -w '%{http_code}' "$BASE/a/ci-smoke")
+expect_code 410 "$code" "expired artifact page"
+grep -qi '^Content-Type: text/html' "$expired_headers" || fail "expired artifact is not HTML"
+grep -qi '^Vary: Accept' "$expired_headers" || fail "expired card has no Vary: Accept"
+grep -q 'Artifact expired' "$expired_body" || fail "expired page copy missing"
+grep -q '<p class="status">410</p>' "$expired_body" || fail "expired page does not show 410"
+grep -q 'Artifact unavailable' "$expired_body" && fail "expired page reuses the 404 copy"
+rm "$expired_headers"
+rm "$expired_body"
+echo "ok: branded artifact-expired page"
+
+# ...and everything that is not a navigation keeps the one line it has always had. curl, fetch()
+# and an embed send Accept: */*, and 3 kB of HTML in place of "artifact expired" is noise to all
+# three. The sub-paths below split the same way; this is the top-level route doing it too.
+expired_plain=$(mktemp)
+expired_plain_headers=$(mktemp)
+code=$(curl -s -D "$expired_plain_headers" -o "$expired_plain" -w '%{http_code}' "$BASE/a/ci-smoke")
+expect_code 410 "$code" "expired artifact for a machine"
+grep -qi '^Content-Type: text/plain' "$expired_plain_headers" || fail "expired artifact is not plain text for a machine"
+grep -qi '^X-Content-Type-Options: nosniff' "$expired_plain_headers" || fail "expired plain body has no nosniff"
+grep -qi '^Vary: Accept' "$expired_plain_headers" || fail "expired plain body has no Vary: Accept"
+grep -q '^artifact expired$' "$expired_plain" || fail "expired body changed for a machine"
+rm "$expired_plain"
+rm "$expired_plain_headers"
+echo "ok: the expired page splits by Accept"
+
+# a sub-path read keeps the plain body for a machine and gives a person the card. curl sends
+# Accept: */*, a browser navigation sends text/html.
+curl -s "$BASE/a/ci-smoke/source" | grep -q '^artifact expired$' || fail "expired source body changed for a machine"
+card=$(mktemp)
+curl -s -H 'Accept: text/html' -o "$card" "$BASE/a/ci-smoke/source"
+grep -q 'Artifact expired' "$card" || fail "expired source has no card for a browser"
+rm "$card"
+code=$(curl -s -o /dev/null -w '%{http_code}' -H 'Accept: text/html' "$BASE/a/ci-smoke/source")
+expect_code 410 "$code" "expired source keeps its status for a browser"
+echo "ok: expiry sub-path splits by Accept"
 
 # clear expiry + rename -> new slug serves, old 404
 curl -sf -X PATCH "$BASE/api/artifacts/ci-smoke" -H "$AUTH" -H "$JSON" -d '{"expiresAt":null,"slug":"ci-smoke-2"}' > /dev/null
@@ -638,6 +724,21 @@ curl -s "$BASE/a/ci-conv/source" | grep -q 'step html again' || fail "html conve
 curl -sf -X DELETE "$BASE/api/artifacts/ci-conv" -H "$AUTH" > /dev/null
 echo "ok: every type conversion serves the type it was given"
 
+# T2.1.19: a PUT is a replace, and `type` falls back to html when the body leaves it out, so an
+# update that omits it converts the artifact and drops the source the old type owned. Z kept the
+# behaviour and had the docs say so on every surface that describes a PUT. This is the case that
+# keeps that claim honest. The two exceptions refuse instead, and both are covered where their own
+# blocks are: a pdf answers 400, a zip site answers 400 on any inline PUT.
+curl -sf -X POST "$BASE/api/artifacts" -H "$AUTH" -H "$JSON" \
+  -d '{"content":"# no type given\n\nhi","type":"md","slug":"ci-notype","visibility":"public"}' > /dev/null
+curl -sf -X PUT "$BASE/api/artifacts/ci-notype" -H "$AUTH" -H "$JSON" \
+  -d '{"content":"<h1>became html</h1>"}' > /dev/null
+[ "$(list_field ci-notype type)" = 'html' ] || fail "a PUT with no type left the md artifact as md"
+[ "$(curl -s "$BASE/a/ci-notype/source")" = '<h1>became html</h1>' ] \
+  || fail "the converted artifact does not serve the html it was given"
+curl -sf -X DELETE "$BASE/api/artifacts/ci-notype" -H "$AUTH" > /dev/null
+echo "ok: a PUT with no type converts the artifact to html"
+
 # a copy keeps the target
 dupslug=$(curl -s -X POST "$BASE/api/artifacts/ci-redir/duplicate" -H "$AUTH" -H "$JSON" \
   -d '{"slug":"ci-redir-copy","visibility":"public"}' | sed -n 's/.*"slug":"\([^"]*\)".*/\1/p')
@@ -885,6 +986,10 @@ echo "ok: zip tags"
 code=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/a/ci-zip/nope.html")
 expect_code 404 "$code" "zip miss, no 404.html in zip"
 curl -s "$BASE/a/ci-zip/nope.html" | grep -q '^not found$' || fail "zip miss body changed"
+zipmiss=$(mktemp)
+curl -s -H 'Accept: text/html' -o "$zipmiss" "$BASE/a/ci-zip/nope.html"
+grep -q 'Artifact unavailable' "$zipmiss" || fail "zip miss has no card for a browser"
+rm "$zipmiss"
 echo "ok: zip miss falls back to plain not-found"
 
 # zip site with a 404.html: every miss under the site serves that page, still status 404
@@ -934,6 +1039,17 @@ expect_code 200 "$code" "zip duplicate asset served"
 # duplicate: omitted fields inherit from the source (ci-zip has tags zipped,site)
 curl -s "$BASE/api/artifacts" -H "$AUTH" | grep -q '"ci-zip-dup"' || fail "zip duplicate not listed"
 echo "ok: duplicate copies zip site + inherits fields"
+
+# T2.1.19: the other exception to "an omitted type converts the artifact". A zip site is many
+# files and a PUT carries one body, so an inline PUT is refused whether or not it names a type,
+# and the site keeps serving.
+for zipput in '{"content":"<h1>flattened</h1>"}' '{"content":"<h1>flattened</h1>","type":"html"}'; do
+  code=$(curl -s -o /dev/null -w '%{http_code}' -X PUT "$BASE/api/artifacts/ci-zip" -H "$AUTH" -H "$JSON" -d "$zipput")
+  expect_code 400 "$code" "inline PUT on a zip site refused: $zipput"
+done
+[ "$(list_field ci-zip type)" = 'zip' ] || fail "the refused PUT changed the zip site's type anyway"
+code=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/a/ci-zip/css/s.css")
+expect_code 200 "$code" "a zip asset after the refused PUT"
 
 curl -sf -X DELETE "$BASE/api/artifacts/ci-dup" -H "$AUTH" > /dev/null
 curl -sf -X DELETE "$BASE/api/artifacts/ci-zip-dup" -H "$AUTH" > /dev/null
@@ -1722,6 +1838,11 @@ raw=$(curl -s "$BASE/a/ci-pdf?raw=1")
 printf '%s' "$raw" | grep -qF "mode-standard" || fail "a fresh pdf is not in standard mode"
 printf '%s' "$raw" | grep -qF 'id="download"' || fail "standard mode has no download button"
 if printf '%s' "$raw" | grep -qF 'toolbar=0'; then fail "standard mode hides the browser toolbar"; fi
+# The bar is still in the markup and still holds both buttons: unframed it is the only one on
+# the page. The shell removes it only after it finds it is inside the viewer frame.
+printf '%s' "$raw" | grep -qF 'id="bar"' || fail "standard mode lost its bar unframed"
+printf '%s' "$raw" | grep -qF 'id="open"' || fail "standard mode lost its open button"
+printf '%s' "$raw" | grep -qF "framed && '1'" || fail "standard mode does not drop its bar when framed"
 
 curl -sf -X PATCH "$BASE/api/artifacts/ci-pdf" -H "$AUTH" -H "$JSON" -d '{"pdf":{"mode":"minimal"}}' > /dev/null
 raw=$(curl -s "$BASE/a/ci-pdf?raw=1")
@@ -1736,6 +1857,16 @@ raw=$(curl -s "$BASE/a/ci-pdf?raw=1")
 printf '%s' "$raw" | grep -qF "mode-presentation" || fail "presentation mode did not take"
 printf '%s' "$raw" | grep -qF 'id="fullscreen"' || fail "presentation mode has no full-screen button"
 printf '%s' "$raw" | grep -qF 'view=Fit&' || fail "presentation mode does not fit a whole page"
+# T2.2.6: framed standard mode drops our bar, because the frame's bar above and the browser's
+# toolbar below already carry everything it held. The shell decides that at load time, so what
+# the server sends is the switch. presentation keeps its bar for the full-screen button.
+printf '%s' "$raw" | grep -qF "framed && ''" || fail "presentation mode gives up its bar"
+
+# T2.2.5: the browser's toolbar is the page counter and the prev/next of a deck, so presentation
+# leaves it up and only asks the side panel to go. Nothing here can build its own: an <object>
+# holding a PDF exposes no current page.
+if printf '%s' "$raw" | grep -qF 'toolbar=0'; then fail "presentation mode has no page navigation"; fi
+printf '%s' "$raw" | grep -qF 'navpanes=0' || fail "presentation mode keeps the side panel"
 echo "ok: pdf modes"
 
 # A patch names one key and leaves the other alone, and the row carries both.
@@ -1746,6 +1877,10 @@ raw=$(curl -s "$BASE/a/ci-pdf?raw=1")
 printf '%s' "$raw" | grep -qF "mode-presentation" || fail "a download patch reset the mode"
 if printf '%s' "$raw" | grep -qF 'id="download"'; then fail "downloads off still shows a download button"; fi
 if printf '%s' "$raw" | grep -qF 'id="open"'; then fail "downloads off still shows an open button"; fi
+# The one combination that cannot have both: downloads off works by taking the browser's toolbar
+# away, and that toolbar is also the page counter. The download setting wins, and formats.md
+# says so rather than leaving it to be discovered.
+printf '%s' "$raw" | grep -qF 'toolbar=0' || fail "presentation with downloads off kept the browser toolbar"
 # Viewer-level only, and the docs say so: the bytes are still one URL away.
 code=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/a/ci-pdf/file.pdf")
 expect_code 200 "$code" "the file with downloads off"
@@ -1806,7 +1941,7 @@ printf '%s' "$raw" | grep -qF 'aria-label="Download the PDF"' || fail "the Downl
 # The open parameters are joined with "&", which has to be escaped inside an attribute.
 curl -sf -X PATCH "$BASE/api/artifacts/ci-pdf" -H "$AUTH" -H "$JSON" -d '{"pdf":{"mode":"presentation"}}' > /dev/null
 raw=$(curl -s "$BASE/a/ci-pdf?raw=1")
-printf '%s' "$raw" | grep -qF 'file.pdf#view=Fit&amp;toolbar=0' || fail "the embed url is not escaped"
+printf '%s' "$raw" | grep -qF 'file.pdf#view=Fit&amp;navpanes=0' || fail "the embed url is not escaped"
 printf '%s' "$raw" | grep -qF 'aria-label="Show the document full screen"' || fail "the Full screen button has no accessible name"
 curl -sf -X PATCH "$BASE/api/artifacts/ci-pdf" -H "$AUTH" -H "$JSON" -d '{"pdf":null}' > /dev/null
 echo "ok: pdf toolbar accessible names and escaping"
@@ -1901,6 +2036,92 @@ code=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/a/ci-cli-2")
 expect_code 200 "$code" "cli rename"
 node "$CLI_DIR/cli.js" config | grep -q '"enabled"' || fail "cli config get"
 echo "ok: cli config"
+
+# branding from the cli. One flag at a time: the other four have to survive, because the server
+# merges a partial branding object and the cli only sends the flags it was given.
+node "$CLI_DIR/cli.js" config --brand-name 'CLI Brand' --brand-footer 'Published with CLI Brand' > /dev/null
+node "$CLI_DIR/cli.js" config --brand-accent '#0055ff' > /dev/null
+cfg=$(node "$CLI_DIR/cli.js" config)
+echo "$cfg" | grep -q '"productName": "CLI Brand"' || fail "cli --brand-name did not land"
+echo "$cfg" | grep -q '"footerText": "Published with CLI Brand"' || fail "cli --brand-footer did not land"
+echo "$cfg" | grep -q '"accentColor": "#0055ff"' || fail "cli --brand-accent did not land"
+# the accent save left the name and footer alone
+node "$CLI_DIR/cli.js" config --brand-name none > /dev/null
+cfg=$(node "$CLI_DIR/cli.js" config)
+echo "$cfg" | grep -q '"productName": ""' || fail "cli --brand-name none did not clear"
+echo "$cfg" | grep -q '"footerText": "Published with CLI Brand"' || fail "clearing one field cleared another"
+# a remote logo is refused by the same rule the dashboard states: same origin or inline only
+if node "$CLI_DIR/cli.js" config --brand-logo https://cdn.example.com/l.png > /dev/null 2>&1; then
+  fail "cli accepted a hotlinked logo"
+fi
+node "$CLI_DIR/cli.js" config --brand-logo /a/brand/logo.png > /dev/null
+node "$CLI_DIR/cli.js" config | grep -q '"logoUrl": "/a/brand/logo.png"' || fail "cli --brand-logo path refused"
+# put it all back the way the branding block was before this section ran
+node "$CLI_DIR/cli.js" config --brand-name none --brand-logo none --brand-favicon none \
+  --brand-accent none --brand-footer none > /dev/null
+echo "ok: cli branding flags"
+
+# the dashboard reads the server's refusal and puts it under the field it names, so the message
+# has to keep opening with `branding.<field>`.
+msg=$(curl -s -X PUT "$BASE/api/config" -H "$AUTH" -H "$JSON" -d '{"branding":{"logoUrl":"https://cdn.example.com/l.png"}}')
+echo "$msg" | grep -q 'branding.logoUrl' || fail "a refused branding value no longer names its field"
+echo "ok: a branding refusal names its field"
+
+# the settings panel ships the five inputs and an error slot per field.
+#
+# The console is ~113 kB, and this script runs under `set -o pipefail`. `curl | grep -q` on a
+# body that big is a race: grep matches, exits, and curl dies of SIGPIPE with 141, which
+# pipefail then reads as a failed check. Every page-sized assertion below fetches once into a
+# file and greps the file, which is also 16 fewer requests.
+console=$(mktemp)
+curl -s -o "$console" "$BASE/"
+for id in brandName brandLogo brandFavicon brandAccent brandFooter brandAccentPick; do
+  grep -q "id=\"$id\"" "$console" || fail "settings panel has no $id input"
+done
+for id in brandErrProductName brandErrLogoUrl brandErrFaviconUrl brandErrAccentColor brandErrFooterText; do
+  grep -q "id=\"$id\"" "$console" || fail "settings panel has no $id error slot"
+done
+echo "ok: settings panel branding inputs"
+
+# the console reads the same block every viewer page does. Unbranded first: the built-in mark,
+# the built-in title, and the empty favicon answer the route has always given.
+curl -s -o "$console" "$BASE/"
+grep -q '<title>artifacts</title>' "$console" || fail "unbranded console lost its title"
+grep -q '<svg class="mark"' "$console" || fail "unbranded console lost the built-in mark"
+if grep -q 'rel="icon"' "$console"; then fail "unbranded console invented a favicon"; fi
+code=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/favicon.ico")
+expect_code 204 "$code" "unbranded favicon.ico"
+curl -sf -X PUT "$BASE/api/config" -H "$AUTH" -H "$JSON" \
+  -d '{"branding":{"productName":"Consolebrand","logoUrl":"/a/ci-brand-logo/logo.png","faviconUrl":"/a/ci-brand-logo/f.png","accentColor":"#0055ff"}}' > /dev/null
+curl -s -o "$console" "$BASE/"
+grep -q '<title>Consolebrand</title>' "$console" || fail "console title is not branded"
+grep -q '<h1>Consolebrand</h1>' "$console" || fail "lock heading is not branded"
+grep -q '<span class="wordmark">Consolebrand</span>' "$console" || fail "wordmark is not branded"
+grep -q '<link rel="icon" href="/a/ci-brand-logo/f.png">' "$console" || fail "console favicon tag missing"
+grep -q '<img class="mark" src="/a/ci-brand-logo/logo.png"' "$console" || fail "console mark is not the logo"
+if grep -q '<svg class="mark"' "$console"; then fail "the built-in mark survived a logo"; fi
+grep -q -- '--molten: #0055ff;' "$console" || fail "console accent did not land"
+# the well-known path follows the branding too, for anything that does not read the head first
+code=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/favicon.ico")
+expect_code 302 "$code" "branded favicon.ico redirects"
+curl -s -D - -o /dev/null "$BASE/favicon.ico" | grep -qi '^location: /a/ci-brand-logo/f.png' \
+  || fail "branded favicon.ico points somewhere else"
+# an inline favicon is decoded rather than redirected
+curl -sf -X PUT "$BASE/api/config" -H "$AUTH" -H "$JSON" \
+  -d '{"branding":{"faviconUrl":"data:image/png;base64,aGVsbG8="}}' > /dev/null
+curl -s -D - -o /dev/null "$BASE/favicon.ico" | grep -qi '^content-type: image/png' \
+  || fail "an inline favicon is not served as an image"
+curl -s "$BASE/favicon.ico" | grep -q '^hello$' || fail "inline favicon bytes did not decode"
+# back to unbranded, and the console is the page it was before any of this
+curl -sf -X PUT "$BASE/api/config" -H "$AUTH" -H "$JSON" \
+  -d '{"branding":{"productName":"","logoUrl":"","faviconUrl":"","accentColor":"","footerText":""}}' > /dev/null
+curl -s -o "$console" "$BASE/"
+grep -q '<title>artifacts</title>' "$console" || fail "console did not go back to unbranded"
+grep -q '<svg class="mark"' "$console" || fail "the built-in mark did not come back"
+rm "$console"
+code=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/favicon.ico")
+expect_code 204 "$code" "favicon.ico back to empty"
+echo "ok: the console follows the branding block"
 node "$CLI_DIR/cli.js" frame ci-cli-2 off > /dev/null
 if curl -s "$BASE/a/ci-cli-2" | grep -q '<iframe'; then fail "cli frame off still framed"; fi
 echo "ok: cli frame off"
@@ -1938,6 +2159,54 @@ if node "$CLI_DIR/cli.js" preview ci-cli-og --og-image /relative.png > /dev/null
 fi
 node "$CLI_DIR/cli.js" delete ci-cli-og > /dev/null
 echo "ok: cli link preview"
+
+# A preview on an artifact nothing will render it for: the value is stored, and the operator is
+# told on the way out rather than finding out from a chat app that shows nothing. The warning
+# goes to stderr, so `2>&1 >/dev/null` here keeps stderr and drops the url on stdout.
+echo '# cli preview smoke' > "$ZIPDIR/cli.md"
+warn=$(node "$CLI_DIR/cli.js" publish "$ZIPDIR/cli.html" --slug ci-prev-off --visibility public \
+  --frame off --description 'set with the frame off' 2>&1 >/dev/null)
+echo "$warn" | grep -q '^warning: ' || fail "no warning for a preview with the frame off"
+echo "$warn" | grep -q 'frame is off' || fail "the warning does not say why"
+# stored all the same: a warning is not a refusal
+node "$CLI_DIR/cli.js" list | grep 'ci-prev-off' | grep -q 'preview' || fail "the warned preview did not store"
+# and it is telling the truth: nothing renders the tags with the frame off
+prev=$(mktemp)
+curl -s -o "$prev" "$BASE/a/ci-prev-off"
+if grep -q 'og:description' "$prev"; then fail "an unframed html carried preview tags after all"; fi
+# turn the frame on and the same set goes quiet, because now the tags are really there
+node "$CLI_DIR/cli.js" frame ci-prev-off on > /dev/null
+warn=$(node "$CLI_DIR/cli.js" preview ci-prev-off --description 'now framed' 2>&1 >/dev/null)
+[ -z "$warn" ] || fail "still warning after the frame went on: $warn"
+curl -s -o "$prev" "$BASE/a/ci-prev-off"
+grep -q 'og:description' "$prev" || fail "a framed html carries no preview tags"
+# md and pdf are pages the server renders, so they carry the tags with the frame off and are
+# never warned about
+warn=$(node "$CLI_DIR/cli.js" publish "$ZIPDIR/cli.md" --slug ci-prev-md --visibility public \
+  --frame off --description 'md with the frame off' 2>&1 >/dev/null)
+[ -z "$warn" ] || fail "md was warned about a preview it does carry: $warn"
+curl -s -o "$prev" "$BASE/a/ci-prev-md"
+grep -q 'og:description' "$prev" || fail "an unframed md lost its preview tags"
+# $PDF_DIR is cleaned up by the time this runs, so decode the fixture again next to the others
+printf '%s' "$PDF_B64" | base64 -d > "$ZIPDIR/prev.pdf" 2>/dev/null || \
+  printf '%s' "$PDF_B64" | base64 -D > "$ZIPDIR/prev.pdf"
+warn=$(node "$CLI_DIR/cli.js" publish "$ZIPDIR/prev.pdf" --slug ci-prev-pdf --visibility public \
+  --frame off --description 'pdf with the frame off' 2>&1 >/dev/null)
+[ -z "$warn" ] || fail "pdf was warned about a preview it does carry: $warn"
+curl -s -o "$prev" "$BASE/a/ci-prev-pdf"
+grep -q 'og:description' "$prev" || fail "an unframed pdf lost its preview tags"
+# a redirect has no page at all, and says so in its own words rather than blaming the frame
+printf 'https://example.com/' > "$ZIPDIR/cli-redirect.url"
+node "$CLI_DIR/cli.js" publish "$ZIPDIR/cli-redirect.url" --slug ci-prev-red --type redirect \
+  --visibility public > /dev/null
+warn=$(node "$CLI_DIR/cli.js" preview ci-prev-red --description 'never shows' 2>&1 >/dev/null)
+echo "$warn" | grep -q '301' || fail "a redirect preview is not warned about as a redirect"
+if echo "$warn" | grep -q 'frame is off'; then fail "a redirect was blamed on the frame"; fi
+rm -f "$prev"
+for s in ci-prev-off ci-prev-md ci-prev-pdf ci-prev-red; do
+  curl -sf -X DELETE "$BASE/api/artifacts/$s" -H "$AUTH" > /dev/null
+done
+echo "ok: an unreachable link preview is warned about, not silently dropped"
 diff <(qr_local "$BASE/a/ci-cli-2") <(node "$CLI_DIR/cli.js" qr ci-cli-2) > /dev/null \
   || fail "cli qr printed something other than the server's svg"
 diff <(qr_local "$BASE/a/ci-cli-2" 3 0) <(node "$CLI_DIR/cli.js" qr ci-cli-2 --scale 3 --margin 0) > /dev/null \
@@ -1982,5 +2251,67 @@ curl -s "$BASE/a/ci-cli-pdf?raw=1" | grep -qF 'mode-standard' || fail "cli pdf d
 if node "$CLI_DIR/cli.js" pdf ci-cli-pdf slides > /dev/null 2>&1; then fail "cli pdf slides should fail"; fi
 node "$CLI_DIR/cli.js" delete ci-cli-pdf > /dev/null
 echo "ok: cli pdf"
+
+# --- publish rate limit (T2.2.4) ---
+# Body parsing runs before routing, so a large JSON body is buffered before requireAuth sees
+# the request. Measured on a fresh process: 40 concurrent 9.33 MB bodies with no Authorization
+# header took RSS from 42 MB to 551 MB, every one of them answering 401. The publish routes now
+# cap how many large bodies one client IP can send per minute, checked above the parser, so a
+# caller past the budget costs a header read and nothing else.
+#
+# Last in the file on purpose: the flood spends this IP's large-body budget for the rest of the
+# minute, and everything above publishes from the same address.
+bigbody=$(mktemp)
+node -e 'process.stdout.write(JSON.stringify({content:"x".repeat(400000),type:"html"}))' > "$bigbody"
+floodcodes=$(mktemp)
+floodheaders=$(mktemp)
+floodbody=$(mktemp)
+
+# The gate used to key on the method, and body-parser has no method filter: it reads a body from
+# any request that carries one and matches the content type. So a GET with a body skipped the
+# gate and got the 10 MB parser, and 40 concurrent 9 MB bodies to GET /healthz with no credential
+# at all took RSS from 89,280 KB to 580,960 KB. The healthcheck endpoint, unauthenticated.
+code=$(curl -s -o "$floodbody" -w '%{http_code}' -X GET "$BASE/healthz" -H "$JSON" \
+  --data-binary "@$bigbody")
+expect_code 413 "$code" "a GET carrying a body is capped like any other body"
+# and the 413 names the limit that applied, not the 10 MB one this caller was already under
+grep -q 'the limit on this request is 256 kb' "$floodbody" \
+  || fail "the 413 does not name the limit that applied: $(cat "$floodbody")"
+echo "ok: the 413 names the limit that actually applied"
+
+# A read key is the weakest credential an operator can issue. It gets the same small parser: it
+# cannot publish, so it has no use for a 10 MB buffer, and it used to get one and then a 403.
+resp=$(curl -s -X POST "$BASE/api/keys" -H "$AUTH" -H "$JSON" -d '{"name":"ci-flood-read","scopes":["read"]}')
+floodreadkey=$(printf '%s' "$resp" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>process.stdout.write(JSON.parse(s).key))')
+floodreadid=$(printf '%s' "$resp" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>process.stdout.write(JSON.parse(s).id))')
+code=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/api/artifacts" -H "$JSON" \
+  -H "Authorization: Bearer $floodreadkey" --data-binary "@$bigbody")
+expect_code 413 "$code" "a read-scope key gets the small parser, not the publish-sized one"
+curl -sf -X DELETE "$BASE/api/keys/$floodreadid" -H "$AUTH" > /dev/null
+
+for n in $(seq 1 25); do
+  curl -s -o /dev/null -w '%{http_code}\n' -X POST "$BASE/api/artifacts" -H "$JSON" \
+    --data-binary "@$bigbody" >> "$floodcodes" &
+done
+wait
+refused=$(grep -c '^429$' "$floodcodes" || true)
+[ "$refused" -gt 0 ] || fail "an unauthenticated flood of large bodies was never refused: $(sort "$floodcodes" | uniq -c | tr '\n' ' ')"
+echo "ok: an unauthenticated flood of large bodies is refused ($refused of 25 answered 429)"
+# and the refusal says when to come back
+curl -s -D "$floodheaders" -o /dev/null -X POST "$BASE/api/artifacts" -H "$JSON" \
+  --data-binary "@$bigbody"
+grep -qi '^Retry-After:' "$floodheaders" || fail "the 429 does not say when to retry"
+echo "ok: the publish 429 carries Retry-After"
+# And the budget counts a GET the same way, so the flood cannot come back through a method the
+# gate does not look at. This IP has already spent it, so one request is enough to show it.
+code=$(curl -s -o /dev/null -w '%{http_code}' -X GET "$BASE/healthz" -H "$JSON" \
+  --data-binary "@$bigbody")
+expect_code 429 "$code" "a GET with a large body spends the same budget"
+# A normal publish is a few kB and never touches the budget, even now that this IP has spent it.
+code=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/api/artifacts" -H "$AUTH" -H "$JSON" \
+  -d '{"content":"<h1>after the flood</h1>","type":"html","slug":"ci-flood","visibility":"public"}')
+expect_code 201 "$code" "an ordinary publish after the flood"
+curl -sf -X DELETE "$BASE/api/artifacts/ci-flood" -H "$AUTH" > /dev/null
+rm "$bigbody" "$floodcodes" "$floodheaders" "$floodbody"
 
 echo "all smoke tests passed"

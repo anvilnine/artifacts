@@ -31,9 +31,10 @@ import {
   validateCredentials,
   parseKeyInput,
 } from './lib/auth.js';
-import { SOURCE_EXT, dropStaleObjects } from './lib/artifact-files.js';
+import { SOURCE_EXT, dropOrphanObjects, dropStaleObjects } from './lib/artifact-files.js';
 import { createConfigStore } from './lib/config.js';
 import { ApiError, clientFacingError } from './lib/errors.js';
+import { createWriteQueue, WRITE_CEILING_MS } from './lib/write-queue.js';
 import { artifactExpired } from './lib/expiry.js';
 import { qrPng, qrSvg } from './lib/qr.js';
 import {
@@ -52,6 +53,14 @@ import {
 } from './lib/redirect.js';
 import { fillShell } from './lib/shells.js';
 import {
+  wantsHtmlPage,
+  NOT_FOUND_COPY,
+  EXPIRED_COPY,
+  NOT_FOUND_TEXT,
+  EXPIRED_TEXT,
+} from './lib/status-page.js';
+import {
+  dashboardBrandSlots, dashboardFavicon,
   frameBrandSlots, jsxBrandSlots, mdBrandSlots, notFoundBrandSlots, passwordBrandSlots,
   socialBranding,
 } from './lib/branding.js';
@@ -94,6 +103,7 @@ const {
   ensureSessionSecret,
   issueSession,
   sessionPrincipal,
+  identify,
   requireApiKey,
   requireAuth,
   requireSession,
@@ -155,6 +165,8 @@ const FRAME_SHELL = await fs.readFile(path.join(__dirname, 'shells', 'frame.html
 const PDF_SHELL = await fs.readFile(path.join(__dirname, 'shells', 'pdf.html'), 'utf8');
 const PASSWORD_SHELL = await fs.readFile(path.join(__dirname, 'shells', 'password.html'), 'utf8');
 const NOT_FOUND_SHELL = await fs.readFile(path.join(__dirname, 'shells', 'not-found.html'), 'utf8');
+// The console is a shell like any other now: read once, branding filled per request.
+const DASHBOARD_SHELL = await fs.readFile(path.join(__dirname, 'public', 'index.html'), 'utf8');
 
 // Per-artifact visibility. Absent meta.visibility === 'public' (today's behavior:
 // anyone with the unguessable link views). 'private' and 'password' are gated at
@@ -358,6 +370,8 @@ function buildPdfHtml(meta) {
     SOCIAL: socialTags(meta, canonicalUrl(meta)),
     MODE: flags.mode,
     BAR: bar,
+    // '1' or ''. The shell reads it as a boolean, and only after it knows it is framed.
+    HIDE_BAR_IN_FRAME: flags.hideBarInFrame ? '1' : '',
     // Escaped because the open parameters are joined with "&", which is a bare ampersand
     // inside an attribute otherwise.
     EMBED_URL: escapeHtml(fileUrl + flags.hash),
@@ -446,7 +460,13 @@ function buildPromptHtml(meta) {
 }
 
 function buildNotFoundHtml() {
-  return fillShell(NOT_FOUND_SHELL, notFoundBrandSlots(config.current.branding));
+  return buildStatusHtml(NOT_FOUND_COPY);
+}
+
+// The 404 card and the 410 card are the same card with different words, so an operator's logo,
+// accent and footer reach both and there is one set of styles to keep in step.
+function buildStatusHtml(copy) {
+  return fillShell(NOT_FOUND_SHELL, { ...notFoundBrandSlots(config.current.branding), ...copy });
 }
 
 async function readMeta(slug) {
@@ -462,12 +482,50 @@ async function readMeta(slug) {
 // One 404 shape for every serve-path miss (missing, disabled, locked-private, wrong slug)
 // so an unauthenticated caller cannot distinguish them — no existence oracle.
 function notFound(res) {
-  return res.status(404).set({
+  return sendStatusCard(res, 404, NOT_FOUND_COPY);
+}
+
+// The expired page. 410 says the artifact was here and is gone on purpose, and the card says the
+// same thing in words, so a reader stops hunting for a typo in the link. Callers gate this behind
+// artifactUnlocked, so a locked artifact still answers the flat 404 and expiry stays off the
+// existence oracle.
+function expired(res) {
+  return sendStatusCard(res, 410, EXPIRED_COPY);
+}
+
+function sendStatusCard(res, status, copy) {
+  return res.status(status).set({
     'Content-Security-Policy': FRAME_CSP,
     'X-Content-Type-Options': 'nosniff',
     'Referrer-Policy': 'no-referrer',
     'Cache-Control': 'no-cache',
-  }).type('html').send(buildNotFoundHtml());
+    // These URLs answer two different bodies depending on Accept, so a shared cache has to key
+    // on it. Without this, one visitor's card could be handed to the next caller's fetch().
+    Vary: 'Accept',
+  }).type('html').send(buildStatusHtml(copy));
+}
+
+// The one-line body for everything that is not a browser navigation. Same hardening as the card:
+// a plain text 404 is still a response a cache can hold and a sniffer can guess a type for.
+function sendStatusText(res, status, body) {
+  return res.status(status).set({
+    'X-Content-Type-Options': 'nosniff',
+    'Cache-Control': 'no-cache',
+    Vary: 'Accept',
+  }).type('text/plain').send(body);
+}
+
+// A miss. A person who followed a link gets the branded card; an <img>, a range read, curl and
+// fetch() keep the one-line body, because an HTML page in place of an asset is noise to whatever
+// asked for the asset.
+function missing(req, res) {
+  if (wantsHtmlPage(req.headers.accept)) return notFound(res);
+  return sendStatusText(res, 404, NOT_FOUND_TEXT);
+}
+
+function expiredFor(req, res) {
+  if (wantsHtmlPage(req.headers.accept)) return expired(res);
+  return sendStatusText(res, 410, EXPIRED_TEXT);
 }
 
 // ---------------------------------------------------------------------------
@@ -683,40 +741,10 @@ function parseExpiresAt(value) {
 // cannot make. The five call sites below keep the short local name.
 const isExpired = artifactExpired;
 
-// Every meta write rewrites the whole record, so a write that started from a snapshot taken
-// before another write landed puts that snapshot back and the other one's field is gone. Two
-// PATCHes to one slug did it in one process without any unusual timing, and the dashboard
-// sends a one-field PATCH per control. Chain the read-modify-write per slug, the way
-// lib/auth.js chains auth.json: each one reloads meta inside the chain, so it changes what
-// the backend holds rather than what the request found when it arrived.
-//
-// This covers one process. Two replicas sharing an s3 or postgres store can still write
-// inside the same window and lose a field; what cannot happen any more is the corrupt
-// meta.json that took the artifact out of every route, because the object write itself is
-// now whole (storage/local.js) or already was (s3, postgres, sqlite).
-const metaWriteChains = new Map();
-function withMetaChain(slug, run) {
-  const prev = metaWriteChains.get(slug) || Promise.resolve();
-  const result = prev.then(run);
-  // The chain holds `tail`, which swallows the rejection, so a write that throws (a 404 on a
-  // missing slug, a 409 on a taken one) does not stop the next caller from running.
-  const tail = result.then(() => {}, () => {});
-  metaWriteChains.set(slug, tail);
-  // Drop the entry once nothing is queued behind it, or the map grows one key per slug the
-  // process ever wrote.
-  tail.then(() => {
-    if (metaWriteChains.get(slug) === tail) metaWriteChains.delete(slug);
-  });
-  return result;
-}
-
-// A rename and a copy write under two names, so they hold both chains. Sorted and de-duplicated
-// first: two renames that cross (a to b while b to a) would otherwise take the two chains in
-// opposite orders and wait on each other forever.
-function withMetaChains(slugs, run) {
-  const keys = [...new Set(slugs)].sort();
-  return keys.reduceRight((next, key) => () => withMetaChain(key, next), run)();
-}
+// Writes to one slug run one at a time, and one chained write gets WRITE_CEILING_MS to come
+// back before the caller is told to retry. That is the whole-handler ceiling, not the per-call
+// storage deadline the s3 backend uses; why they are two numbers is in lib/write-queue.js.
+const { withMetaChain, withMetaChains } = createWriteQueue({ ceilingMs: WRITE_CEILING_MS });
 
 // A slug arriving in a JSON body can be a number, and SLUG_RE coerces it on the way through.
 // `123` and `"123"` name one directory and are two different chain keys, so two writers to that
@@ -1014,6 +1042,12 @@ async function copyArtifact(sourceSlug, targetSlug, body, keyId) {
 
   // Copy content first; meta.json is written LAST as the commit marker (copySlug skips it).
   await storage.copySlug(sourceSlug, targetSlug);
+  // copySlug carries every content object under the namespace and prunes nothing, so a source
+  // that collected orphans before the type-change cleanup existed hands them to the copy. A
+  // brand-new slug should not start life holding dead bytes, and the git backend would commit
+  // them. Before the meta write, so the commit marker lands on a namespace that is already
+  // clean, and before flush, so git makes one commit.
+  await dropOrphanObjects(storage, targetSlug, source.type);
 
   const meta = {
     slug: targetSlug,
@@ -1321,17 +1355,111 @@ async function removeArtifact(slug) {
 
 const app = express();
 app.disable('x-powered-by');
+// Express matches a route path without regard to case by default, so `POST /API/artifacts`
+// reached the publish handler while every middleware that reads `req.path` and compares it to
+// a lowercase prefix skipped it. A real artifact was published that way, past the body-size
+// gate below. One slug, one path, one case.
+app.set('case sensitive routing', true);
+
+// A publish body may be 10 MB, and body parsing runs before routing, so the server buffered one
+// before requireAuth ever saw the request. Measured on a fresh process: 40 concurrent 9.33 MB
+// bodies with no Authorization header took RSS from 42 MB to 551 MB, every one of them
+// answering 401, and roughly 12 to 32 MB of RSS per request in flight. PDFs make a 9 to 10 MB
+// body an ordinary request rather than an odd one.
+//
+// So a caller who cannot publish gets two things: a parser that will not buffer a publish-sized
+// body for them at all, and a budget for the big bodies it does accept. Neither reaches a caller
+// who may publish. Two earlier versions of this gate had holes worth naming, because both looked
+// like they covered everything:
+//
+//   - Keyed on a path prefix, `/api/artifacts` only. That left `POST /mcp`, `POST /api/keys`,
+//     `PATCH /api/keys/:id` and `PUT /api/config` buffering 10 MB apiece before auth, and 40
+//     anonymous 9 MB bodies to /mcp took RSS from 39,824 KB to 474,384 KB.
+//   - Keyed on the write methods (POST/PUT/PATCH/DELETE). body-parser has no method filter: it
+//     reads a body from any request that carries one and matches the content type, `GET`
+//     included. So the gate returned early on a `GET`, nothing marked the request, and the
+//     parser pick fell through to the 10 MB one. Measured with no credential at all, 40
+//     concurrent 9 MB bodies: `GET /healthz` 89,280 -> 580,960 KB, `GET /api/artifacts`
+//     109,328 -> 592,256 KB, `GET /robots.txt` 107,728 -> 597,280 KB, `OPTIONS /api/artifacts`
+//     109,984 -> 769,120 KB. An unauthenticated OOM of the whole install on the healthcheck.
+//
+// So it keys on what body-parser itself keys on: does the request carry a body. That still keeps
+// identify() off the serve path, where a `GET /a/:slug` carries no body and no header to read.
+//
+// The budget is spent only by a caller who cannot publish. Spending it on everyone meant 20
+// anonymous bodies from one address locked the operator out of publishing for a minute, and
+// under cloudflared (docs/deploy.md) every client shares one address, so that is one visitor and
+// the whole install. A caller who cannot publish cannot write anything here in the first place;
+// the budget is about what the server does before it says so.
+//
+// This is one process, like the other two limiters. It pairs with a CDN or edge limit
+// (docs/deploy.md); it does not replace one.
+const BIG_BODY_BYTES = 256 * 1024;
+const publishLimiter = createRateLimiter({ windowMs: 60_000, max: 20 });
+
+// The body's declared size. A chunked body does not declare one, and it is not counted here:
+// counting it as big charged a client that streams a 36 byte body the full publish budget, and
+// counting it as small would let the flood back in through one header. What bounds it instead
+// is the parser below, which stops reading a capped body at BIG_BODY_BYTES whether or not
+// a Content-Length said so. No length and no transfer-encoding means no body.
+function declaredBodySize(req) {
+  const len = Number(req.headers['content-length']);
+  return Number.isFinite(len) ? len : 0;
+}
+
+// Does this request carry a body at all? This is the same question body-parser asks, and asking
+// a different one is what left the flood open on `GET`: the method says nothing about whether
+// there are bytes to buffer.
+function hasBody(req) {
+  return req.headers['content-length'] !== undefined ||
+    req.headers['transfer-encoding'] !== undefined;
+}
+
+app.use((req, res, next) => {
+  if (!hasBody(req)) return next();
+  // Publish authority, not mere identity. A read key is the weakest credential an operator can
+  // issue, and it exists to be handed to something they do not fully trust; extending it a 10 MB
+  // buffer meant 40 concurrent 9 MB bodies under a read key took RSS from 109,792 KB to
+  // 565,584 KB, every one of them answering 403 after the buffering was done. Nothing legitimate
+  // needs a body over 256 kB below publish scope: every route that takes one is requireAuth
+  // ('publish') or stricter, the credential routes have their own 16 kB parser, and the one
+  // route a read key may reach with a body, POST /mcp, re-checks scope per tool below.
+  //
+  // Stashed for the parser pick below, which asks the same question one middleware later.
+  const who = identify(req);
+  req.smallBody = !who || !hasScope(who.scopes, 'publish');
+  if (!req.smallBody) return next();
+  if (declaredBodySize(req) < BIG_BODY_BYTES) return next();
+  const key = clientIp(req);
+  const gate = publishLimiter.check(key);
+  if (gate.limited) {
+    res.set('Retry-After', String(gate.retryAfter));
+    return res.status(429).json({ error: 'too many large publishes, try again later' });
+  }
+  publishLimiter.count(key);
+  next();
+});
 
 // Body parsing runs before routing, so an unauthenticated caller could make the server
 // parse 10 MB of JSON on /api/auth/login before the rate limiter ever looked at them.
 // Credential routes take a username, a password, or a slug — 16 kB is generous — so they
-// get their own small parser and everything else keeps the publish-sized limit.
+// get their own small parser. Every other request from a caller who cannot publish gets the
+// big-body line as its limit: no route here takes a big body below publish scope, so 256 kB is
+// more than any of them needs, and body-parser stops reading at the cap rather than buffering to
+// the end. A caller who may publish keeps the publish-sized limit.
+//
+// The credential test lowercases the path rather than reading it as sent. Case sensitive
+// routing means `/API/auth/login` matches no route and 404s, but this comparison runs before
+// routing, and a 404 that buffered 10 MB first is still the flood.
 const jsonPublish = express.json({ limit: '10mb' });
 const jsonCredential = express.json({ limit: '16kb' });
+const jsonSmall = express.json({ limit: BIG_BODY_BYTES });
 app.use((req, res, next) => {
-  const credential = req.path.startsWith('/api/auth/') ||
-    (req.path.startsWith('/a/') && req.path.endsWith('/unlock'));
-  return (credential ? jsonCredential : jsonPublish)(req, res, next);
+  const path = req.path.toLowerCase();
+  const credential = path.startsWith('/api/auth/') ||
+    (path.startsWith('/a/') && path.endsWith('/unlock'));
+  if (credential) return jsonCredential(req, res, next);
+  return (req.smallBody ? jsonSmall : jsonPublish)(req, res, next);
 });
 
 // Whole domain is non-crawlable.
@@ -1443,7 +1571,7 @@ function parseRange(header, size) {
 // Pipe a storage stream with a hardened error contract: once the first byte is sent the
 // status/headers are flushed and immutable, so an upstream error must ABORT the socket
 // (res.destroy) — never res.end(), which would pass a truncated artifact off as complete.
-function pipeStream(res, stream) {
+function pipeStream(req, res, stream) {
   stream.on('error', (err) => {
     if (res.headersSent) return res.destroy();
     // A read that passed the stat can still miss when the open happens: local checks the file
@@ -1451,7 +1579,7 @@ function pipeStream(res, stream) {
     // same "not there" the stat catches, and the rename path has always answered it as a 404,
     // so it answers 404 here too rather than the 500 a real read error gets.
     const gone = err?.code === 'ENOENT' || err?.code === 'ENOTDIR';
-    if (gone) return res.status(404).type('text/plain').send('not found');
+    if (gone) return missing(req, res);
     res.status(500).type('text/plain').send('internal error');
   });
   stream.pipe(res);
@@ -1467,31 +1595,31 @@ async function serveObject(req, res, key, { forceType } = {}) {
     const rangeHeader = req.headers.range;
     if (rangeHeader) {
       const info = await storage.head(key);
-      if (!info) return res.status(404).type('text/plain').send('not found');
+      if (!info) return missing(req, res);
       const range = parseRange(rangeHeader, info.size);
       if (range === 'invalid') {
         return res.status(416).set('Content-Range', `bytes */${info.size}`).end();
       }
       if (range) {
         const got = await storage.get(key, { range });
-        if (!got) return res.status(404).type('text/plain').send('not found');
+        if (!got) return missing(req, res);
         res.status(206).set({
           'Content-Type': contentType,
           'Accept-Ranges': 'bytes',
           'Content-Range': `bytes ${range.start}-${range.end}/${info.size}`,
           'Content-Length': String(range.end - range.start + 1),
         });
-        return pipeStream(res, got.stream);
+        return pipeStream(req, res, got.stream);
       }
     }
     const got = await storage.get(key);
-    if (!got) return res.status(404).type('text/plain').send('not found');
+    if (!got) return missing(req, res);
     res.status(200).set({ 'Content-Type': contentType, 'Accept-Ranges': 'bytes' });
     if (got.size != null) res.set('Content-Length', String(got.size));
-    pipeStream(res, got.stream);
+    pipeStream(req, res, got.stream);
   } catch (err) {
     if (err instanceof UnsafeKeyError) {
-      if (!res.headersSent) res.status(404).type('text/plain').send('not found');
+      if (!res.headersSent) missing(req, res);
       return;
     }
     if (!res.headersSent) res.status(500).type('text/plain').send('internal error');
@@ -1504,12 +1632,12 @@ async function serveObject(req, res, key, { forceType } = {}) {
 // every other host. No 404.html in the zip: the plain-text miss serveObject would have sent.
 // The caller has already set ARTIFACT_HEADERS, so the page runs under the same CSP as the
 // rest of the site.
-async function serveSiteNotFound(res, slug) {
+async function serveSiteNotFound(req, res, slug) {
   const got = await storage.get(`${slug}/site/404.html`).catch(() => null);
-  if (!got) return res.status(404).type('text/plain').send('not found');
+  if (!got) return missing(req, res);
   res.status(404).set({ 'Content-Type': 'text/html; charset=utf-8' });
   if (got.size != null) res.set('Content-Length', String(got.size));
-  pipeStream(res, got.stream);
+  pipeStream(req, res, got.stream);
 }
 
 // The frame wrapper is our own page: inline styles/script + a same-origin iframe.
@@ -1563,9 +1691,10 @@ app.get('/a/:slug', async (req, res) => {
   // Expiry is 410 only once the caller has proved access; otherwise a 404 like any other
   // miss, so expiry does not become an existence oracle for a locked artifact.
   if (isExpired(meta)) {
-    return artifactUnlocked(req, meta)
-      ? res.status(410).type('text/plain').send('artifact expired')
-      : notFound(res);
+    // Same Accept split as every other dead end. This route sent plain text on origin/main and
+    // was changed to always send the card, which put 3 kB of HTML in front of curl, fetch() and
+    // every embed that had been reading one line.
+    return artifactUnlocked(req, meta) ? expiredFor(req, res) : notFound(res);
   }
   // Visibility gate. password → the unlock prompt (401) until a valid unlock cookie is
   // present. private with no valid cookie → a flat 404 identical to a missing artifact
@@ -1655,7 +1784,7 @@ app.get('/a/:slug/source', async (req, res, next) => {
   // Unlock before expiry so a locked artifact yields the canonical 404, never a 410 that
   // would leak existence.
   if (!artifactUnlocked(req, meta)) return notFound(res);
-  if (isExpired(meta)) return res.status(410).type('text/plain').send('artifact expired');
+  if (isExpired(meta)) return expiredFor(req, res);
   if (meta.type === 'zip') return next(); // zip sites serve /source as a site path
   res.set({ 'X-Content-Type-Options': 'nosniff', 'Referrer-Policy': 'no-referrer' });
   // A redirect's "source" is its target, and the docs say so, so it answers with the same value
@@ -1692,7 +1821,7 @@ app.get('/a/:slug/*', async (req, res) => {
   const meta = SLUG_RE.test(slug) ? await readMeta(slug) : null;
   if (!meta || meta.disabled) return notFound(res);
   if (!artifactUnlocked(req, meta)) return notFound(res);
-  if (isExpired(meta)) return res.status(410).type('text/plain').send('artifact expired');
+  if (isExpired(meta)) return expiredFor(req, res);
   // A pdf artifact owns one sub-path: the file its viewer loads. `?download=1` sends the same
   // bytes as an attachment, which is the direct-download link the viewer's Download button and
   // anything else that wants the file point at.
@@ -1713,11 +1842,11 @@ app.get('/a/:slug/*', async (req, res) => {
   let key = `${slug}/site/${rel}`;
   if (rel === '' || rel.endsWith('/')) {
     key = `${slug}/site/${rel}index.html`;
-    if (!(await storage.head(key).catch(() => null))) return serveSiteNotFound(res, slug);
+    if (!(await storage.head(key).catch(() => null))) return serveSiteNotFound(req, res, slug);
   } else if (!(await storage.head(key).catch(() => null))) {
     const alt = `${slug}/site/${rel}/index.html`;
     if (await storage.head(alt).catch(() => null)) key = alt;
-    else return serveSiteNotFound(res, slug);
+    else return serveSiteNotFound(req, res, slug);
   }
   serveObject(req, res, key);
 });
@@ -1904,7 +2033,11 @@ app.get('/api/config', requireAuth('read'), (req, res) => {
 
 app.put('/api/config', requireAuth('full'), async (req, res, next) => {
   try {
-    res.json(await config.update(req.body));
+    const saved = await config.update(req.body);
+    // The dashboard shell is cached with the branding already filled in, so a save has to drop
+    // it or the console keeps serving the old name, logo and accent until a restart.
+    dropDashboardCache();
+    res.json(saved);
   } catch (err) {
     next(err);
   }
@@ -2442,7 +2575,15 @@ app.all('/mcp', (req, res) => {
 // ---------------------------------------------------------------------------
 
 app.get('/favicon.ico', (req, res) => {
-  res.status(204).end();
+  const icon = dashboardFavicon(config.current.branding);
+  if (!icon) return res.status(204).end();
+  // no-cache, because a browser that cached the 204 or an old icon would otherwise sit on it
+  // for the rest of the session after the operator changes the branding. nosniff because these
+  // are operator-supplied bytes: DATA_IMAGE_RE already pins the type to one of four raster
+  // formats, so nothing here is reachable, and the header costs nothing.
+  res.set({ 'Cache-Control': 'no-cache', 'X-Content-Type-Options': 'nosniff' });
+  if (icon.redirect) return res.redirect(302, icon.redirect);
+  res.type(icon.contentType).send(icon.body);
 });
 
 app.get('/robots.txt', (req, res) => {
@@ -2453,9 +2594,35 @@ app.get('/healthz', (req, res) => {
   res.type('text/plain').send('ok');
 });
 
+// The dashboard shell with the branding filled in. 119 kB of template, refilled on every
+// request when this landed, plus express's ETag hashing the result: measured 1.85 ms of the
+// server's own time per unauthenticated GET /, where sendFile used to stream the file with a
+// stat-based ETag. The fill only changes when the config does, so it is cached and dropped when
+// the branding is saved.
+let dashboardPageCache = null;
+function dropDashboardCache() {
+  dashboardPageCache = null;
+}
+function dashboardPage() {
+  if (dashboardPageCache === null) {
+    const html = fillShell(DASHBOARD_SHELL, dashboardBrandSlots(config.current.branding));
+    // Set on the response below so express does not hash the body itself on every request. Same
+    // value while the page is the same page, which is what an ETag is for.
+    const tag = `W/"${crypto.createHash('sha1').update(html).digest('base64url')}"`;
+    dashboardPageCache = { html, tag };
+  }
+  return dashboardPageCache;
+}
+
 app.get('/', (req, res) => {
   res.set(APP_HEADERS);
-  res.sendFile(path.join(__dirname, 'public', 'index.html'));
+  // no-store rather than no-cache: this is the one page carrying the admin session, and the
+  // reason no-cache was set here (a branding change showing on the next load) is served just as
+  // well by not writing it to disk at all.
+  res.set('Cache-Control', 'no-store');
+  const page = dashboardPage();
+  res.set('ETag', page.tag);
+  res.type('html').send(page.html);
 });
 
 // Which errors get to name themselves lives in lib/errors.js so a test can hand it the shapes
@@ -2464,6 +2631,8 @@ app.get('/', (req, res) => {
 app.use((err, req, res, next) => {
   const answer = clientFacingError(err);
   if (answer) {
+    // A storage call that ran out of time names how long to wait; nothing else here does.
+    if (answer.retryAfter) res.set('Retry-After', String(answer.retryAfter));
     return res.status(answer.status).json({ error: answer.message });
   }
   console.error(err);

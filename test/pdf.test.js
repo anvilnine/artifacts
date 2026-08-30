@@ -210,7 +210,27 @@ test('what the viewer is told, per mode', () => {
   assert.equal(presentation.bar, true); // kept, because it holds the full-screen button
   assert.equal(presentation.fullscreen, true);
   assert.ok(presentation.hash.includes('view=Fit'));
-  assert.ok(presentation.hash.includes('toolbar=0'));
+  // T2.2.5: the browser's toolbar stays, because it carries the only page counter and the only
+  // prev/next a reader of a multi-page deck gets. The side panel still goes.
+  assert.ok(!presentation.hash.includes('toolbar=0'));
+  assert.ok(presentation.hash.includes('navpanes=0'));
+});
+
+// An <object> holding a PDF is not a document this page can drive: there is no API for the
+// current page, and reassigning the object's data to jump to #page=N blanks the viewer in
+// Chromium rather than moving it (checked in a browser). So the browser's own toolbar is the
+// only page navigation there is, and presentation mode has to leave it alone to have any.
+test('presentation mode leaves the reader a way to move page to page', () => {
+  const presentation = pdfViewerFlags({ mode: 'presentation', download: true });
+  assert.ok(!presentation.hash.includes('toolbar=0'), 'the page counter and prev/next live there');
+});
+
+// The one case that cannot have both: downloads off works by taking that toolbar away, since it
+// carries a download button and a print button. The setting wins, and the docs say so.
+test('downloads off still beats page navigation in presentation mode', () => {
+  const locked = pdfViewerFlags({ mode: 'presentation', download: false });
+  assert.ok(locked.hash.includes('toolbar=0'));
+  assert.ok(locked.hash.includes('navpanes=0'));
 });
 
 test('downloads off take the browser toolbar with them, in every mode', () => {
@@ -220,5 +240,44 @@ test('downloads off take the browser toolbar with them, in every mode', () => {
     const flags = pdfViewerFlags({ mode, download: false });
     assert.equal(flags.download, false, mode);
     assert.ok(flags.hash.includes('toolbar=0'), `${mode} keeps the browser toolbar`);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// T2.2.6: the default framed view stacked three toolbars
+// ---------------------------------------------------------------------------
+//
+// Measured in a browser at 1200px, standard mode inside the viewer frame: the frame's own bar
+// (44px), our pdf bar (44px) and the browser's pdf toolbar (56px), about 144px before the
+// document starts. The middle one is the one that earns least. Framed, its title is already
+// blanked because the frame bar above says the same words, which leaves Open and Download, and
+// the browser's toolbar underneath already has download and print.
+//
+// So framed standard mode drops our bar. presentation keeps it, because the full-screen button
+// lives nowhere else. minimal never had one.
+
+test('framed standard mode gives up our bar, the other modes keep theirs', () => {
+  assert.equal(pdfViewerFlags({ mode: 'standard', download: true }).hideBarInFrame, true);
+  assert.equal(pdfViewerFlags({ mode: 'presentation', download: true }).hideBarInFrame, false);
+  assert.equal(pdfViewerFlags({ mode: 'minimal', download: true }).hideBarInFrame, false);
+});
+
+// Standard with downloads off already renders no bar at all, server side: there are no buttons
+// left to put in one. Nothing to hide, and the browser's toolbar is gone too, so saying "hide"
+// there would read as a second rule doing the same thing.
+test('a mode that already draws no bar is not asked to hide one', () => {
+  const locked = pdfViewerFlags({ mode: 'standard', download: false });
+  assert.equal(locked.bar, true); // the shell is told standard has a bar
+  assert.equal(locked.hideBarInFrame, false);
+});
+
+// Unframed is untouched. With no frame bar above it, our bar is the only thing naming the
+// artifact and the only Open and Download on the page.
+test('our bar is never dropped outside the frame', () => {
+  for (const mode of PDF_MODES) {
+    const flags = pdfViewerFlags({ mode, download: true });
+    if (flags.hideBarInFrame) {
+      assert.equal(mode, 'standard', 'only standard gives its bar up, and only inside the frame');
+    }
   }
 });

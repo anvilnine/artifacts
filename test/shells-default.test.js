@@ -24,6 +24,7 @@ import {
   notFoundBrandSlots,
   passwordBrandSlots,
 } from '../lib/branding.js';
+import { NOT_FOUND_COPY } from '../lib/status-page.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const shell = (name) => readFileSync(join(here, '..', 'shells', `${name}.html`), 'utf8');
@@ -31,16 +32,19 @@ const fixture = (name) => readFileSync(join(here, 'fixtures', 'shells-default', 
 
 const NONE = { productName: '', logoUrl: '', faviconUrl: '', accentColor: '', footerText: '' };
 
+// not-found.html carries the card's words in slots too, so the 404 render needs the 404 copy
+// alongside the branding slots. The bytes that come out are the same bytes as before; the copy
+// only moved from the template into lib/status-page.js so the 410 card can reuse the shell.
 const SHELLS = [
-  ['frame', frameBrandSlots],
-  ['password', passwordBrandSlots],
-  ['not-found', notFoundBrandSlots],
-  ['md', mdBrandSlots],
-  ['jsx', jsxBrandSlots],
+  ['frame', frameBrandSlots, {}],
+  ['password', passwordBrandSlots, {}],
+  ['not-found', notFoundBrandSlots, NOT_FOUND_COPY],
+  ['md', mdBrandSlots, {}],
+  ['jsx', jsxBrandSlots, {}],
 ];
 
-for (const [name, slots] of SHELLS) {
+for (const [name, slots, copy] of SHELLS) {
   test(`${name}.html with nothing branded is byte for byte what origin/main served`, () => {
-    assert.equal(fillShell(shell(name), slots(NONE)), fixture(name));
+    assert.equal(fillShell(shell(name), { ...slots(NONE), ...copy }), fixture(name));
   });
 }

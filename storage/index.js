@@ -11,7 +11,10 @@
 //   interface Storage {
 //     getBuffer(key)            -> Buffer | null                 // small reads (meta.json)
 //     get(key, { range })       -> { stream, size } | null       // streamed body for serving
-//     head(key)                 -> { size } | null               // existence / size, no body
+//     head(key)                 -> { size, mtime? } | null       // existence / size, no body
+//                                                                // mtime is epoch ms when the
+//                                                                // store can say; the sweep's
+//                                                                // age floor reads it
 //     put(key, data, { contentType })                            // MUST await a durable, whole-object write
 //     listMetas()               -> [{ slug, buffer }]            // every artifact's meta.json
 //     move(oldSlug, newSlug)                                     // rename a whole namespace
@@ -45,9 +48,27 @@
 // old type's objects AFTER meta.json names the new one, so a crash mid-conversion leaves the
 // old record whole rather than a listed artifact whose body is gone.
 
-// A key/segment that fails validation. Callers map this to 404 (it only reaches a backend
-// via user-controlled zip sub-paths); it must never surface as a 500.
-export class UnsafeKeyError extends Error {}
+// How long one storage call gets to answer. Longer than a healthy call on any of the five
+// backends, and shorter than the default client timeout in curl, most HTTP libraries and a
+// browser fetch, so a caller waiting on a stalled backend hears a code from this server rather
+// than watching its own client give up. The s3 backend puts it on every request it signs. One
+// line to change.
+//
+// This is one call, not one handler. A handler that writes 2000 objects gets its own, much
+// longer ceiling: WRITE_CEILING_MS in lib/write-queue.js. Passing this number there answered a
+// large zip deploy 503 while the extraction kept running.
+export const STORAGE_TIMEOUT_MS = 30_000;
+
+// A key/segment that fails validation, or one the local backend's realpath guard refuses on the
+// way to a write. The serve path maps it to 404; the write path maps it to 409 in
+// lib/errors.js, because a publish that lands on a symlinked slug directory is an operator
+// problem naming one slug, not an internal failure. `key` is set where the thrower knows it.
+export class UnsafeKeyError extends Error {
+  constructor(message, key) {
+    super(message);
+    this.key = key;
+  }
+}
 
 // NUL, other C0 control chars, and DEL — never legitimate in an artifact key.
 const CONTROL_RE = /[\x00-\x1f\x7f]/;

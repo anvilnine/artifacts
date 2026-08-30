@@ -10,6 +10,8 @@ import assert from 'node:assert/strict';
 import { createConfigStore } from '../lib/config.js';
 import {
   MAX_BRAND_URL_LEN,
+  brandingErrorField,
+  brandingPatchFromFlags,
   parseAccentColor,
   parseBrandUrl,
   parseFooterText,
@@ -163,7 +165,9 @@ test('brand URLs hold a small inline image and refuse a big one', () => {
 });
 
 test('accentColor takes hex and rgb/hsl functions, nothing else', () => {
-  for (const good of ['#fff', '#f0502a', '#f0502aff', 'rgb(240, 80, 42)', 'rgba(240,80,42,1)', 'hsl(14 88% 55%)', 'hsl(14deg 88% 55% / 100%)']) {
+  // Every value here has to clear the contrast floor as well as the shape check, so the #rgb
+  // case is a mid-tone rather than #fff.
+  for (const good of ['#e43', '#f0502a', '#f0502aff', 'rgb(240, 80, 42)', 'rgba(240,80,42,1)', 'hsl(14 88% 55%)', 'hsl(14deg 88% 55% / 100%)']) {
     assert.equal(parseAccentColor(good), good, `refused ${good}`);
   }
   for (const bad of ['rebeccapurple', 'var(--x)', 'url(x)', '#12345', 'rgb(1,2,3);color:red', 'expression(1)']) {
@@ -188,6 +192,36 @@ test('accentColor has to be fully opaque', () => {
   for (const bad of ['#0000', '#00000000', 'rgba(0,0,0,0)', 'rgba(29,78,216,.3)', 'hsla(220,90%,50%,0.3)', 'hsl(220 90% 50% / 30%)']) {
     assert.throws(() => parseAccentColor(bad), /opaque/, `accepted ${bad}`);
   }
+});
+
+// One accent value drives every accent role in every shell, and those roles sit on two grounds:
+// the console and the dark half of each shell on #0b0d0f, the light half on a white card. An
+// accent that vanishes into either one takes the primary button fill, the brand mark and the
+// links with it. Measured on the shipped pages: #050505 gives a 1.05:1 button fill and a 1.05:1
+// brand mark on the console, #fafafa a 1.04:1 status line and unlock button on the card.
+test('accentColor has to stay visible on both the console and the light card', () => {
+  for (const tooDark of ['#050505', '#101010', '#1d4ed8', 'rgb(0,0,0)', 'hsl(220 90% 20%)']) {
+    assert.throws(() => parseAccentColor(tooDark), /accentColor reads .* on the dark console/, `accepted ${tooDark}`);
+  }
+  for (const tooLight of ['#fafafa', '#ffffff', '#ffe600', 'rgb(255,255,255)']) {
+    assert.throws(() => parseAccentColor(tooLight), /accentColor reads .* on the light card/, `accepted ${tooLight}`);
+  }
+  // The band in the middle, including the built-in accent and the one the smoke suite sets.
+  for (const good of ['#f0502a', '#c73d1d', '#0055ff', '#2563eb']) {
+    assert.equal(parseAccentColor(good), good, `refused ${good}`);
+  }
+});
+
+// The operator has to know which way to move, and the message is the only place that says it.
+test('the contrast refusal names both numbers and the way out', () => {
+  assert.throws(() => parseAccentColor('#050505'), (err) => {
+    assert.match(err.message, /1\.05:1 on the dark console/);
+    assert.match(err.message, /20\.38:1 on the light card/);
+    assert.match(err.message, /lighter shade/);
+    assert.equal(err.status, 400);
+    return true;
+  });
+  assert.throws(() => parseAccentColor('#fafafa'), /darker shade/);
 });
 
 // docs/api.md lists #rgba as accepted, so the message has to say so too.
@@ -246,4 +280,65 @@ test('BRAND_ env vars supply the values, and a bad one warns and is ignored', as
       else process.env[key] = before[key];
     }
   }
+});
+
+// ---------------------------------------------------------------------------
+// The two operator surfaces: the CLI's flags and the message the dashboard puts
+// next to a field.
+// ---------------------------------------------------------------------------
+
+test('the cli flags map onto the five branding fields', () => {
+  assert.deepEqual(
+    brandingPatchFromFlags({
+      'brand-name': 'Dropkiln',
+      'brand-logo': '/brand/logo.png',
+      'brand-favicon': '/brand/f.ico',
+      'brand-accent': '#0055ff',
+      'brand-footer': 'Published with Dropkiln',
+    }),
+    {
+      productName: 'Dropkiln',
+      logoUrl: '/brand/logo.png',
+      faviconUrl: '/brand/f.ico',
+      accentColor: '#0055ff',
+      footerText: 'Published with Dropkiln',
+    },
+  );
+});
+
+test('a flag nobody passed stays out of the patch, so the other four survive a save', () => {
+  assert.deepEqual(brandingPatchFromFlags({}), {});
+  assert.deepEqual(brandingPatchFromFlags({ 'brand-accent': '#0055ff' }), { accentColor: '#0055ff' });
+  assert.deepEqual(brandingPatchFromFlags(undefined), {});
+});
+
+test('none clears a field, the way every other cli verb spells unset', () => {
+  assert.deepEqual(
+    brandingPatchFromFlags({ 'brand-name': 'none', 'brand-footer': 'none' }),
+    { productName: '', footerText: '' },
+  );
+});
+
+test('a refused value names its own field, so a form can put the message next to it', () => {
+  const bad = [
+    [() => parseProductName('<b>'), 'productName'],
+    [() => parseProductName('x'.repeat(41)), 'productName'],
+    [() => parseFooterText('y'.repeat(161)), 'footerText'],
+    [() => parseBrandUrl('logoUrl', 'https://cdn.example.com/l.png'), 'logoUrl'],
+    [() => parseBrandUrl('faviconUrl', 'data:image/svg+xml;base64,AAAA'), 'faviconUrl'],
+    [() => parseAccentColor('red; } body { display: none'), 'accentColor'],
+  ];
+  for (const [call, field] of bad) {
+    assert.throws(call, (err) => {
+      assert.equal(err.status, 400);
+      assert.equal(brandingErrorField(err.message), field);
+      return true;
+    });
+  }
+});
+
+test('a message that names no branding field reads as a whole-form error', () => {
+  assert.equal(brandingErrorField('forbidden'), null);
+  assert.equal(brandingErrorField(''), null);
+  assert.equal(brandingErrorField(undefined), null);
 });

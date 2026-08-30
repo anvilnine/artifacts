@@ -114,3 +114,34 @@ test('a scratch file a crash left behind is swept at startup and never copied', 
   await createAt(root); // a restart
   assert.deepEqual(await fs.readdir(path.join(root, 'race')), ['meta.json']);
 });
+
+// A slug directory that is really a symlink to a directory outside the store. Reads already
+// refuse to follow it. A write and a delete used to walk straight through it: the delete
+// removed the outside file and the write planted a new one out there.
+test('a write and a delete through a symlinked slug directory are both refused', async () => {
+  const { root, store } = await tmpStore();
+  const outside = await fs.mkdtemp(path.join(os.tmpdir(), 'artifacts-outside-'));
+  await fs.writeFile(path.join(outside, 'source.html'), '<h1>not ours</h1>');
+  await fs.symlink(outside, path.join(root, 'myslug'));
+
+  await assert.rejects(() => store.put('myslug/planted.html', '<h1>planted</h1>'));
+  await assert.rejects(() => store.delete('myslug/source.html'));
+
+  assert.deepEqual(await fs.readdir(outside), ['source.html']);
+});
+
+// The link itself, not a directory holding it: a put through it would write the file it points
+// at, and a delete would take that file rather than the link.
+test('a write to a symlinked object is refused', async () => {
+  const { root, store } = await tmpStore();
+  const outside = await fs.mkdtemp(path.join(os.tmpdir(), 'artifacts-outside-'));
+  const target = path.join(outside, 'source.html');
+  await fs.writeFile(target, '<h1>not ours</h1>');
+  await fs.mkdir(path.join(root, 'realslug'));
+  await fs.symlink(target, path.join(root, 'realslug', 'source.html'));
+
+  await assert.rejects(() => store.put('realslug/source.html', '<h1>planted</h1>'));
+  await assert.rejects(() => store.delete('realslug/source.html'));
+
+  assert.equal(await fs.readFile(target, 'utf8'), '<h1>not ours</h1>');
+});

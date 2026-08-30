@@ -92,6 +92,11 @@ export async function createAt(root) {
     return abs;
   }
 
+  // Is a resolved real path still inside the store?
+  function contained(real) {
+    return real === realRoot || real.startsWith(realRoot + path.sep);
+  }
+
   // Refuse symlinks and confirm the real path is still inside realRoot, so a symlink
   // planted out-of-band can never be followed out of the namespace. Returns the lstat, or
   // null if the target is missing / a symlink / a directory (not a servable object).
@@ -111,8 +116,41 @@ export async function createAt(root) {
       if (isMissing(err)) return null;
       throw err;
     }
-    if (real !== realRoot && !real.startsWith(realRoot + path.sep)) return null;
+    if (!contained(real)) return null;
     return st;
+  }
+
+  // The write side of the same guard. Reads refuse a symlink and re-check the real path, but
+  // put and delete only compared against `root`, which a symlinked slug directory walks
+  // straight past: a delete removed the file outside the store and a put wrote a new one out
+  // there. The object may not exist yet, so this follows the deepest part of the path that
+  // does, which for a new file is the directory it lands in.
+  async function assertInsideRoot(key, abs) {
+    let st = null;
+    try {
+      st = await fs.lstat(abs);
+    } catch (err) {
+      if (!isMissing(err)) throw err;
+    }
+    // A link at the target itself: a write through it lands on whatever it points at, and a
+    // delete through it takes that file rather than the link.
+    if (st && st.isSymbolicLink()) {
+      throw new UnsafeKeyError(`"${key}" resolves outside storage root`, key);
+    }
+    let probe = st ? abs : path.dirname(abs);
+    while (probe !== root) {
+      let real;
+      try {
+        real = await fs.realpath(probe);
+      } catch (err) {
+        if (!isMissing(err)) throw err;
+        // Nothing there yet, so put() will create it. Ask its parent instead.
+        probe = path.dirname(probe);
+        continue;
+      }
+      if (!contained(real)) throw new UnsafeKeyError(`"${key}" resolves outside storage root`, key);
+      return;
+    }
   }
 
   return {
@@ -132,7 +170,9 @@ export async function createAt(root) {
 
     async head(key) {
       const st = await statFile(resolveKey(key));
-      return st ? { size: st.size } : null;
+      // mtime is what the sweep's age floor reads (lib/artifact-files.js). The stat is already
+      // done here, so it costs nothing.
+      return st ? { size: st.size, mtime: st.mtimeMs } : null;
     },
 
     async get(key, { range } = {}) {
@@ -158,6 +198,7 @@ export async function createAt(root) {
     // are already whole-object writes.
     async put(key, data) {
       const abs = resolveKey(key);
+      await assertInsideRoot(key, abs);
       const dir = path.dirname(abs);
       await fs.mkdir(dir, { recursive: true });
       const tmp = path.join(dir, `.${path.basename(abs)}.${randomUUID()}.tmp`);
@@ -226,7 +267,9 @@ export async function createAt(root) {
     // asks for the old type's files without checking, and an artifact published before that
     // type owned one of them has nothing there to drop.
     async delete(key) {
-      await fs.rm(resolveKey(key), { force: true });
+      const abs = resolveKey(key);
+      await assertInsideRoot(key, abs);
+      await fs.rm(abs, { force: true });
     },
 
     async deleteSlug(slug) {

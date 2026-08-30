@@ -4,7 +4,15 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { dropStaleObjects, ownedKeys, staleKeys, SOURCE_EXT } from '../lib/artifact-files.js';
+import {
+  dropOrphanObjects,
+  dropStaleObjects,
+  orphanKeys,
+  ownedKeys,
+  staleKeys,
+  sweepOrphans,
+  SOURCE_EXT,
+} from '../lib/artifact-files.js';
 
 const TYPES = ['html', 'jsx', 'tsx', 'md', 'redirect', 'pdf'];
 
@@ -156,4 +164,164 @@ test('a delete that throws is swallowed and does not stop the rest', async () =>
 test('a backend with no delete does not sink the write', async () => {
   const dropped = await dropStaleObjects({}, 'conv', 'html', 'md');
   assert.deepEqual(dropped, []);
+});
+
+// A namespace that collected orphans before the type-change cleanup landed, plus the store
+// calls a sweep makes: which artifacts exist, which keys are really there, and a delete.
+// `age` is how old every file in the store is, in hours. The default is a week, which is what
+// the orphans this verb exists for actually are: left behind by a conversion that ran before the
+// cleanup existed. A test that wants a file the sweep must refuse to touch passes a small one.
+function memStore(namespaces, { age = 24 * 7, mtime = true } = {}) {
+  const files = new Set();
+  const metas = new Map();
+  for (const [slug, { type, keys }] of Object.entries(namespaces)) {
+    const record = type === 'unreadable' ? 'half a record' : JSON.stringify({ slug, type });
+    metas.set(slug, Buffer.from(record));
+    for (const name of keys) files.add(`${slug}/${name}`);
+  }
+  return {
+    files,
+    metas,
+    async listMetas() {
+      return [...metas].map(([slug, buffer]) => ({ slug, buffer }));
+    },
+    async getBuffer(key) {
+      const [slug, name] = key.split('/');
+      return name === 'meta.json' ? metas.get(slug) || null : null;
+    },
+    async head(key) {
+      if (!files.has(key)) return null;
+      // A store that cannot say how old a file is leaves mtime off, the way the sql backends do.
+      return mtime ? { size: 1, mtime: Date.now() - age * 3_600_000 } : { size: 1 };
+    },
+    async delete(key) {
+      files.delete(key);
+    },
+  };
+}
+
+test('orphanKeys names every content key the type does not own', () => {
+  assert.deepEqual(orphanKeys('s', 'md').sort(), [
+    's/index.html',
+    's/source.html',
+    's/source.jsx',
+    's/source.pdf',
+    's/source.tsx',
+    's/source.url',
+  ]);
+  // html owns both of the two it would otherwise be asked about.
+  assert.ok(!orphanKeys('s', 'html').includes('s/index.html'));
+  assert.ok(!orphanKeys('s', 'html').includes('s/source.html'));
+});
+
+// A zip serves out of site/ and no API path converts it, so a sweep that treated its files as
+// orphans would take a live site apart. Same for a record this build cannot read.
+test('orphanKeys says nothing about a type it does not know', () => {
+  assert.deepEqual(orphanKeys('s', 'zip'), []);
+  assert.deepEqual(orphanKeys('s', undefined), []);
+  assert.deepEqual(orphanKeys('s', 'constructor'), []);
+});
+
+// Half one: copySlug carries every content object under the namespace, orphans included, so a
+// duplicate of an artifact converted before the cleanup existed starts life holding dead bytes.
+test('a duplicate is pruned to what its type owns', async () => {
+  const storage = stubStorage();
+  const dropped = await dropOrphanObjects(storage, 'copy', 'md');
+  assert.deepEqual(storage.asked.sort(), orphanKeys('copy', 'md').sort());
+  assert.deepEqual(dropped.sort(), orphanKeys('copy', 'md').sort());
+  const zip = stubStorage();
+  assert.deepEqual(await dropOrphanObjects(zip, 'copy', 'zip'), []);
+  assert.deepEqual(zip.asked, []);
+});
+
+// Half two: the one-shot cleanup for installs that already have orphans on disk.
+test('a sweep names what it would remove and removes nothing until asked', async () => {
+  const store = memStore({
+    old: { type: 'md', keys: ['meta.json', 'index.html', 'source.html', 'source.md'] },
+    fine: { type: 'html', keys: ['meta.json', 'index.html', 'source.html'] },
+  });
+  const { found, removed } = await sweepOrphans(store);
+  assert.deepEqual(found.sort(), ['old/index.html', 'old/source.html']);
+  assert.deepEqual(removed, []);
+  assert.ok(store.files.has('old/index.html'));
+  assert.ok(store.files.has('old/source.html'));
+});
+
+test('a sweep with apply removes them, and a second run finds nothing', async () => {
+  const store = memStore({
+    old: { type: 'md', keys: ['meta.json', 'index.html', 'source.html', 'source.md'] },
+  });
+  const first = await sweepOrphans(store, { apply: true });
+  assert.deepEqual(first.removed.sort(), ['old/index.html', 'old/source.html']);
+  assert.deepEqual(first.kept, []);
+  assert.deepEqual([...store.files].sort(), ['old/meta.json', 'old/source.md']);
+  assert.deepEqual((await sweepOrphans(store, { apply: true })).found, []);
+});
+
+test('a sweep leaves a zip site and a record it cannot read alone', async () => {
+  const store = memStore({
+    site: { type: 'zip', keys: ['meta.json', 'index.html', 'site/index.html'] },
+    broken: { type: 'unreadable', keys: ['meta.json', 'index.html', 'source.url'] },
+  });
+  assert.deepEqual((await sweepOrphans(store, { apply: true })).found, []);
+  assert.equal(store.files.size, 6);
+});
+
+// The one that bit: sweepOrphans reads every meta up front, so a PUT that converted an artifact
+// between that read and the delete had the sweep remove the files the NEW type owns. An md
+// artifact converted to html mid-sweep ended up a lone meta.json, still listed, body gone for
+// good. The age floor is what makes that impossible: the files a conversion just wrote are new.
+test('a sweep will not touch a file young enough to be a live conversion', async () => {
+  const store = memStore(
+    { fresh: { type: 'md', keys: ['meta.json', 'index.html', 'source.html', 'source.md'] } },
+    { age: 0.5 },
+  );
+  const { found, removed, kept } = await sweepOrphans(store, { apply: true });
+  assert.deepEqual(found.sort(), ['fresh/index.html', 'fresh/source.html']);
+  assert.deepEqual(removed, []);
+  assert.equal(kept.length, 2);
+  assert.match(kept[0].why, /under the age floor/);
+  assert.equal(store.files.size, 4);
+});
+
+// The floor is a default, not a rule: an operator who knows what they are looking at can drop it.
+test('--older-than 0 turns the age floor off', async () => {
+  const store = memStore(
+    { fresh: { type: 'md', keys: ['meta.json', 'index.html', 'source.html', 'source.md'] } },
+    { age: 0.5 },
+  );
+  const { removed } = await sweepOrphans(store, { apply: true, minAgeMs: 0 });
+  assert.deepEqual(removed.sort(), ['fresh/index.html', 'fresh/source.html']);
+});
+
+// The sqlite and postgres stores keep no timestamp, so head() cannot say how old a file is.
+// Guessing "old enough" there is the race again, so the sweep keeps the file and says why.
+test('a store that cannot report a file age keeps its orphans', async () => {
+  const store = memStore(
+    { old: { type: 'md', keys: ['meta.json', 'index.html', 'source.md'] } },
+    { mtime: false },
+  );
+  const { removed, kept } = await sweepOrphans(store, { apply: true });
+  assert.deepEqual(removed, []);
+  assert.match(kept[0].why, /does not report a file age/);
+  assert.match(kept[0].why, /--older-than 0/);
+});
+
+// Cheap insurance behind the age floor: the record is read again right before the delete, so a
+// conversion that landed since listMetas is seen rather than assumed away.
+test('a sweep re-reads the record and skips a slug that changed type mid-run', async () => {
+  const store = memStore({
+    turned: { type: 'md', keys: ['meta.json', 'index.html', 'source.html', 'source.md'] },
+  });
+  const realHead = store.head.bind(store);
+  store.head = async (key) => {
+    // The conversion lands between the walk's read of meta.json and the delete.
+    store.metas.set('turned', Buffer.from(JSON.stringify({ slug: 'turned', type: 'html' })));
+    return realHead(key);
+  };
+  const { removed, kept } = await sweepOrphans(store, { apply: true, minAgeMs: 0 });
+  assert.deepEqual(removed, []);
+  assert.match(kept[0].why, /changed type to "html"/);
+  assert.ok(store.files.has('turned/index.html'));
+  assert.ok(store.files.has('turned/source.html'));
 });

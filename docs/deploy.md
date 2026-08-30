@@ -279,6 +279,29 @@ The app rate-limits its two unauthenticated credential routes (`POST /api/auth/l
 `POST /a/:slug/unlock`) in memory: 10 failures per window per client IP, failures only.
 This is defense-in-depth, not a substitute for an edge limiter — run one.
 
+A third limit caps how many **large** bodies one client IP may send without publish authority:
+20 a minute. What it looks at is the request itself, not the route or the method, because the
+body parser does not look at those either. Three rules decide whether a request counts:
+
+- It has to carry a body: a `Content-Length` or a `Transfer-Encoding` header.
+- That `Content-Length` has to declare 256 kB or more. A chunked body declares no length and
+  never counts; the parser is what bounds it, by stopping at 256 kB.
+- The caller has to be below `publish` scope. No credential at all counts, and so does a `read`
+  key. A key that may publish, and an admin session, never spend the budget, so one visitor
+  behind cloudflared cannot lock the operator out of publishing.
+
+Over the budget is a `429` with `Retry-After`. Every counting request counts, not only the ones
+that go on to fail, because what the limit caps is the memory the body costs. It is checked
+above the body parser, so a caller past the budget is refused before anything is buffered. An
+ordinary write is a few kB and never touches it: the dashboard's one-field `PATCH`, a redirect,
+a markdown page, a small HTML artifact. Raise or lower it with `publishLimiter` in `server.js`
+if your CI publishes in bigger batches than that.
+
+Alongside the budget, a caller below `publish` scope gets a 256 kB body parser instead of the
+10 MB one, so a body it could never publish is refused at 256 kB rather than buffered whole.
+Nothing legitimate needs more: every route that takes a big body wants `publish` or better, and
+the credential routes have their own 16 kB parser.
+
 **Behind cloudflared (recommended).** Every request reaches the origin from loopback, so
 set `TRUST_PROXY=cloudflare` to key limits on `CF-Connecting-IP`. This is safe **only
 because the tunnel is the sole ingress** — the origin has no open ports, so no client can

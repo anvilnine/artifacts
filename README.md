@@ -49,6 +49,7 @@ It runs as one container with a single admin account and, by default, no databas
 - **Markdown render settings.** Pick the reading font, content width, base font size, and starting theme for every Markdown artifact in Settings. Markdown renders from its source on each view, so a change shows on existing artifacts too. Framed Markdown gets a navbar button that cycles Auto, Light, and Dark for that reader. See [docs/formats.md](docs/formats.md#markdown-render-settings).
 - **PDF hosting.** Publish a PDF and it gets a viewer page plus a direct-download link. Three per-artifact viewer modes (standard, presentation, minimal) and a download toggle that removes the viewer's buttons. The toggle is a convenience, not protection: the file's URL still answers with the bytes. See [docs/formats.md](docs/formats.md#pdf).
 - **Redirects.** `type: "redirect"` turns a slug into a short link that answers an HTTP 301 at the server, where other hosts fall back to a JavaScript bounce. The target must be an absolute http(s) URL and cannot carry credentials, and the response is uncacheable, so repointing the slug takes effect on the next visit. Repoint one from the row menu in the dashboard, or with a `PUT`. Read the cost of running an open redirector on your domain first: [docs/formats.md](docs/formats.md#redirects).
+- **Embeddable.** A public artifact drops into any page as one `<iframe>`. The row menu writes the tag for you, pointing at `?raw=1` so the frame holds the artifact and not a second toolbar. Private and password-protected artifacts stay unembeddable on purpose, and the unlock prompt refuses to be framed at all. See [docs/embedding.md](docs/embedding.md).
 - **QR code per artifact.** Every artifact has a QR of its permanent URL, from the row menu in the dashboard, `GET /api/artifacts/:slug/qr`, or `artifacts qr <slug>`. SVG or PNG, generated in-process: no QR library, no third-party image service, nothing about your artifacts leaves the box. See [the API reference](docs/api.md).
 - **Organize by project.** Group artifacts built for the same project into collapsible sections, with a search box across project, title, slug, tags, and a redirect's target. Tags stay for cross-cutting labels.
 - **Lifecycle controls.** Custom slugs, rename, tags, disable without deleting, auto-expire, delete.
@@ -100,6 +101,7 @@ claude mcp add --transport http artifacts https://artifacts.example.com/mcp \
 | Hook up Claude Code / Codex / any agent | [docs/mcp.md](docs/mcp.md) |
 | Set up login + scoped API keys | [docs/auth.md](docs/auth.md) |
 | Understand JSX/TSX rendering + zip validation | [docs/formats.md](docs/formats.md) |
+| Put an artifact inside another page | [docs/embedding.md](docs/embedding.md) |
 
 ## Development
 
@@ -142,7 +144,7 @@ Uploaded HTML runs in the browser. That is the whole point, so the model is buil
 - **Serve artifacts from their own origin.** Point artifact URLs at a domain that hosts nothing else, so a published page can never touch the dashboard's session cookie.
 - **Writes need a scoped API key.** Publishing carries a bearer key; the admin dashboard uses a separate HttpOnly, SameSite=Strict session cookie.
 - **Reads rely on unguessable slugs.** Public artifacts are reachable by anyone with the link and carry `noindex`, but there is no listing to browse. Don't publish secrets.
-- **Credential routes are throttled.** Login and unlock rate-limit per client IP and hash passwords off the event loop. Put a CDN or edge limiter in front for volumetric attacks.
+- **Credential routes are throttled.** Login and unlock rate-limit per client IP and hash passwords off the event loop. A caller below `publish` scope gets a 256 kB body parser instead of the 10 MB one, and a cap of 20 large bodies a minute per client IP, both checked before the body is parsed. Put a CDN or edge limiter in front for volumetric attacks.
 
 Full threat model in [SECURITY.md](SECURITY.md).
 

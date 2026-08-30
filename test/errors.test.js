@@ -7,7 +7,8 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { ApiError, clientFacingError } from '../lib/errors.js';
+import { ApiError, StorageTimeoutError, clientFacingError } from '../lib/errors.js';
+import { UnsafeKeyError } from '../storage/index.js';
 
 // The error body-parser throws for a body JSON.parse refuses. Strict mode means `null`, `"x"`
 // and `5` land here too, not just broken syntax.
@@ -63,6 +64,24 @@ test('a body past the limit is a 413 naming the limits', () => {
   assert.match(answer.message, /body too large/);
 });
 
+// The message used to name all four parsers, so a 300 kB body refused at 256 kB was told to cut
+// to 10 MB, a limit it was already under. raw-body puts the limit that actually applied on the
+// error; the message reads it off there.
+test('the 413 names the limit that applied, not every limit there is', () => {
+  const refusedAt = (limit) => {
+    const err = new Error('request entity too large');
+    err.status = 413;
+    err.expose = true;
+    err.type = 'entity.too.large';
+    err.limit = limit;
+    return clientFacingError(err).message;
+  };
+  assert.equal(refusedAt(256 * 1024), 'body too large: the limit on this request is 256 kb');
+  assert.equal(refusedAt(16 * 1024), 'body too large: the limit on this request is 16 kb');
+  assert.equal(refusedAt(10 * 1024 * 1024), 'body too large: the limit on this request is 10 mb');
+  assert.equal(refusedAt(50 * 1024 * 1024), 'body too large: the limit on this request is 50 mb');
+});
+
 test('an encoding body-parser cannot decode is a 415', () => {
   const err = new Error('unsupported content encoding "br"');
   err.status = 415;
@@ -98,4 +117,32 @@ test('a status that is not a number is not a status', () => {
   err.status = '400';
   err.expose = true;
   assert.equal(clientFacingError(err), null);
+});
+
+// The one 5xx this handler speaks for. Every other 5xx answers a bare 500, because its message
+// can carry whatever a backend said about this server's disks or database; this one is a
+// sentence this repo wrote, and the caller needs it to know a retry is worth making.
+test('a storage call that ran out of time is a 503 the caller can act on', () => {
+  const answer = clientFacingError(new StorageTimeoutError('the storage backend did not answer'));
+  assert.equal(answer.status, 503);
+  assert.equal(answer.message, 'the storage backend did not answer');
+  assert.ok(answer.retryAfter > 0);
+});
+
+// A 5xx ApiError that is not the timeout still says nothing.
+test('any other 5xx still answers a bare 500', () => {
+  assert.equal(clientFacingError(new ApiError(500, '/data/artifacts is full')), null);
+  assert.equal(clientFacingError(new ApiError(503, 'the database is gone')), null);
+});
+
+// The local backend's realpath guard refuses a write through a symlinked slug directory. The
+// serve path maps that to a 404; the publish path had nothing for it, so an operator whose /data
+// held a symlinked slug got a bare "internal server error" with nothing in it to act on.
+test('a key that resolves outside the store is a 409 naming the slug', () => {
+  const answer = clientFacingError(new UnsafeKeyError('"sym/index.html" resolves outside storage root', 'sym/index.html'));
+  assert.equal(answer.status, 409);
+  assert.match(answer.message, /"sym"/);
+  assert.match(answer.message, /symlink/);
+  // A key-shape refusal from assertSafeKey carries no key, and still must not become a 500.
+  assert.equal(clientFacingError(new UnsafeKeyError('empty key')).status, 409);
 });
