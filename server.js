@@ -2108,9 +2108,28 @@ app.post('/api/auth/login', async (req, res, next) => {
   }
 });
 
-app.post('/api/auth/logout', (req, res) => {
-  res.clearCookie(SESSION_COOKIE, { path: '/' });
-  res.json({ ok: true });
+app.post('/api/auth/logout', async (req, res, next) => {
+  try {
+    // Clearing the cookie only tells one browser to forget it. The token is a signed payload
+    // with a 30 day exp and no server-side record, so every copy taken off a shared machine, a
+    // backup or a proxy log stays an admin credential until it lapses. Rotating adminSecret is
+    // the same eviction the password route does, and this account is single-admin, so signing
+    // every device out is the whole set of sessions the operator has.
+    //
+    // Only a caller already holding a live session triggers the rotation. An anonymous POST
+    // still answers 200 and writes nothing, so the route cannot be used to sign the operator
+    // out, and a browser whose cookie already lapsed keeps getting the answer it expects.
+    if (sessionPrincipal(req)) {
+      const rotated = crypto.randomBytes(32).toString('hex');
+      await update((a) => {
+        a.adminSecret = rotated;
+      });
+    }
+    res.clearCookie(SESSION_COOKIE, { path: '/' });
+    res.json({ ok: true });
+  } catch (err) {
+    next(err);
+  }
 });
 
 app.post('/api/auth/password', requireSession, async (req, res, next) => {

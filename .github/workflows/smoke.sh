@@ -1212,9 +1212,20 @@ if [ -n "$ADMIN_USER" ] && [ -n "$ADMIN_PASS" ]; then
   echo "$b_wrong" | grep -q 'invalid credentials' || fail "a wrong password did not answer with invalid credentials: $b_wrong"
   echo "ok: unknown user and wrong password answer identically"
 
+  # The cookie value as the browser stores it. Kept so the replay below can send the exact
+  # credential a thief would have copied, rather than whatever the jar holds after logout.
+  session_token=$(echo "$cookie_line" | sed -E 's/^[Ss]et-[Cc]ookie:[ ]*artifacts_session=([^;]*).*/\1/' | tr -d '\r')
+  [ -n "$session_token" ] || fail "could not read the session cookie value"
+
   curl -s -b /tmp/sessjar -c /tmp/sessjar -o /dev/null -X POST "$BASE/api/auth/logout"
   code=$(curl -s -o /dev/null -w '%{http_code}' -b /tmp/sessjar "$BASE/api/keys")
   expect_code 401 "$code" "logout drops the session"
+
+  # The cookie is a signed payload with a 30 day exp and no server-side record, so clearing it
+  # in one browser leaves every captured copy live. Logout has to refuse the token itself.
+  code=$(curl -s -o /dev/null -w '%{http_code}' -H "Cookie: artifacts_session=$session_token" "$BASE/api/keys")
+  expect_code 401 "$code" "a session token captured before logout is replayed after it"
+  echo "ok: logout invalidates the session token, not just the browser cookie"
 else
   echo "skip: session cases need ARTIFACTS_ADMIN_USERNAME and ARTIFACTS_ADMIN_PASSWORD in the environment"
 fi

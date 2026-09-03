@@ -137,7 +137,7 @@ it read at boot, so it would keep using the old admin and the old keys until it 
 | `GET` | `/api/auth/session` | `{ authenticated, needsSetup }` |
 | `POST` | `/api/auth/setup` | create the admin account (only while none exists) |
 | `POST` | `/api/auth/login` | `{ username, password }` → sets session cookie |
-| `POST` | `/api/auth/logout` | clears the cookie |
+| `POST` | `/api/auth/logout` | clears the cookie and refuses every session token issued so far |
 | `POST` | `/api/auth/password` | `{ currentPassword, newPassword }` (logged in) |
 
 `POST /api/auth/login` is rate-limited to 10 failures per 15 minutes per client IP (a `429` with `Retry-After` after that); a successful login never consumes budget. Client-IP resolution honors `TRUST_PROXY` — see [rate limiting and the edge](deploy.md#rate-limiting-and-the-edge). Credential routes cap the request body at 16 kB.
@@ -146,6 +146,13 @@ A session cookie lasts 30 days from the login that issued it. The expiry is carr
 itself, so a cookie that does not name one, or names one the server cannot read as a number, is
 refused rather than treated as a session with no end. The same rule covers capability links and
 unlock cookies.
+
+Logging out signs out every admin session on the instance that served it, not only the browser that
+asked. The cookie is a signed payload the server keeps no record of, so clearing it in one browser
+would leave any copy taken off a shared machine, a backup or a proxy log working for the rest of its
+30 days. Logout rotates the secret that signs admin sessions, which refuses all of them at once.
+This account is single-admin, so that is the whole set. A logout sent without a live session answers
+`200` and changes nothing, so nobody can sign the operator out by calling it.
 
 Changing the password signs out every other admin session on the instance that served the change. The browser making the change gets a fresh cookie and stays signed in, so use it if you think a session cookie leaked. On more than one replica it revokes nothing on its own, and the same goes for revoking a key: see [running multiple replicas](deploy.md#running-multiple-replicas). Capability links for private and password artifacts are signed with a separate secret and keep working; revoke those per artifact with `PATCH {"rotateToken": true}`.
 
