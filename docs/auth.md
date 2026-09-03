@@ -148,11 +148,24 @@ refused rather than treated as a session with no end. The same rule covers capab
 unlock cookies.
 
 Logging out signs out every admin session on the instance that served it, not only the browser that
-asked. The cookie is a signed payload the server keeps no record of, so clearing it in one browser
-would leave any copy taken off a shared machine, a backup or a proxy log working for the rest of its
-30 days. Logout rotates the secret that signs admin sessions, which refuses all of them at once.
-This account is single-admin, so that is the whole set. A logout sent without a live session answers
-`200` and changes nothing, so nobody can sign the operator out by calling it.
+asked. The cookie is a signed payload and the server keeps no record of it. Clearing it in one
+browser leaves every other copy live for the rest of its 30 days: a copy taken off a shared machine,
+a backup or a proxy log. So logout rotates the secret that signs admin sessions, and that refuses
+all of them at once. This account is single-admin, so that is the whole set.
+
+Three things that rotation does not do. A logout sent without a live session answers `200` and
+changes nothing, so a caller who does not already carry the operator's cookie cannot trigger it.
+Managed API keys and the bootstrap key are unaffected. Capability links and unlock cookies are
+signed with a separate secret and keep working, the same way they survive a password change.
+
+The cookie is `SameSite=Strict`, so another site cannot borrow it. Artifact content is served from
+the same origin as the API, so script inside an artifact you published can, the same way it can
+reach every other route the cookie opens. Publish only content you trust, or run artifacts on a
+separate hostname.
+
+On more than one replica a logout revokes nothing on its own: the other replicas keep honoring the
+old secret until something writes on them, so a captured cookie stays a live admin credential
+there. See [running multiple replicas](deploy.md#running-multiple-replicas).
 
 Changing the password signs out every other admin session on the instance that served the change. The browser making the change gets a fresh cookie and stays signed in, so use it if you think a session cookie leaked. On more than one replica it revokes nothing on its own, and the same goes for revoking a key: see [running multiple replicas](deploy.md#running-multiple-replicas). Capability links for private and password artifacts are signed with a separate secret and keep working; revoke those per artifact with `PATCH {"rotateToken": true}`.
 

@@ -472,8 +472,8 @@ test('a session inside its window resolves and one past it does not', async () =
 
 // T2.1.22. Logout used to clear the browser cookie and nothing else, so a captured copy of the
 // token stayed good for the rest of its 30 day window. Rotating adminSecret is the eviction the
-// password route already relies on; this proves the rotation alone refuses a live cookie, which
-// is the half the route depends on.
+// password route already does; this proves the rotation alone refuses a live cookie, which
+// is the part the logout route relies on.
 test('rotating adminSecret refuses a session issued before the rotation', async () => {
   const { store } = await sessionStore();
 

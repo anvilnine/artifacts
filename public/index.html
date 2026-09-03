@@ -880,8 +880,27 @@
   $('lockSubmit').addEventListener('click', submitAuth);
   $('lockUser').addEventListener('keydown', (e) => { if (e.key === 'Enter') $('lockPass').focus(); });
   $('lockPass').addEventListener('keydown', (e) => { if (e.key === 'Enter') submitAuth(); });
+  // Signing out revokes every admin session on this instance, not only this browser, so it
+  // gets the same confirm the other wide-reach action gets (Rotate link, below). The old
+  // handler also showed the lock screen whether or not the server agreed: the revocation is a
+  // storage write now, and a failed one used to leave the operator looking at a sign-in screen
+  // with a live admin cookie still in the browser.
   $('logout').addEventListener('click', async () => {
-    try { await fetch('/api/auth/logout', { method: 'POST' }); } catch {}
+    const ok = await dialog({
+      title: 'Sign out?',
+      body: 'This signs out every device you are signed in on, not only this browser.',
+      confirmText: 'Sign out',
+    });
+    if (!ok) return;
+    // Three outcomes, and they are not the same. No response at all means the request never
+    // reached the server, so nothing was cleared and nothing was revoked: stay put and say so.
+    // A response that failed still carried the cookie-clearing header, so this browser is
+    // signed out while the token stays good on other devices, which is worth naming rather
+    // than showing a lock screen that implies the whole job is done.
+    let res = null;
+    try { res = await fetch('/api/auth/logout', { method: 'POST' }); } catch {}
+    if (!res) return toast('Sign out failed. Check your connection and try again.', true);
+    if (!res.ok) toast('Signed out here, but the server could not revoke the session. Other devices stay signed in.', true);
     SETUP = false;
     showLock();
   });

@@ -2111,21 +2111,31 @@ app.post('/api/auth/login', async (req, res, next) => {
 app.post('/api/auth/logout', async (req, res, next) => {
   try {
     // Clearing the cookie only tells one browser to forget it. The token is a signed payload
-    // with a 30 day exp and no server-side record, so every copy taken off a shared machine, a
-    // backup or a proxy log stays an admin credential until it lapses. Rotating adminSecret is
-    // the same eviction the password route does, and this account is single-admin, so signing
-    // every device out is the whole set of sessions the operator has.
+    // with a 30 day expiry and no server-side record, so every copy taken off a shared machine,
+    // a backup or a proxy log stays an admin credential until it lapses. Rotating adminSecret
+    // is the same eviction the password route does, and this account is single-admin, so
+    // signing every device out is the whole set of sessions the operator has.
     //
+    // Clear the cookie before the rotation, not after. The rotation is a storage write and it
+    // can fail; ordering it first would mean a read-only volume or an unreadable auth.json
+    // answered 500 with no Set-Cookie at all, so the browser kept a live admin cookie while
+    // the dashboard showed the sign-in screen. Clearing first degrades a failed logout to
+    // exactly what logout did before this route rotated anything.
+    res.clearCookie(SESSION_COOKIE, { path: '/' });
+
     // Only a caller already holding a live session triggers the rotation. An anonymous POST
     // still answers 200 and writes nothing, so the route cannot be used to sign the operator
     // out, and a browser whose cookie already lapsed keeps getting the answer it expects.
-    if (sessionPrincipal(req)) {
+    const principal = sessionPrincipal(req);
+    if (principal) {
       const rotated = crypto.randomBytes(32).toString('hex');
       await update((a) => {
         a.adminSecret = rotated;
       });
+      // One line for the one action that signs every device out at once. Without it an
+      // operator asking why their phone dropped its session has nothing to read.
+      logAuth('logout', { ip: clientIp(req), outcome: 'sessions revoked' });
     }
-    res.clearCookie(SESSION_COOKIE, { path: '/' });
     res.json({ ok: true });
   } catch (err) {
     next(err);
