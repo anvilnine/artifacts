@@ -12,6 +12,17 @@ KEY=$2
 AUTH="Authorization: Bearer $KEY"
 JSON="Content-Type: application/json"
 fail() { echo "FAIL: $1" >&2; exit 1; }
+# Blocks this run could not exercise. A skip that only prints mid-run is invisible under
+# a final "all smoke tests passed", which is how a run with no admin credentials reads as
+# full coverage of the session cases.
+SKIPPED=""
+done_ok() {
+  if [ -n "$SKIPPED" ]; then
+    echo "all smoke tests passed, with these blocks skipped:$SKIPPED"
+  else
+    echo "all smoke tests passed"
+  fi
+}
 
 expect_code() { # expect_code <expected> <actual> <label>
   [ "$2" = "$1" ] || fail "$3: expected $1, got $2"
@@ -1212,11 +1223,46 @@ if [ -n "$ADMIN_USER" ] && [ -n "$ADMIN_PASS" ]; then
   echo "$b_wrong" | grep -q 'invalid credentials' || fail "a wrong password did not answer with invalid credentials: $b_wrong"
   echo "ok: unknown user and wrong password answer identically"
 
+  # The cookie value as the browser stores it. Kept so the replay below can send the exact
+  # credential a thief would have copied, rather than whatever the jar holds after logout.
+  session_token=$(echo "$cookie_line" | sed -E 's/^[Ss]et-[Cc]ookie:[ ]*artifacts_session=([^;]*).*/\1/' | tr -d '\r')
+  [ -n "$session_token" ] || fail "could not read the session cookie value"
+  # sed prints the line unchanged when the pattern misses, so a broken extraction is non-empty
+  # and the check above passes. Prove the value is the real credential before the replay reads
+  # anything into a 401: without this, mangling the extraction and dropping the fix both stay
+  # green together.
+  code=$(curl -s -o /dev/null -w '%{http_code}' -H "Cookie: artifacts_session=$session_token" "$BASE/api/keys")
+  expect_code 200 "$code" "the extracted cookie value is the live credential"
+
+  # The rotation is gated on the caller already holding a session. An anonymous POST has to
+  # answer 200 and write nothing, or the route is a way for anybody to sign the operator out.
+  code=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/api/auth/logout")
+  expect_code 200 "$code" "an anonymous logout"
+  code=$(curl -s -o /dev/null -w '%{http_code}' -b /tmp/sessjar "$BASE/api/keys")
+  expect_code 200 "$code" "the operator's session survives an anonymous logout"
+
   curl -s -b /tmp/sessjar -c /tmp/sessjar -o /dev/null -X POST "$BASE/api/auth/logout"
   code=$(curl -s -o /dev/null -w '%{http_code}' -b /tmp/sessjar "$BASE/api/keys")
   expect_code 401 "$code" "logout drops the session"
+
+  # The cookie is a signed payload with a 30 day expiry and no server-side record, so clearing
+  # it in one browser leaves every captured copy live. Logout has to refuse the token itself.
+  code=$(curl -s -o /dev/null -w '%{http_code}' -H "Cookie: artifacts_session=$session_token" "$BASE/api/keys")
+  expect_code 401 "$code" "a session token captured before logout is replayed after it"
+  echo "ok: logout invalidates the session token, not just the browser cookie"
+
+  # The rotation takes out admin sessions and nothing else. adminSecret does not sign managed
+  # keys or the bootstrap bearer, and a regression that rotated sessionSecret instead would
+  # take the share links with it.
+  code=$(curl -s -o /dev/null -w '%{http_code}' -H "$AUTH" "$BASE/api/keys")
+  expect_code 200 "$code" "the bootstrap key still works after a logout"
 else
-  echo "skip: session cases need ARTIFACTS_ADMIN_USERNAME and ARTIFACTS_ADMIN_PASSWORD in the environment"
+  # Loud, because a silent skip here reads as a pass. The block owns every admin-session case,
+  # so a run without these two prints "all smoke tests passed" while proving nothing about
+  # login, logout or session revocation. The vars have to be in this shell, not only in the
+  # environment the server was booted with.
+  SKIPPED="$SKIPPED session"
+  echo "SKIP: session cases need ARTIFACTS_ADMIN_USERNAME and ARTIFACTS_ADMIN_PASSWORD exported in this shell"
 fi
 
 # --- DoS liveness: a burst of unauthenticated login POSTs must not stall /healthz ---
@@ -2019,8 +2065,9 @@ node "$(dirname "$0")/dashboard-check.mjs" "$BASE"
 # e.g. the container-smoke job which doesn't run npm ci)
 CLI_DIR=$REPO_DIR
 if [ ! -d "$CLI_DIR/node_modules" ]; then
-  echo "skip: cli smoke (no node_modules)"
-  echo "all smoke tests passed"
+  echo "SKIP: cli smoke (no node_modules)"
+  SKIPPED="$SKIPPED cli"
+  done_ok
   exit 0
 fi
 export ARTIFACTS_URL=$BASE ARTIFACTS_API_KEY=$KEY
@@ -2314,4 +2361,4 @@ expect_code 201 "$code" "an ordinary publish after the flood"
 curl -sf -X DELETE "$BASE/api/artifacts/ci-flood" -H "$AUTH" > /dev/null
 rm "$bigbody" "$floodcodes" "$floodheaders" "$floodbody"
 
-echo "all smoke tests passed"
+done_ok

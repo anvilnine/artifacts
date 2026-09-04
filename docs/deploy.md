@@ -98,6 +98,7 @@ Reads are still per-process, and that is the part to plan around. A replica serv
 
 - A managed key minted on one replica answers `401` everywhere else. A key you revoke or disable on one replica keeps working everywhere else.
 - A password change rotates `adminSecret` only on the replica that served it. A stolen session cookie stays valid, with full admin scope, on every other replica for the rest of its 30-day life, and the old password still logs in there while the new one is refused. A password change on a live fleet revokes nothing by itself.
+- A logout rotates `adminSecret` the same way and carries the same limit. The cookie the operator just signed out of stays valid, with full admin scope, on every other replica for the rest of its 30-day life.
 
 So when you are responding to a suspected leak, restart every replica after the change rather than waiting for one to catch up. When you are doing routine key housekeeping, you can leave the fleet up and let the restart happen whenever you next deploy.
 

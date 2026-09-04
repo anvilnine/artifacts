@@ -470,6 +470,30 @@ test('a session inside its window resolves and one past it does not', async () =
   assert.equal(store.sessionPrincipal(sessionReq(wrongUser)), null);
 });
 
+// T2.1.22. Logout used to clear the browser cookie and nothing else, so a captured copy of the
+// token stayed good for the rest of its 30 day window. Rotating adminSecret is the eviction the
+// password route already does; this proves the rotation alone refuses a live cookie, which
+// is the part the logout route relies on.
+test('rotating adminSecret refuses a session issued before the rotation', async () => {
+  const { store } = await sessionStore();
+
+  const res = fakeRes();
+  await store.issueSession(res, 'ci-admin');
+  const token = res.cookies[SESSION_COOKIE];
+  assert.equal(store.sessionPrincipal(sessionReq(token))?.admin, true);
+
+  await store.update((a) => {
+    a.adminSecret = 'b'.repeat(64);
+  });
+
+  assert.equal(store.sessionPrincipal(sessionReq(token)), null);
+
+  // The next login still works, so the rotation evicts sessions rather than the account.
+  const fresh = fakeRes();
+  await store.issueSession(fresh, 'ci-admin');
+  assert.equal(store.sessionPrincipal(sessionReq(fresh.cookies[SESSION_COOKIE]))?.admin, true);
+});
+
 // A stray percent sign in any cookie made decodeURIComponent throw. On the API routes that was a
 // 500. On the serve path it killed the process, because unlockValid runs outside the async error
 // path, so one unauthenticated request took every artifact on the host down with it.
