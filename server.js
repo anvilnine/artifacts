@@ -2592,7 +2592,8 @@ function createMcpServer(scopes = SCOPES, keyId = null) {
     async ({ slug }) => {
       requireScope('read');
       const meta = SLUG_RE.test(slug) ? await readMeta(slug) : null;
-      if (!meta) throw new Error(`artifact "${slug}" not found`);
+      if (!meta || meta.disabled) throw new Error(`artifact "${slug}" not found`);
+      if (isExpired(meta)) throw new Error(`artifact "${slug}" has expired`);
       if (meta.type === 'zip') {
         throw new Error('a zip site is many files with no single source: fetch the files from its URL instead');
       }
