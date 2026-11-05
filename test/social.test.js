@@ -178,8 +178,8 @@ test('a site name is escaped on the way into the tag', () => {
 // frame is on. Stored bytes go out untouched. Rather than splicing tags into someone's document,
 // every surface that sets a preview says plainly when it will not show.
 
-test('md and pdf carry a preview with or without the frame', () => {
-  for (const type of ['md', 'pdf']) {
+test('md, pdf and bpmn carry a preview with or without the frame', () => {
+  for (const type of ['md', 'pdf', 'bpmn']) {
     for (const framed of [true, false]) {
       const reach = previewReach({ type, framed });
       assert.equal(reach.shows, true, `${type} framed=${framed}`);

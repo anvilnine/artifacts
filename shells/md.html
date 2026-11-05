@@ -61,6 +61,8 @@
   table th, table td { border: 1px solid var(--border); padding: 6px 13px; }
   table th { font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 0.85em; text-transform: uppercase; letter-spacing: 0.04em; border-bottom-color: var(--border-strong); }
   hr { border: none; border-top: 1px solid var(--border); margin: 24px 0; }
+  .mermaid-diagram { margin: 16px 0; overflow-x: auto; text-align: center; }
+  .mermaid-diagram svg { max-width: 100%; height: auto; }
 </style>
 <script>
   (function () {
@@ -84,5 +86,58 @@
 </head>
 <body>
 {{CONTENT}}
+<script type="module">
+  // ```mermaid fences, drawn in the browser. marked leaves each one as an ordinary code block, so
+  // with no network, or a diagram mermaid cannot parse, the reader still sees the source. The
+  // library is only fetched when the page has a diagram on it.
+  const blocks = [...document.querySelectorAll('pre > code.language-mermaid')];
+  const mermaid = blocks.length
+    ? (await import('https://cdn.jsdelivr.net/npm/mermaid@11.4.1/dist/mermaid.esm.min.mjs').catch(() => null))?.default
+    : null;
+  if (mermaid) {
+    const root = document.documentElement;
+    const os = matchMedia('(prefers-color-scheme: dark)');
+    const diagrams = blocks.map((code, i) => {
+      const box = document.createElement('div');
+      box.className = 'mermaid-diagram';
+      box.hidden = true;
+      code.parentElement.before(box);
+      return { pre: code.parentElement, box, src: code.textContent, id: 'mermaid-' + i };
+    });
+    let drawn = '';
+    async function draw() {
+      const t = root.getAttribute('data-theme');
+      const theme = t === 'dark' || (t !== 'light' && os.matches) ? 'dark' : 'default';
+      if (theme === drawn) return;
+      drawn = theme;
+      mermaid.initialize({
+        startOnLoad: false,
+        securityLevel: 'strict',
+        theme,
+        fontFamily: getComputedStyle(document.body).fontFamily,
+      });
+      for (const d of diagrams) {
+        try {
+          const { svg } = await mermaid.render(d.id, d.src);
+          d.box.innerHTML = svg;
+          d.box.hidden = false;
+          d.pre.hidden = true;
+        } catch (e) {
+          // A failed render can leave mermaid's scratch element behind at the foot of the page.
+          document.getElementById('d' + d.id)?.remove();
+          d.box.hidden = true;
+          d.pre.hidden = false;
+        }
+      }
+    }
+    // Redraw when the theme flips (the frame's toggle, another tab, or the OS). Chained so two
+    // flips in quick succession never render the same ids at once.
+    let queue = Promise.resolve();
+    const redraw = () => { queue = queue.then(draw); };
+    new MutationObserver(redraw).observe(root, { attributes: true, attributeFilter: ['data-theme'] });
+    os.addEventListener('change', redraw);
+    redraw();
+  }
+</script>
 </body>
 </html>

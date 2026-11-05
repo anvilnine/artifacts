@@ -23,9 +23,23 @@ Every tool the server registers. `?` marks an optional argument.
 | `disable_artifact` | `slug` | confirmation (URL serves 404, content kept) |
 | `enable_artifact` | `slug` | confirmation |
 | `list_artifacts` | `tag?`, `project?` | JSON list |
+| `get_artifact_source` | `slug` | JSON `{slug, type, title}`, then the source |
 | `delete_artifact` | `slug` | confirmation |
 
-`type` is `html` (the default), `jsx`, `tsx`, `md`, `pdf`, or `redirect`. **pdf** is accepted but is a poor fit here, for the reason zip sites have no tool at all: the payload is binary, and base64 for a multi-megabyte file fills a client's context with nothing an agent can read. Use the [CLI](cli.md) (`artifacts publish q3.pdf`) or the [REST endpoint](api.md) to put the bytes up. The enum carries `pdf` so that a deliberate change of type is expressible in both directions, not as an invitation to paste megabytes. A pdf published elsewhere lists, renames, expires and deletes through these tools like any other artifact.
+`type` is `html` (the default), `jsx`, `tsx`, `md`, `bpmn`, `pdf`, or `redirect`. **pdf** is accepted but is a poor fit here, for the reason zip sites have no tool at all: the payload is binary, and base64 for a multi-megabyte file fills a client's context with nothing an agent can read. Use the [CLI](cli.md) (`artifacts publish q3.pdf`) or the [REST endpoint](api.md) to put the bytes up. The enum carries `pdf` so that a deliberate change of type is expressible in both directions, not as an invitation to paste megabytes. A pdf published elsewhere lists, renames, expires and deletes through these tools like any other artifact.
+
+**bpmn** is the one to reach for when an agent is mapping a process. Write the process (pools,
+lanes, tasks, gateways, flows) and leave out the `<bpmndi:BPMNDiagram>` section: the server lays it
+out and stores the laid-out file. A file it cannot draw comes back as a tool error naming the
+problem, such as a flow pointing at an id that does not exist, so the agent can fix it and try
+again. To revise a map later, including one somebody has since tidied in a modeller, read it back
+with `get_artifact_source` first and send the edited XML to `update_artifact` with `type: "bpmn"`.
+See [BPMN process maps](formats.md#bpmn-process-maps).
+
+`get_artifact_source` needs the `read` scope. It returns two text blocks: JSON with `slug`, `type`
+and `title`, then the stored source. For a redirect the source is its target. A pdf or a zip site
+is refused, because one is binary and the other is many files; use the [CLI](cli.md) `source`
+command for a pdf.
 
 `list_artifacts` returns what `GET /api/artifacts` returns: `slug`, `type`, `title`, `createdAt`,
 `updatedAt` and `tags` on every entry, plus whichever of `project`, `expiresAt`, `frame`,
@@ -44,8 +58,8 @@ author's own HTML. Details in [Link previews](formats.md#link-previews).
 frame should check the server config before the artifact.
 
 `update_artifact` rewrites the artifact rather than patching it, and `type` falls back to `html`
-instead of keeping what is there. Pass it on every update of a `jsx`, `tsx`, `md`, `pdf` or
-`redirect` artifact, or the artifact comes back as HTML and the files the old type owned are
+instead of keeping what is there. Pass it on every update of a `jsx`, `tsx`, `md`, `bpmn`, `pdf`
+or `redirect` artifact, or the artifact comes back as HTML and the files the old type owned are
 deleted. A **pdf** is the one type that refuses the call rather than doing that: its bytes cannot
 be rebuilt from anything in a client's context, so `update_artifact` with no `type` on a pdf is an
 error telling you to name one. `title`,
@@ -76,4 +90,4 @@ bearer_token_env_var = "ARTIFACTS_API_KEY"
 
 No MCP needed. One curl call does it (see the [REST API](api.md)). Suggested snippet for a global CLAUDE.md / AGENTS.md:
 
-> To publish an HTML/JSX/Markdown page or a redirect, use the `artifacts` MCP `publish_artifact` tool, or `POST https://artifacts.example.com/api/artifacts` with `Authorization: Bearer $ARTIFACTS_API_KEY` and JSON `{content, type, slug?}`. Artifacts default to **private**, so the returned `url` is a capability link (`?k=…`) that is immediately viewable; hand out the whole URL. Add `"visibility":"public"` for a bare, shareable link. All artifacts are non-indexed.
+> To publish an HTML/JSX/Markdown page, a BPMN process map or a redirect, use the `artifacts` MCP `publish_artifact` tool, or `POST https://artifacts.example.com/api/artifacts` with `Authorization: Bearer $ARTIFACTS_API_KEY` and JSON `{content, type, slug?}`. Artifacts default to **private**, so the returned `url` is a capability link (`?k=…`) that is immediately viewable; hand out the whole URL. Add `"visibility":"public"` for a bare, shareable link. All artifacts are non-indexed.

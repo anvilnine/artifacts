@@ -32,6 +32,7 @@ import {
   parseKeyInput,
 } from './lib/auth.js';
 import { SOURCE_EXT, dropOrphanObjects, dropStaleObjects } from './lib/artifact-files.js';
+import { prepareBpmn } from './lib/bpmn.js';
 import { createConfigStore } from './lib/config.js';
 import { ApiError, clientFacingError } from './lib/errors.js';
 import { createWriteQueue, WRITE_CEILING_MS } from './lib/write-queue.js';
@@ -163,6 +164,7 @@ const JSX_SHELL = await fs.readFile(path.join(__dirname, 'shells', 'jsx.html'), 
 const MD_SHELL = await fs.readFile(path.join(__dirname, 'shells', 'md.html'), 'utf8');
 const FRAME_SHELL = await fs.readFile(path.join(__dirname, 'shells', 'frame.html'), 'utf8');
 const PDF_SHELL = await fs.readFile(path.join(__dirname, 'shells', 'pdf.html'), 'utf8');
+const BPMN_SHELL = await fs.readFile(path.join(__dirname, 'shells', 'bpmn.html'), 'utf8');
 const PASSWORD_SHELL = await fs.readFile(path.join(__dirname, 'shells', 'password.html'), 'utf8');
 const NOT_FOUND_SHELL = await fs.readFile(path.join(__dirname, 'shells', 'not-found.html'), 'utf8');
 // The console is a shell like any other now: read once, branding filled per request.
@@ -388,6 +390,21 @@ function buildPdfHtml(meta) {
   });
 }
 
+// The bpmn viewer page. Built per request from source.bpmn, like a markdown page, but with no
+// cache: there is no parse here, only one string substitution, and the drawing happens in the
+// reader's browser. The XML goes into a JSON script block with every "<" escaped, so a
+// "</script>" inside a label or a documentation element cannot end the block early.
+function buildBpmnHtml(meta, xml) {
+  return fillShell(BPMN_SHELL, {
+    TITLE: escapeHtml(meta.title || meta.slug),
+    SOCIAL: socialTags(meta, canonicalUrl(meta)),
+    SOURCE: JSON.stringify(xml).replace(/</g, '\\u003c'),
+    // Lands inside a script, so JSON-quoted. The slug matches SLUG_RE on every write, but meta
+    // can be hand-edited, the same reason pdfDownloadName re-checks it.
+    FILENAME: JSON.stringify(SLUG_RE.test(meta.slug) ? `${meta.slug}.bpmn` : 'diagram.bpmn'),
+  });
+}
+
 // md artifacts render at serve time so a config change shows up on the next view. That
 // parse is synchronous and scales with the document: 1 MB costs ~130ms of blocked event
 // loop, 8 MB costs ~780ms. A public md artifact is readable by anyone holding the link,
@@ -444,7 +461,7 @@ function buildFrameHtml(meta, rawUrl) {
     TITLE: escapeHtml(meta.title || meta.slug),
     SOCIAL: socialTags(meta, canonicalUrl(meta), socialBranding(config.current.branding, BASE_URL)),
     RAW_URL: escapeHtml(rawUrl),
-    THEME_BTN: meta.type === 'md'
+    THEME_BTN: meta.type === 'md' || meta.type === 'bpmn'
       ? '<button id="theme" type="button" title="Cycle theme (auto, light, dark)">Auto</button>'
       : '',
   });
@@ -838,6 +855,9 @@ async function storeArtifact(finalSlug, input, { replace = false, keyId = null }
   let body = content;
   if (type === 'redirect') body = parseRedirectTarget(content, { publishing: true });
   else if (type === 'pdf') body = parsePdfContent(content);
+  // bpmn is checked here and, when the file has no diagram layout, laid out: what is stored is
+  // the drawn file, so /source opens in a modeller as a diagram. See lib/bpmn.js.
+  else if (type === 'bpmn') body = (await prepareBpmn(content)).xml;
   // A redirect that points at its own slug answers its own 301, so a visitor's browser hops
   // until it gives up. Refused here rather than at serve time: the link is dead either way,
   // and the publisher is the one who can fix it.
@@ -1767,6 +1787,11 @@ app.get('/a/:slug', async (req, res) => {
     res.set('Cache-Control', 'no-cache'); // reflect global config changes on next view
     return res.type('html').send(renderMd(slug, meta, buf.toString('utf8'), config.current.md));
   }
+  if (meta.type === 'bpmn') {
+    const buf = await storage.getBuffer(`${slug}/source.bpmn`);
+    if (!buf) return notFound(res);
+    return res.type('html').send(buildBpmnHtml(meta, buf.toString('utf8')));
+  }
   if (meta.type === 'pdf') {
     // The viewer page, not the file. The bytes live one path down at /a/<slug>/file.pdf,
     // which is what the shell's <object> loads and what a direct link points at.
@@ -2270,10 +2295,10 @@ function createMcpServer(scopes = SCOPES, keyId = null) {
     {
       title: 'Publish artifact',
       description:
-        'Publish an HTML, JSX/TSX (single React component with default export), or Markdown artifact. Returns the share URL: bare for public, or a ?k= capability link for private and password, which opens the artifact on its own. Omit slug for a random unguessable one. type "redirect" instead publishes a short link: content is the absolute http(s) target, and the URL answers 301 once the visibility gate has let the request through. type "pdf" takes base64 bytes in content; prefer the CLI or the REST endpoint for that, because a multi-megabyte base64 string fills your context with nothing you can read.',
+        'Publish an HTML, JSX/TSX (single React component with default export), Markdown, or BPMN 2.0 artifact. Returns the share URL: bare for public, or a ?k= capability link for private and password, which opens the artifact on its own. Omit slug for a random unguessable one. type "redirect" instead publishes a short link: content is the absolute http(s) target, and the URL answers 301 once the visibility gate has let the request through. type "pdf" takes base64 bytes in content; prefer the CLI or the REST endpoint for that, because a multi-megabyte base64 string fills your context with nothing you can read. type "bpmn" takes BPMN 2.0 XML and draws it as a process diagram: leave out the BPMNDiagram section and the server lays it out (pools, lanes, gateways and message flows included), then stores the laid-out file. Invalid XML, unknown elements, duplicate ids and dangling references are refused with the reason.',
       inputSchema: {
-        content: z.string().describe('Full source of the artifact, the target URL when type is "redirect", or base64-encoded bytes when type is "pdf"'),
-        type: z.enum(['html', 'jsx', 'tsx', 'md', 'pdf', 'redirect']).default('html'),
+        content: z.string().describe('Full source of the artifact, BPMN 2.0 XML when type is "bpmn", the target URL when type is "redirect", or base64-encoded bytes when type is "pdf"'),
+        type: z.enum(['html', 'jsx', 'tsx', 'md', 'bpmn', 'pdf', 'redirect']).default('html'),
         slug: z
           .string()
           .optional()
@@ -2325,7 +2350,7 @@ function createMcpServer(scopes = SCOPES, keyId = null) {
     {
       title: 'Update artifact',
       description:
-        'Rewrite an existing artifact by slug. Only type resets when omitted: it becomes html, and changing the type deletes the files the old type owned, so pass it on every update of a jsx, tsx, md, pdf or redirect artifact. A pdf refuses the update outright when type is omitted, because its bytes cannot be rebuilt from a reply. Every other field, title included, keeps its current value. Returns the share URL, tokened for private and password artifacts.',
+        'Rewrite an existing artifact by slug. Only type resets when omitted: it becomes html, and changing the type deletes the files the old type owned, so pass it on every update of a jsx, tsx, md, bpmn, pdf or redirect artifact. A pdf refuses the update outright when type is omitted, because its bytes cannot be rebuilt from a reply. Every other field, title included, keeps its current value. Returns the share URL, tokened for private and password artifacts.',
       inputSchema: {
         slug: z.string(),
         content: z.string(),
@@ -2334,7 +2359,7 @@ function createMcpServer(scopes = SCOPES, keyId = null) {
         // html", and a pdf rewrote itself as HTML with its bytes deleted before anything got
         // to refuse. Omitted still means html for every other type.
         type: z
-          .enum(['html', 'jsx', 'tsx', 'md', 'pdf', 'redirect'])
+          .enum(['html', 'jsx', 'tsx', 'md', 'bpmn', 'pdf', 'redirect'])
           .optional()
           .describe('Omit and the artifact is rewritten as html, deleting the files the old type owned. A pdf refuses the call instead, because its bytes cannot be rebuilt from a reply'),
         title: z.string().optional(),
@@ -2549,6 +2574,41 @@ function createMcpServer(scopes = SCOPES, keyId = null) {
       if (project) opts.project = project;
       const items = await listArtifacts(opts);
       return { content: [{ type: 'text', text: JSON.stringify(items, null, 2) }] };
+    },
+  );
+
+  // Reading back what was published, so an agent can revise an artifact (a process map someone
+  // tidied in a modeller, a doc a person edited) without being handed the file again. A read
+  // key can already mint a ?k= link for any artifact with GET /api/artifacts/:slug/link, so
+  // this opens nothing that scope did not reach.
+  server.registerTool(
+    'get_artifact_source',
+    {
+      title: 'Get artifact source',
+      description:
+        'Read back the source of an artifact by slug: the HTML, JSX/TSX, Markdown or BPMN XML as stored, or a redirect\'s target. The first content block is JSON naming slug, type and title; pass that type to update_artifact. A bpmn published without layout comes back with the layout the server added. pdf and zip sites are refused: one is binary and the other is many files.',
+      inputSchema: { slug: z.string() },
+    },
+    async ({ slug }) => {
+      requireScope('read');
+      const meta = SLUG_RE.test(slug) ? await readMeta(slug) : null;
+      if (!meta || meta.disabled) throw new Error(`artifact "${slug}" not found`);
+      if (isExpired(meta)) throw new Error(`artifact "${slug}" has expired`);
+      if (meta.type === 'zip') {
+        throw new Error('a zip site is many files with no single source: fetch the files from its URL instead');
+      }
+      if (meta.type === 'pdf') {
+        throw new Error(`a pdf is binary: download it with the CLI instead (artifacts source ${slug} -o file.pdf)`);
+      }
+      let text;
+      if (meta.type === 'redirect') {
+        text = await resolveRedirectTarget({ meta, readSource: () => storage.getBuffer(`${slug}/source.url`) });
+      } else if (Object.hasOwn(SOURCE_EXT, meta.type)) {
+        text = (await storage.getBuffer(`${slug}/source.${SOURCE_EXT[meta.type]}`))?.toString('utf8');
+      }
+      if (text == null) throw new Error(`artifact "${slug}" has no readable source`);
+      const head = { slug: meta.slug, type: meta.type, title: meta.title };
+      return { content: [{ type: 'text', text: JSON.stringify(head) }, { type: 'text', text }] };
     },
   );
 

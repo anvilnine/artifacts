@@ -1,0 +1,201 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<title>{{TITLE}}</title>
+{{SOCIAL}}
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bpmn-js@18.31.0/dist/assets/diagram-js.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bpmn-js@18.31.0/dist/assets/bpmn-js.css">
+<style>
+  :root {
+    color-scheme: light dark;
+    --bar-bg: #ffffff;
+    --bar-fg: #1f2328;
+    --bar-muted: #59636e;
+    --bar-border: #d8d2cc;
+    --bar-hover: #f0ece7;
+    --page-bg: #ffffff;
+    /* The diagram's own colours, handed to the renderer rather than read from CSS. */
+    --shape-fill: #ffffff;
+    --shape-stroke: #1f2328;
+    --shape-label: #1f2328;
+  }
+  /* Dark = Anvil Nine "Molten Steel", the same tokens the pdf and markdown shells use. */
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bar-bg: #101317; --bar-fg: #edeae4; --bar-muted: #9da3a9;
+      --bar-border: #242b33; --bar-hover: #1b2026; --page-bg: #0b0d0f;
+      --shape-fill: #15191e; --shape-stroke: #cfccc5; --shape-label: #cfccc5;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bar-bg: #101317; --bar-fg: #edeae4; --bar-muted: #9da3a9;
+    --bar-border: #242b33; --bar-hover: #1b2026; --page-bg: #0b0d0f;
+    --shape-fill: #15191e; --shape-stroke: #cfccc5; --shape-label: #cfccc5;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; }
+  body {
+    background: var(--page-bg); color: var(--bar-fg);
+    font-family: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  }
+  #canvas { position: absolute; inset: 0; }
+  /* Top right, clear of the bpmn.io mark the viewer draws bottom right, which its licence
+     requires to stay visible. */
+  #tools {
+    position: absolute; top: 12px; right: 12px; z-index: 10;
+    display: flex; gap: 6px; flex-wrap: wrap; justify-content: flex-end;
+  }
+  .act {
+    display: inline-flex; align-items: center; gap: 5px;
+    padding: 5px 10px; border-radius: 6px;
+    border: 1px solid var(--bar-border); background: var(--bar-bg);
+    color: var(--bar-muted); font-size: 13px; font-family: inherit;
+    cursor: pointer;
+  }
+  .act:hover { background: var(--bar-hover); color: var(--bar-fg); }
+  #error {
+    position: absolute; inset: 0; display: none;
+    align-items: center; justify-content: center; padding: 32px 20px; text-align: center;
+  }
+  #error p { margin: 0; max-width: 46ch; color: var(--bar-muted); font-size: 14px; line-height: 1.5; }
+  @media (max-width: 480px) {
+    .act .label { display: none; }
+  }
+</style>
+</head>
+<body>
+  <div id="canvas"></div>
+  <div id="tools">
+    <button class="act" id="fit" type="button" title="Fit the diagram to the window" aria-label="Fit the diagram to the window">&#8689;&nbsp;<span class="label">Fit</span></button>
+    <button class="act" id="zoomIn" type="button" title="Zoom in" aria-label="Zoom in">+</button>
+    <button class="act" id="zoomOut" type="button" title="Zoom out" aria-label="Zoom out">&minus;</button>
+    <button class="act" id="svg" type="button" title="Download the diagram as SVG" aria-label="Download the diagram as SVG">&#8681;&nbsp;<span class="label">SVG</span></button>
+    <button class="act" id="xml" type="button" title="Download the .bpmn file" aria-label="Download the .bpmn file">&#8681;&nbsp;<span class="label">BPMN</span></button>
+  </div>
+  <div id="error"><p></p></div>
+  <!-- The XML rides in the page rather than being fetched, so a private artifact needs no
+       second authenticated request. JSON with every "<" escaped, so nothing in it can close
+       this element. -->
+  <script type="application/json" id="source">{{SOURCE}}</script>
+  <script src="https://cdn.jsdelivr.net/npm/bpmn-js@18.31.0/dist/bpmn-navigated-viewer.production.min.js"></script>
+  <script>
+    (function () {
+      var root = document.documentElement;
+      var xml = JSON.parse(document.getElementById('source').textContent);
+      var fileName = {{FILENAME}};
+      var canvasEl = document.getElementById('canvas');
+      var viewer = null;
+      var drawnTheme = '';
+
+      function fail(message) {
+        var box = document.getElementById('error');
+        box.querySelector('p').textContent = message;
+        box.style.display = 'flex';
+        document.getElementById('tools').style.display = 'none';
+      }
+      if (!window.BpmnJS) {
+        fail('The diagram viewer did not load. It comes from cdn.jsdelivr.net, so check this browser can reach it. The BPMN file is still at /source.');
+        return;
+      }
+
+      function colours() {
+        var css = getComputedStyle(root);
+        var v = function (name) { return css.getPropertyValue(name).trim(); };
+        return {
+          defaultFillColor: v('--shape-fill'),
+          defaultStrokeColor: v('--shape-stroke'),
+          defaultLabelColor: v('--shape-label'),
+        };
+      }
+      function themeNow() {
+        var t = root.getAttribute('data-theme');
+        return t === 'dark' || (t !== 'light' && matchMedia('(prefers-color-scheme: dark)').matches) ? 'dark' : 'light';
+      }
+
+      // The renderer takes its colours once, at construction, so a theme change builds a new
+      // viewer and puts the reader back at the same zoom and position.
+      function draw() {
+        var theme = themeNow();
+        if (theme === drawnTheme) return;
+        drawnTheme = theme;
+        var box = viewer ? viewer.get('canvas').viewbox() : null;
+        if (viewer) viewer.destroy();
+        viewer = new BpmnJS({ container: canvasEl, bpmnRenderer: colours() });
+        viewer.importXML(xml).then(function () {
+          var canvas = viewer.get('canvas');
+          if (box) canvas.viewbox({ x: box.x, y: box.y, width: box.width, height: box.height });
+          else canvas.zoom('fit-viewport', 'auto');
+        }).catch(function (err) {
+          fail('This diagram could not be drawn: ' + (err && err.message ? err.message : err));
+        });
+      }
+
+      function save(blob, name) {
+        var a = document.createElement('a');
+        a.href = URL.createObjectURL(blob);
+        a.download = name;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        setTimeout(function () { URL.revokeObjectURL(a.href); }, 1000);
+      }
+
+      document.getElementById('fit').addEventListener('click', function () {
+        viewer.get('canvas').zoom('fit-viewport', 'auto');
+      });
+      document.getElementById('zoomIn').addEventListener('click', function () {
+        viewer.get('zoomScroll').stepZoom(1);
+      });
+      document.getElementById('zoomOut').addEventListener('click', function () {
+        viewer.get('zoomScroll').stepZoom(-1);
+      });
+      document.getElementById('xml').addEventListener('click', function () {
+        save(new Blob([xml], { type: 'application/xml' }), fileName);
+      });
+      // The SVG is always the light rendering, whatever the reader is looking at: it is going
+      // into a document or a slide, where a dark diagram on a white page reads as a mistake.
+      document.getElementById('svg').addEventListener('click', function () {
+        var off = document.createElement('div');
+        off.style.cssText = 'position:absolute;left:-10000px;top:0;width:1200px;height:800px;';
+        document.body.appendChild(off);
+        var exporter = new BpmnJS({
+          container: off,
+          bpmnRenderer: { defaultFillColor: '#ffffff', defaultStrokeColor: '#1f2328', defaultLabelColor: '#1f2328' },
+        });
+        exporter.importXML(xml)
+          .then(function () { return exporter.saveSVG(); })
+          .then(function (out) {
+            save(new Blob([out.svg], { type: 'image/svg+xml' }), fileName.replace(/\.bpmn$/, '.svg'));
+          })
+          .catch(function (err) { alert('Could not export the SVG: ' + (err && err.message ? err.message : err)); })
+          .then(function () { exporter.destroy(); off.remove(); });
+      });
+
+      // Theme: the viewer frame posts the reader's choice in, another tab lands through
+      // localStorage, and the OS setting covers auto. Same contract as the markdown shell.
+      function apply(t) {
+        if (t === 'dark' || t === 'light') root.setAttribute('data-theme', t);
+        else root.removeAttribute('data-theme');
+        draw();
+      }
+      var stored;
+      try { stored = localStorage.getItem('artifactTheme'); } catch (e) {}
+      window.addEventListener('message', function (e) {
+        if (e.origin !== window.location.origin) return;
+        if (e.data && e.data.artifactTheme) apply(e.data.artifactTheme);
+      });
+      window.addEventListener('storage', function (e) {
+        if (e.key === 'artifactTheme') apply(e.newValue);
+      });
+      matchMedia('(prefers-color-scheme: dark)').addEventListener('change', draw);
+      apply(stored);
+    })();
+  </script>
+</body>
+</html>

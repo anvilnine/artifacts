@@ -10,6 +10,27 @@ Served as-is on its own page. No processing.
 
 Rendered server-side (via marked) into a styled page. The original source stays available at `/a/:slug/source`. Markdown renders from its source on every view, so the settings below apply to existing artifacts the next time they load, with no re-publish.
 
+### Mermaid diagrams
+
+A fenced block tagged `mermaid` is drawn as a diagram:
+
+````markdown
+```mermaid
+flowchart LR
+  A[Publish] --> B{Type?}
+  B -->|md| C[marked]
+  B -->|jsx| D[Babel]
+```
+````
+
+The drawing happens in the reader's browser, using Mermaid 11 from jsDelivr. The library is only
+fetched on pages that have a diagram, so plain Markdown loads nothing extra. Diagrams follow the
+page theme, and redraw when the reader flips it with the frame's theme button or their OS setting.
+
+If Mermaid cannot parse a block, or the reader has no route to jsDelivr, the block stays on the
+page as ordinary code, so nothing is lost. Mermaid runs at its `strict` security level: HTML in
+labels is escaped and `click` handlers are switched off.
+
 ### Markdown render settings
 
 Four global knobs, set in the dashboard Settings popover or with `PUT /api/config`. The `MD_FONT`,
@@ -32,6 +53,103 @@ curl -s -X PUT https://artifacts.example.com/api/config \
 A bad value on any key returns 400; absent keys keep their current value.
 
 When the viewer frame is on, a Markdown artifact gets a navbar button that cycles Auto, Light, and Dark. The choice is saved in that reader's browser and overrides `md.theme` for them only. With the frame off there is no button, and the artifact uses `md.theme` (and the reader's OS when that is `auto`).
+
+## BPMN process maps
+
+Publish a BPMN 2.0 file (`type: "bpmn"`, or any `.bpmn` file through the CLI or the dashboard) and
+it gets a viewer page at `/a/{slug}` that draws the process. Readers can drag to pan and scroll to
+zoom. The buttons in the corner fit the diagram to the window, zoom in and out, and download it as
+SVG or as the `.bpmn` file itself. The SVG always comes out in the light theme, because it is
+usually headed for a document or a slide. The diagram follows the reader's theme, and the frame's
+theme button works on it the same way it does on Markdown.
+
+The original XML stays at `/a/{slug}/source`, so the same file opens in Camunda Modeler, Signavio,
+Bizagi or anything else that reads BPMN 2.0.
+
+### Checked on publish
+
+The XML is parsed when it is published, and anything the viewer could not draw is refused with a
+`400` that says what is wrong:
+
+- XML that does not parse, or a document that is not `<bpmn:definitions>`.
+- Unknown BPMN elements (`<bpmn:taskk>`), duplicate ids, and references to ids that do not exist,
+  such as a sequence flow whose `targetRef` names a task that is not there. The first five problems
+  are listed in the message.
+- A sequence flow missing its `sourceRef` or `targetRef`.
+- A file with no process or pool in it.
+- Any `<!DOCTYPE>`. The parser never expands entities, so this is about a clear error and not
+  about safety, but there is no legitimate reason for a BPMN file to carry one.
+
+Vendor extensions such as `camunda:` and `zeebe:` attributes are kept as they are.
+
+### Layout for files that have none
+
+A BPMN file has two halves: the process itself, and the diagram layout (the `<bpmndi:BPMNDiagram>`
+section, which holds the position of every shape and the bend points of every arrow). Modelling
+tools always write the layout. People and agents writing XML by hand almost never do, and the
+viewer cannot draw a shape it has no position for.
+
+So when a published file has no layout, the server works one out and stores the result. What
+`/source` gives back afterwards is the laid-out file, which opens as a finished diagram in any
+modeller. A file that already has a layout is stored exactly as it was sent, comments and
+formatting included.
+
+The layout runs left to right. It handles:
+
+- Pools and lanes, including lanes inside lanes. Pools are stacked one above the other, and every
+  shape is placed inside its lane.
+- Lanes with no pool, or several processes with no collaboration. A pool is added for each
+  process, named after it, because lanes can only be drawn inside a pool.
+- Gateways: the main path stays on one line and the other branches drop below it.
+- Loops: a flow back to an earlier step runs underneath the shapes in between.
+- Boundary events, on the bottom edge of the task they belong to, with their exception path
+  underneath.
+- Message flows between pools.
+
+It does not draw text annotations, groups, associations or data objects. They stay in the file, so
+a modeller still sees them, but the viewer does not. A sub-process is drawn collapsed, as a single
+box. A process with more than 2000 elements is refused rather than laid out; a diagram that size
+was drawn in a tool and will have its own layout anyway.
+
+A small example, with no layout section:
+
+```xml
+<bpmn:definitions xmlns:bpmn="http://www.omg.org/spec/BPMN/20100524/MODEL" id="defs">
+  <bpmn:process id="orders" name="Orders">
+    <bpmn:laneSet id="lanes">
+      <bpmn:lane id="sales" name="Sales">
+        <bpmn:flowNodeRef>start</bpmn:flowNodeRef>
+        <bpmn:flowNodeRef>check</bpmn:flowNodeRef>
+        <bpmn:flowNodeRef>inStock</bpmn:flowNodeRef>
+      </bpmn:lane>
+      <bpmn:lane id="warehouse" name="Warehouse">
+        <bpmn:flowNodeRef>pick</bpmn:flowNodeRef>
+        <bpmn:flowNodeRef>backorder</bpmn:flowNodeRef>
+        <bpmn:flowNodeRef>done</bpmn:flowNodeRef>
+      </bpmn:lane>
+    </bpmn:laneSet>
+    <bpmn:startEvent id="start" name="Order received"/>
+    <bpmn:task id="check" name="Check stock"/>
+    <bpmn:exclusiveGateway id="inStock" name="In stock?"/>
+    <bpmn:task id="pick" name="Pick and pack"/>
+    <bpmn:task id="backorder" name="Backorder"/>
+    <bpmn:endEvent id="done" name="Done"/>
+    <bpmn:sequenceFlow id="f1" sourceRef="start" targetRef="check"/>
+    <bpmn:sequenceFlow id="f2" sourceRef="check" targetRef="inStock"/>
+    <bpmn:sequenceFlow id="f3" name="yes" sourceRef="inStock" targetRef="pick"/>
+    <bpmn:sequenceFlow id="f4" name="no" sourceRef="inStock" targetRef="backorder"/>
+    <bpmn:sequenceFlow id="f5" sourceRef="pick" targetRef="done"/>
+    <bpmn:sequenceFlow id="f6" sourceRef="backorder" targetRef="done"/>
+  </bpmn:process>
+</bpmn:definitions>
+```
+
+### What the reader's browser needs
+
+The viewer is [bpmn-js](https://bpmn.io/toolkit/bpmn-js/) 18.31, loaded from jsDelivr, so like JSX
+artifacts a BPMN page needs a route to the internet to draw. Without one the page says the viewer
+did not load and points at `/source`. bpmn-js draws a small bpmn.io mark in the bottom corner of
+the diagram. Its licence requires the mark to stay visible, so the viewer leaves it alone.
 
 ## JSX/TSX artifacts
 

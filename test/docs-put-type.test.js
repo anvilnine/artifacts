@@ -48,12 +48,12 @@ test('docs/cli.md shows --type on update and says the CLI always sends one', () 
 
 test('docs/mcp.md tells an agent to pass type on every non-html update', () => {
   says('docs/mcp.md', [
-    'Pass it on every update of a `jsx`, `tsx`, `md`, `pdf` or `redirect` artifact',
+    'Pass it on every update of a `jsx`, `tsx`, `md`, `bpmn`, `pdf` or `redirect` artifact',
   ]);
 });
 
 test('the update_artifact tool description carries the same warning', () => {
   says('server.js', [
-    'pass it on every update of a jsx, tsx, md, pdf or redirect artifact',
+    'pass it on every update of a jsx, tsx, md, bpmn, pdf or redirect artifact',
   ]);
 });

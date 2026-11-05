@@ -14,9 +14,9 @@ import { createStorage } from './storage/index.js';
 const USAGE = `artifacts — publish to a self-hosted artifacts instance
 
 Usage:
-  artifacts publish <file> [--slug s] [--title t] [--tags a,b] [--project p] [--description d] [--og-image url] [--expires ISO] [--type html|jsx|tsx|md|pdf|redirect] [--frame on|off] [--visibility public|private|password] [--password pw]
+  artifacts publish <file> [--slug s] [--title t] [--tags a,b] [--project p] [--description d] [--og-image url] [--expires ISO] [--type html|jsx|tsx|md|bpmn|pdf|redirect] [--frame on|off] [--visibility public|private|password] [--password pw]
   artifacts deploy <dir|zip> [--slug s] [--title t] [--tags a,b] [--project p] [--description d] [--og-image url] [--expires ISO] [--visibility public|private|password] [--password pw]
-  artifacts update <slug> <file> [--title t] [--tags a,b] [--project p] [--description d] [--og-image url] [--type html|jsx|tsx|md|pdf|redirect]
+  artifacts update <slug> <file> [--title t] [--tags a,b] [--project p] [--description d] [--og-image url] [--type html|jsx|tsx|md|bpmn|pdf|redirect]
   artifacts list [--tag t] [--project p]
   artifacts rename <slug> <new-slug>
   artifacts disable <slug>
@@ -50,7 +50,7 @@ Connection (flags override env):
 The key can be a managed key (scoped) or the bootstrap ARTIFACTS_API_KEY.
 Minting keys (keys create/list/revoke) requires the bootstrap admin key.`;
 
-const EXT_TYPES = { '.html': 'html', '.htm': 'html', '.jsx': 'jsx', '.tsx': 'tsx', '.md': 'md', '.markdown': 'md', '.pdf': 'pdf' };
+const EXT_TYPES = { '.html': 'html', '.htm': 'html', '.jsx': 'jsx', '.tsx': 'tsx', '.md': 'md', '.markdown': 'md', '.bpmn': 'bpmn', '.pdf': 'pdf' };
 
 const { values: opts, positionals } = parseArgs({
   options: {
@@ -128,7 +128,7 @@ function fail(message) {
 function inferType(file) {
   if (opts.type) return opts.type;
   const type = EXT_TYPES[path.extname(file).toLowerCase()];
-  if (!type) fail(`cannot infer type from "${file}": pass --type html|jsx|tsx|md|pdf|redirect`);
+  if (!type) fail(`cannot infer type from "${file}": pass --type html|jsx|tsx|md|bpmn|pdf|redirect`);
   return type;
 }
 

@@ -14,7 +14,7 @@ import {
   SOURCE_EXT,
 } from '../lib/artifact-files.js';
 
-const TYPES = ['html', 'jsx', 'tsx', 'md', 'redirect', 'pdf'];
+const TYPES = ['html', 'jsx', 'tsx', 'md', 'redirect', 'pdf', 'bpmn'];
 
 // Minimal stand-in for storage/*.js: dropStaleObjects only calls delete, so recording the keys
 // it asks for is the whole contract. `fails` makes that delete throw, which is the branch that
@@ -203,6 +203,7 @@ function memStore(namespaces, { age = 24 * 7, mtime = true } = {}) {
 test('orphanKeys names every content key the type does not own', () => {
   assert.deepEqual(orphanKeys('s', 'md').sort(), [
     's/index.html',
+    's/source.bpmn',
     's/source.html',
     's/source.jsx',
     's/source.pdf',

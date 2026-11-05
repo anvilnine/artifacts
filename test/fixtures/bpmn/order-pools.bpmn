@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<bpmn:definitions xmlns:bpmn="http://www.omg.org/spec/BPMN/20100524/MODEL" id="Defs" targetNamespace="http://example.com">
+  <bpmn:collaboration id="C">
+    <bpmn:participant id="P_cust" name="Customer" processRef="Cust"/>
+    <bpmn:participant id="P_shop" name="Shop" processRef="Shop"/>
+    <bpmn:messageFlow id="M1" name="order" sourceRef="C_send" targetRef="S_start"/>
+    <bpmn:messageFlow id="M2" name="invoice" sourceRef="S_invoice" targetRef="C_pay"/>
+  </bpmn:collaboration>
+  <bpmn:process id="Cust">
+    <bpmn:startEvent id="C_start" name="Need stuff"/>
+    <bpmn:task id="C_send" name="Place order"/>
+    <bpmn:task id="C_pay" name="Pay invoice"/>
+    <bpmn:endEvent id="C_end" name="Got it"/>
+    <bpmn:sequenceFlow id="cf1" sourceRef="C_start" targetRef="C_send"/>
+    <bpmn:sequenceFlow id="cf2" sourceRef="C_send" targetRef="C_pay"/>
+    <bpmn:sequenceFlow id="cf3" sourceRef="C_pay" targetRef="C_end"/>
+  </bpmn:process>
+  <bpmn:process id="Shop">
+    <bpmn:laneSet id="LS">
+      <bpmn:lane id="L_sales" name="Sales"><bpmn:flowNodeRef>S_start</bpmn:flowNodeRef><bpmn:flowNodeRef>S_check</bpmn:flowNodeRef><bpmn:flowNodeRef>S_gw</bpmn:flowNodeRef><bpmn:flowNodeRef>S_reject</bpmn:flowNodeRef><bpmn:flowNodeRef>S_invoice</bpmn:flowNodeRef></bpmn:lane>
+      <bpmn:lane id="L_wh" name="Warehouse"><bpmn:flowNodeRef>S_pick</bpmn:flowNodeRef><bpmn:flowNodeRef>S_retry</bpmn:flowNodeRef><bpmn:flowNodeRef>S_ship</bpmn:flowNodeRef><bpmn:flowNodeRef>S_end</bpmn:flowNodeRef><bpmn:flowNodeRef>S_rej_end</bpmn:flowNodeRef></bpmn:lane>
+    </bpmn:laneSet>
+    <bpmn:startEvent id="S_start" name="Order in"><bpmn:messageEventDefinition/></bpmn:startEvent>
+    <bpmn:task id="S_check" name="Check stock"/>
+    <bpmn:exclusiveGateway id="S_gw" name="In stock?"/>
+    <bpmn:task id="S_reject" name="Reject order"/>
+    <bpmn:endEvent id="S_rej_end" name="Rejected"/>
+    <bpmn:userTask id="S_pick" name="Pick and pack"/>
+    <bpmn:boundaryEvent id="S_timer" name="2 days" attachedToRef="S_pick"><bpmn:timerEventDefinition/></bpmn:boundaryEvent>
+    <bpmn:task id="S_retry" name="Escalate"/>
+    <bpmn:serviceTask id="S_ship" name="Ship"/>
+    <bpmn:sendTask id="S_invoice" name="Send invoice"/>
+    <bpmn:endEvent id="S_end" name="Shipped"/>
+    <bpmn:sequenceFlow id="s1" sourceRef="S_start" targetRef="S_check"/>
+    <bpmn:sequenceFlow id="s2" sourceRef="S_check" targetRef="S_gw"/>
+    <bpmn:sequenceFlow id="s3" name="yes" sourceRef="S_gw" targetRef="S_pick"/>
+    <bpmn:sequenceFlow id="s4" name="no" sourceRef="S_gw" targetRef="S_reject"/>
+    <bpmn:sequenceFlow id="s4b" sourceRef="S_reject" targetRef="S_rej_end"/>
+    <bpmn:sequenceFlow id="s5" sourceRef="S_timer" targetRef="S_retry"/>
+    <bpmn:sequenceFlow id="s6" sourceRef="S_retry" targetRef="S_check"/>
+    <bpmn:sequenceFlow id="s7" sourceRef="S_pick" targetRef="S_ship"/>
+    <bpmn:sequenceFlow id="s8" sourceRef="S_ship" targetRef="S_invoice"/>
+    <bpmn:sequenceFlow id="s9" sourceRef="S_invoice" targetRef="S_end"/>
+  </bpmn:process>
+</bpmn:definitions>

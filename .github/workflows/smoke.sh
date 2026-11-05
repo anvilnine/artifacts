@@ -252,6 +252,27 @@ echo "ok: md navbar theme toggle"
 
 curl -sf -X DELETE "$BASE/api/artifacts/ci-md" -H "$AUTH" > /dev/null
 
+# --- bpmn: checked on publish, laid out when it has no layout, drawn by the viewer ---
+# A process with a lane and no BPMNDiagram section, which is how an agent writes one. What is
+# stored has the layout, the lane included, so /source opens as a drawn diagram in a modeller.
+curl -s -X DELETE "$BASE/api/artifacts/ci-bpmn" -H "$AUTH" > /dev/null
+code=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/api/artifacts" -H "$AUTH" -H "$JSON" \
+  -d '{"type":"bpmn","slug":"ci-bpmn","visibility":"public","content":"<bpmn:definitions xmlns:bpmn=\"http://www.omg.org/spec/BPMN/20100524/MODEL\" id=\"D\"><bpmn:process id=\"P\"><bpmn:laneSet id=\"LS\"><bpmn:lane id=\"L1\" name=\"Desk\"><bpmn:flowNodeRef>S</bpmn:flowNodeRef><bpmn:flowNodeRef>T</bpmn:flowNodeRef></bpmn:lane></bpmn:laneSet><bpmn:startEvent id=\"S\"/><bpmn:task id=\"T\" name=\"bpmn smoke\"/><bpmn:sequenceFlow id=\"F\" sourceRef=\"S\" targetRef=\"T\"/></bpmn:process></bpmn:definitions>"}')
+expect_code 201 "$code" "publish bpmn with no layout"
+bpmnsrc=$(curl -s "$BASE/a/ci-bpmn/source")
+echo "$bpmnsrc" | grep -q 'bpmndi:BPMNDiagram' || fail "bpmn source was stored without a layout"
+echo "$bpmnsrc" | grep -q 'bpmnElement="L1"' || fail "bpmn layout left the lane out"
+bpmnpage=$(curl -s "$BASE/a/ci-bpmn?raw=1")
+echo "$bpmnpage" | grep -q 'bpmn-navigated-viewer' || fail "bpmn page does not load the viewer"
+echo "$bpmnpage" | grep -q 'bpmn smoke' || fail "bpmn page does not carry the diagram"
+curl -s "$BASE/a/ci-bpmn" | grep -q 'id="theme"' || fail "framed bpmn missing theme toggle"
+echo "ok: bpmn laid out, stored and served"
+bad=$(curl -s -w '\n%{http_code}' -X POST "$BASE/api/artifacts" -H "$AUTH" -H "$JSON" \
+  -d '{"type":"bpmn","content":"<bpmn:definitions xmlns:bpmn=\"http://www.omg.org/spec/BPMN/20100524/MODEL\" id=\"D\"><bpmn:process id=\"P\"><bpmn:task id=\"T\"/><bpmn:sequenceFlow id=\"F\" sourceRef=\"T\" targetRef=\"Gone\"/></bpmn:process></bpmn:definitions>"}')
+expect_code 400 "$(echo "$bad" | tail -1)" "bpmn with a dangling reference"
+echo "$bad" | grep -q 'unresolved reference <Gone>' || fail "bpmn 400 does not name the bad reference"
+curl -sf -X DELETE "$BASE/api/artifacts/ci-bpmn" -H "$AUTH" > /dev/null
+
 # --- link previews: description + og:image in the heads the server renders ---
 # Two pages carry them, both built per request: the viewer frame (every type) and the md render.
 # A raw html view carries nothing, because those bytes are the author's document.
