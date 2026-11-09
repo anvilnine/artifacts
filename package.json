@@ -3,7 +3,10 @@
   "version": "1.3.1",
   "description": "Self-hosted publishable artifacts: POST HTML/JSX/Markdown/zip, get a public non-crawlable URL",
   "license": "MIT",
-  "author": "Zonily Jame",
+  "author": {
+    "name": "Anvil Nine",
+    "url": "https://anvilnine.com"
+  },
   "repository": {
     "type": "git",
     "url": "https://github.com/anvilnine/artifacts"
