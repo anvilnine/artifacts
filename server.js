@@ -568,8 +568,16 @@ const ZIP_MAX_UNCOMPRESSED = 100 * 1024 * 1024;
 // Validates the archive is a hostable static site and returns {relPath, entry}
 // pairs, with a single shared top-level folder stripped if present.
 function extractSiteFiles(zip) {
-  const entries = zip
-    .getEntries()
+  // adm-zip reads the central directory on first access, so a malformed archive throws here
+  // rather than in the constructor. That includes one naming the same entry twice, which
+  // adm-zip refuses because two readers of the archive could resolve that name to different bytes.
+  let all;
+  try {
+    all = zip.getEntries();
+  } catch (err) {
+    throw new ApiError(400, `invalid zip file: ${err.message}`);
+  }
+  const entries = all
     .filter((e) => !e.isDirectory)
     .filter((e) => {
       const name = e.entryName;
@@ -663,8 +671,19 @@ async function storeZipArtifact(buffer, finalSlug, { title, description, ogImage
     throw new ApiError(409, `slug "${finalSlug}" already exists`);
   }
 
+  // Inflate every entry before the first write. adm-zip caps each entry at its declared size
+  // and refuses one that inflates past it or fails its CRC, so a lying header becomes a 400
+  // here and leaves no stray files under the slug.
+  const contents = [];
   for (const { relPath, entry } of files) {
-    await storage.put(`${finalSlug}/site/${relPath}`, entry.getData());
+    try {
+      contents.push({ relPath, data: entry.getData() });
+    } catch {
+      throw new ApiError(400, `invalid zip entry: ${entry.entryName}`);
+    }
+  }
+  for (const { relPath, data } of contents) {
+    await storage.put(`${finalSlug}/site/${relPath}`, data);
   }
   const meta = {
     slug: finalSlug,
