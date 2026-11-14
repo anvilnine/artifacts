@@ -63,6 +63,24 @@ function normalizePrefix(raw) {
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+// Run a fetch with a deadline on the response headers only. The serve path reads objects through
+// get(), outside the write queue, so an endpoint that accepted the connection and then went
+// quiet held a viewer's request open for the life of the process. Once the headers are in, the
+// timer is cleared and the body streams for as long as the reader takes. `start` is handed the
+// signal and returns the fetch promise. A timeout rejects with the same TimeoutError
+// AbortSignal.timeout raises, so callers see one error shape for every stalled call.
+export async function headersWithin(ms, start) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => {
+    controller.abort(new DOMException('The operation was aborted due to timeout', 'TimeoutError'));
+  }, ms);
+  try {
+    return await start(controller.signal);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 export async function create() {
   const endpoint = requireEnv('S3_ENDPOINT').replace(/\/+$/, '');
   const bucket = requireEnv('S3_BUCKET');
@@ -86,10 +104,14 @@ export async function create() {
   //
   // get() is the one call this does not wrap. Its body is piped straight to the viewer, so a
   // slow reader holds the response open and a deadline here would cut a healthy download in
-  // half. A read that never answers is bounded by the write queue's ceiling instead
-  // (lib/write-queue.js), which is the same number.
+  // half. It gets sendForStream below, which puts the same deadline on the wait for the
+  // response headers and none on the body.
   function send(url, init = {}) {
     return client.fetch(url, { ...init, signal: AbortSignal.timeout(STORAGE_TIMEOUT_MS) });
+  }
+
+  function sendForStream(url, init = {}) {
+    return headersWithin(STORAGE_TIMEOUT_MS, (signal) => client.fetch(url, { ...init, signal }));
   }
 
   // Drain a response body we don't need, so the underlying socket is released.
@@ -209,7 +231,7 @@ export async function create() {
     async get(key, { range } = {}) {
       const headers = {};
       if (range) headers.Range = `bytes=${range.start}-${range.end}`;
-      const res = await client.fetch(objectUrl(key), { headers });
+      const res = await sendForStream(objectUrl(key), { headers });
       if (res.status === 404) {
         await drain(res);
         return null;
