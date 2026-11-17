@@ -1,6 +1,7 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
+import zlib from 'node:zlib';
 import { fileURLToPath } from 'node:url';
 
 import AdmZip from 'adm-zip';
@@ -602,7 +603,7 @@ function extractSiteFiles(zip) {
     totalSize += e.header.size;
   }
   if (totalSize > ZIP_MAX_UNCOMPRESSED) {
-    throw new ApiError(400, 'zip uncompressed size exceeds 100 MB');
+    throw new ApiError(400, ZIP_TOO_BIG);
   }
 
   // If everything lives in one top-level folder (common when zipping a dir), strip it.
@@ -629,7 +630,46 @@ function extractSiteFiles(zip) {
   if (!files.some((f) => f.relPath === 'index.html')) {
     throw new ApiError(400, 'zip must contain index.html at its root');
   }
+
+  // Decompress here, before anything is written, and count the bytes that come out rather than
+  // the sizes the archive declares. The check above reads the declared sizes and adm-zip only
+  // bounds inflation when a declared size is above 0, so an entry that declared 0 inflated
+  // without limit: a 50 MB upload of deflated zeros is tens of GB in memory.
+  let remaining = ZIP_MAX_UNCOMPRESSED;
+  for (const f of files) {
+    f.data = readZipEntry(f.entry, remaining);
+    remaining -= f.data.length;
+  }
   return files;
+}
+
+const ZIP_TOO_BIG = 'zip uncompressed size exceeds 100 MB';
+
+// One entry's bytes, inflated with a hard ceiling of `remaining` bytes. Stored and deflated are
+// the two methods every zip tool writes; anything else, and encrypted entries, are refused.
+function readZipEntry(entry, remaining) {
+  const name = entry.entryName;
+  if (entry.header.flags & 1) throw new ApiError(400, `encrypted zip entries are not supported: ${name}`);
+  const method = entry.header.method;
+  const raw = entry.getCompressedData();
+  let data;
+  if (method === 0) {
+    data = raw;
+  } else if (method === 8) {
+    try {
+      data = zlib.inflateRawSync(raw, { maxOutputLength: Math.max(1, remaining) });
+    } catch (err) {
+      if (err?.code === 'ERR_BUFFER_TOO_LARGE') throw new ApiError(400, ZIP_TOO_BIG);
+      throw new ApiError(400, `zip entry could not be decompressed: ${name}`);
+    }
+  } else {
+    throw new ApiError(400, `unsupported zip compression method ${method}: ${name}`);
+  }
+  if (data.length > remaining) throw new ApiError(400, ZIP_TOO_BIG);
+  if (typeof zlib.crc32 === 'function' && zlib.crc32(data) !== entry.header.crc >>> 0) {
+    throw new ApiError(400, `zip entry is corrupt: ${name}`);
+  }
+  return data;
 }
 
 // Chained on the target slug like every other write: the 409 below is a read followed by a
@@ -671,18 +711,7 @@ async function storeZipArtifact(buffer, finalSlug, { title, description, ogImage
     throw new ApiError(409, `slug "${finalSlug}" already exists`);
   }
 
-  // Inflate every entry before the first write. adm-zip caps each entry at its declared size
-  // and refuses one that inflates past it or fails its CRC, so a lying header becomes a 400
-  // here and leaves no stray files under the slug.
-  const contents = [];
-  for (const { relPath, entry } of files) {
-    try {
-      contents.push({ relPath, data: entry.getData() });
-    } catch {
-      throw new ApiError(400, `invalid zip entry: ${entry.entryName}`);
-    }
-  }
-  for (const { relPath, data } of contents) {
+  for (const { relPath, data } of files) {
     await storage.put(`${finalSlug}/site/${relPath}`, data);
   }
   const meta = {
