@@ -961,7 +961,8 @@ async function storeArtifact(finalSlug, input, { replace = false, keyId = null }
   await storage.flush?.(); // durably commit the completed write (git); no-op elsewhere
   dropMdRender(finalSlug);
   // A non-public artifact needs the session secret resident to mint its capability token;
-  // it is created lazily (at setup otherwise), so force it here (tokenEpoch ⇒ non-public).
+  // it is created lazily (at setup otherwise), so force it here. A record that was
+  // ever non-public keeps its epoch, so this can also run for a public one, which costs nothing.
   if (meta.tokenEpoch !== undefined) await ensureSessionSecret();
   const out = { slug: finalSlug, url: tokenedUrl(meta), visibility: meta.visibility || 'public' };
   // A redirect answers with the target it stored, which is not always the string that was sent:
@@ -1127,13 +1128,20 @@ async function copyArtifact(sourceSlug, targetSlug, body, keyId) {
 }
 
 // A non-public artifact carries a non-secret epoch so capability tokens can be minted and
-// revoked; a public one carries none. Seed once; never reset a live epoch to 0 (that would
-// silently un-revoke). Idempotent, so every write path can call it.
+// revoked. Seed once and never drop or reset it, whatever the visibility does next. Two rules
+// follow from that:
+//   - Going public keeps the epoch. Dropping it there meant rotate, public, private seeded a
+//     fresh epoch equal to the one every revoked link carried, and the links opened again.
+//   - A new epoch starts at a random value, not 0. Tokens bind the slug and the epoch, so a
+//     new artifact on a reused slug (delete and republish, the only way to redeploy a zip
+//     site, or a rename that frees the slug) used to accept every link and unlock cookie the
+//     old artifact had handed out.
+// publicMeta never returns it, so keeping it on a public record exposes nothing. Idempotent,
+// so every write path can call it.
 function seedTokenEpoch(meta) {
+  if (meta.tokenEpoch !== undefined) return;
   if (meta.visibility === 'private' || meta.visibility === 'password') {
-    if (meta.tokenEpoch === undefined) meta.tokenEpoch = 0;
-  } else {
-    delete meta.tokenEpoch;
+    meta.tokenEpoch = crypto.randomInt(1, 2 ** 47);
   }
 }
 
