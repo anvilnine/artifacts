@@ -1241,11 +1241,16 @@ if [ -n "$ADMIN_USER" ] && [ -n "$ADMIN_PASS" ]; then
     -d '{"name":"ci-csrf-probe","scopes":["full"]}')
   expect_code 401 "$code" "minting a key with the session cookie alone"
   # The dashboard page carries the token for a browser opening it, and not for script fetching it.
-  curl -s -b /tmp/sessjar -H 'Sec-Fetch-Mode: navigate' -H 'Sec-Fetch-Dest: document' "$BASE/" \
-    | grep -qF "<meta name=\"artifacts-csrf\" content=\"$csrf\">" || fail "the dashboard page lacks the csrf token"
-  if curl -s -b /tmp/sessjar -H 'Sec-Fetch-Mode: cors' -H 'Sec-Fetch-Dest: empty' "$BASE/" | grep -qF '<meta name="artifacts-csrf"'; then
+  # Both pages go to a file first: the console is over 100 kB, and `curl | grep -q` on it races
+  # SIGPIPE under pipefail (see the console checks further down).
+  csrf_page=$(mktemp)
+  curl -s -o "$csrf_page" -b /tmp/sessjar -H 'Sec-Fetch-Mode: navigate' -H 'Sec-Fetch-Dest: document' "$BASE/"
+  grep -qF "<meta name=\"artifacts-csrf\" content=\"$csrf\">" "$csrf_page" || fail "the dashboard page lacks the csrf token"
+  curl -s -o "$csrf_page" -b /tmp/sessjar -H 'Sec-Fetch-Mode: cors' -H 'Sec-Fetch-Dest: empty' "$BASE/"
+  if grep -qF '<meta name="artifacts-csrf"' "$csrf_page"; then
     fail "a fetch() of the dashboard page got the csrf token"
   fi
+  rm -f "$csrf_page"
   curl -s -D - -o /dev/null "$BASE/" | grep -qi '^cross-origin-opener-policy: same-origin' \
     || fail "the dashboard page has no Cross-Origin-Opener-Policy"
   echo "ok: the session needs its csrf token, which only a navigated dashboard page carries"
