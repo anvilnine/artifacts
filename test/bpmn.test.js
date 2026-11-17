@@ -11,7 +11,7 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { BpmnModdle } from 'bpmn-moddle';
-import { prepareBpmn, BPMN_LAYOUT_MAX_NODES } from '../lib/bpmn.js';
+import { prepareBpmn, BPMN_LAYOUT_MAX_NODES, BPMN_LAYOUT_MAX_FLOWS } from '../lib/bpmn.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const fixture = (name) => readFileSync(join(here, 'fixtures', 'bpmn', name), 'utf8');
@@ -207,4 +207,24 @@ test('what publish refuses, and the reason it gives', async () => {
 test('a process too big to lay out is refused with what to do instead', async () => {
   const tasks = Array.from({ length: BPMN_LAYOUT_MAX_NODES + 1 }, (_, i) => `<bpmn:task id="T${i}"/>`).join('');
   await refused(defs(`<bpmn:process id="P">${tasks}</bpmn:process>`), /include|included/);
+});
+
+// The per-process node cap left two ways to ask for a long stall: flows, which it did not count,
+// and many processes, each under the cap. Both are bounded across the whole file now.
+test('a file whose flows or processes add up past the caps is refused before layout', async () => {
+  const flows = Array.from(
+    { length: BPMN_LAYOUT_MAX_FLOWS + 1 },
+    (_, i) => `<bpmn:sequenceFlow id="F${i}" sourceRef="A" targetRef="B"/>`,
+  ).join('');
+  const started = Date.now();
+  await refused(
+    defs(`<bpmn:process id="P"><bpmn:startEvent id="A"/><bpmn:task id="B"/>${flows}</bpmn:process>`),
+    /flows, over the/,
+  );
+  assert.ok(Date.now() - started < 5000, 'the refusal should not pay for a layout');
+
+  const half = Math.ceil((BPMN_LAYOUT_MAX_NODES + 1) / 2);
+  const proc = (p) =>
+    `<bpmn:process id="P${p}">${Array.from({ length: half }, (_, i) => `<bpmn:task id="T${p}_${i}"/>`).join('')}</bpmn:process>`;
+  await refused(defs(proc(1) + proc(2)), /elements and/);
 });
