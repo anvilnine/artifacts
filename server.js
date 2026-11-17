@@ -235,6 +235,21 @@ function unlockValid(req, meta) {
   return Number.isFinite(p.exp) && p.exp > Date.now();
 }
 
+// A private or password artifact answers differently per viewer, by unlock cookie, so no shared
+// cache (a CDN rule, a corporate proxy) may keep a copy and hand it to the next caller. Applied
+// at writeHead so it wins over the no-cache every branch below sets on its own. Called only
+// once the gate has passed: a locked artifact's 404 has to match a missing slug's header for header.
+function keepOutOfSharedCaches(res, meta) {
+  if (meta.visibility !== 'private' && meta.visibility !== 'password') return;
+  const writeHead = res.writeHead;
+  res.writeHead = function (...args) {
+    res.setHeader('Cache-Control', 'private, no-store');
+    const vary = res.getHeader('Vary');
+    res.setHeader('Vary', vary ? `${vary}, Cookie` : 'Cookie');
+    return writeHead.apply(this, args);
+  };
+}
+
 // May this request view the artifact body? Public: always. private/password: a valid
 // unlock cookie only. No admin-session bypass: on the mandated split-origin deploy the
 // dashboard session cookie never reaches the artifact origin, so it never applied — the
@@ -1753,7 +1768,7 @@ app.use('/a/:slug', async (req, res, next) => {
     // Rebuild the URL without `k`, preserving everything else and the (zip) path.
     const url = new URL(req.originalUrl, BASE_URL);
     url.searchParams.delete('k');
-    res.set('Referrer-Policy', 'no-referrer');
+    res.set({ 'Referrer-Policy': 'no-referrer', 'Cache-Control': 'no-store' });
     return res.redirect(302, url.pathname + url.search);
   } catch (err) {
     next(err);
@@ -1788,6 +1803,7 @@ app.get('/a/:slug', async (req, res) => {
     }
     return notFound(res);
   }
+  keepOutOfSharedCaches(res, meta);
   // A redirect artifact is the Location header, so it runs before the frame and raw
   // branches: there is no body to wrap in a toolbar and no bare version to link to.
   // 301 is the honest status for a slug that exists to point somewhere else. A browser
@@ -1865,6 +1881,7 @@ app.get('/a/:slug/source', async (req, res, next) => {
   // Unlock before expiry so a locked artifact yields the canonical 404, never a 410 that
   // would leak existence.
   if (!artifactUnlocked(req, meta)) return notFound(res);
+  keepOutOfSharedCaches(res, meta);
   if (isExpired(meta)) return expiredFor(req, res);
   if (meta.type === 'zip') return next(); // zip sites serve /source as a site path
   res.set({ 'X-Content-Type-Options': 'nosniff', 'Referrer-Policy': 'no-referrer' });
@@ -1902,6 +1919,7 @@ app.get('/a/:slug/*', async (req, res) => {
   const meta = SLUG_RE.test(slug) ? await readMeta(slug) : null;
   if (!meta || meta.disabled) return notFound(res);
   if (!artifactUnlocked(req, meta)) return notFound(res);
+  keepOutOfSharedCaches(res, meta);
   if (isExpired(meta)) return expiredFor(req, res);
   // A pdf artifact owns one sub-path: the file its viewer loads. `?download=1` sends the same
   // bytes as an attachment, which is the direct-download link the viewer's Download button and
@@ -1970,6 +1988,7 @@ app.post('/a/:slug/unlock', async (req, res, next) => {
     // paths already order it this way; this one did not.
     if (isExpired(meta)) return res.status(410).json({ error: 'expired' });
     await issueUnlock(res, meta);
+    res.set('Cache-Control', 'no-store');
     res.json({ ok: true });
   } catch (err) {
     next(err);
