@@ -1910,9 +1910,10 @@ app.post('/a/:slug/unlock', async (req, res, next) => {
       return res.status(429).json({ error: 'too many attempts, try again later' });
     }
     const meta = SLUG_RE.test(slug) ? await readMeta(slug) : null;
-    if (!meta || meta.disabled) return res.status(404).json({ error: 'not found' });
     const password = req.body?.password;
-    if (meta.visibility !== 'password') {
+    // A missing or disabled slug answers the same 401 as a wrong password. A 404 here, beside
+    // the 401 every existing slug gets, confirmed that a guessed private slug exists.
+    if (!meta || meta.disabled || meta.visibility !== 'password') {
       // private uses capability links, not passwords; public needs no unlock. Uniform 401
       // (not 400) so this route never distinguishes an artifact's mode to an attacker, and
       // the admin-credential brute-force channel is gone rather than merely throttled.
