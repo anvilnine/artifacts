@@ -2,7 +2,7 @@
 
 Full HTTP reference, including zip-site deploys. ([← back to README](../README.md))
 
-The `/api/artifacts*` and `/api/config` routes accept **either** an `Authorization: Bearer <key>` (a scoped [managed key](auth.md) or the bootstrap `ARTIFACTS_API_KEY`) **or** a valid admin session cookie (how the dashboard calls them). `/mcp` is bearer-only. Each write route enforces a minimum scope (below). Reads under `/a/` are public unless the artifact's [visibility](#visibility) is set.
+The `/api/artifacts*` and `/api/config` routes accept **either** an `Authorization: Bearer <key>` (a scoped [managed key](auth.md) or the bootstrap `ARTIFACTS_API_KEY`) **or** a valid admin session cookie plus its `X-Artifacts-Csrf` token (how the dashboard calls them; see [auth](auth.md)). `/mcp` is bearer-only. Each write route enforces a minimum scope (below). Reads under `/a/` are public unless the artifact's [visibility](#visibility) is set.
 
 ```
 POST   /api/artifacts        {content, type: html|jsx|tsx|md|bpmn|pdf|redirect, slug?, title?, description?, ogImage?, tags?, project?, expiresAt?, frame?, pdf?, visibility?, password?} → 201 {slug, url, visibility}   [publish]

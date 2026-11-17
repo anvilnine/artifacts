@@ -245,8 +245,8 @@ function keepOutOfSharedCaches(res, meta) {
   const writeHead = res.writeHead;
   res.writeHead = function (...args) {
     res.setHeader('Cache-Control', 'private, no-store');
-    const vary = res.getHeader('Vary');
-    res.setHeader('Vary', vary ? `${vary}, Cookie` : 'Cookie');
+    const vary = String(res.getHeader('Vary') || '');
+    if (!/\bCookie\b/i.test(vary)) res.setHeader('Vary', vary ? `${vary}, Cookie` : 'Cookie');
     return writeHead.apply(this, args);
   };
 }

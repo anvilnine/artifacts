@@ -19,7 +19,7 @@ This service intentionally executes uploaded HTML/JS in the visitor's browser â€
 Not vulnerabilities:
 
 - Uploaded content doing arbitrary things *within its own page* (that's by design â€” deploy on a dedicated subdomain that serves nothing else and sets no cookies, as [docs/deploy.md](docs/deploy.md) instructs).
-- Ambient authority from co-hosting. If you ignore that rule and serve artifacts from the **same origin** as the dashboard/API, an uploaded page's JavaScript runs same-origin and can ride the admin's session cookie to call `/api/*`. The origin-separation deployment rule is the mitigation; co-hosting is a misconfiguration, not a server bug. Since 2026-11 every session-cookie API call also needs a CSRF token that a same-origin page cannot read ([auth docs](docs/auth.md)), which closes that path in current browsers; treat it as a backstop, not as permission to co-host.
+- Ambient authority from co-hosting. If you ignore that rule and serve artifacts from the **same origin** as the dashboard/API, an uploaded page's JavaScript runs same-origin and can ride the admin's session cookie to call `/api/*`. The origin-separation deployment rule is the mitigation; co-hosting is a misconfiguration, not a server bug. Since 2026-11 every session-cookie API call also needs a CSRF token that a same-origin page cannot read ([auth docs](docs/auth.md)). That closes the path in current browsers. Keep artifacts on their own origin anyway: the token is a backstop.
 - Issues requiring possession of an API key.
 - The accepted tradeoffs below.
 

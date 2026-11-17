@@ -84,6 +84,22 @@ test('cookie-authenticated API calls need the session CSRF token', async (t) => 
 
   // Bearer callers are unaffected.
   assert.equal((await srv.api('GET', '/api/keys')).status, 200);
+
+  // The body-size gate does not count the cookie alone as publish authority either: a 300 kB
+  // body gets the small parser's 413, not the 10 MB parser and then a 401.
+  const big = JSON.stringify({ content: 'x'.repeat(300 * 1024) });
+  const res = await fetch(`${srv.base}/api/artifacts`, {
+    method: 'POST',
+    headers: { Cookie: s.cookie, 'Content-Type': 'application/json' },
+    body: big,
+  });
+  assert.equal(res.status, 413);
+  const ok = await fetch(`${srv.base}/api/artifacts`, {
+    method: 'POST',
+    headers: { Cookie: s.cookie, 'X-Artifacts-Csrf': s.csrf, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ slug: 'csrf-big', content: 'x'.repeat(300 * 1024) }),
+  });
+  assert.equal(ok.status, 201);
 });
 
 test('the dashboard page carries the token only for a top-level navigation', async (t) => {
