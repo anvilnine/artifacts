@@ -801,7 +801,12 @@
 
   // Auth is now a session cookie (set by /api/auth/login), sent automatically on
   // same-origin fetches — no bearer token in the browser anymore.
-  const headers = () => ({ 'Content-Type': 'application/json' });
+  // Every API call also carries the session's CSRF token. The server writes it into this page
+  // when a signed-in browser opens it, and hands a fresh one back on sign-in. It stays in this
+  // variable only: anything on this origin can read localStorage.
+  let CSRF = document.querySelector('meta[name="artifacts-csrf"]')?.content || '';
+  const csrfHeader = () => ({ 'X-Artifacts-Csrf': CSRF });
+  const headers = () => ({ 'Content-Type': 'application/json', ...csrfHeader() });
 
   const TYPE_BY_EXT = {
     html: 'html', htm: 'html',
@@ -866,6 +871,8 @@
         body: JSON.stringify({ username, password }),
       });
       if (res.ok) {
+        const d = await res.json().catch(() => ({}));
+        CSRF = d.csrf || '';
         SETUP = false;
         showApp();
       } else {
@@ -900,7 +907,7 @@
     // signed out while the token stays good on other devices, which is worth naming rather
     // than showing a lock screen that implies the whole job is done.
     let res = null;
-    try { res = await fetch('/api/auth/logout', { method: 'POST' }); } catch {}
+    try { res = await fetch('/api/auth/logout', { method: 'POST', headers: csrfHeader() }); } catch {}
     if (!res) return toast('Sign out failed. Check your connection and try again.', true);
     if (!res.ok) toast('Signed out here, but the server could not revoke the session. Other devices stay signed in.', true);
     SETUP = false;
@@ -943,7 +950,7 @@
     const res = await fetch('/api/artifacts/zip?slug=' + encodeURIComponent(slug) +
       '&title=' + encodeURIComponent(title), {
       method: 'POST',
-      headers: { 'Content-Type': 'application/zip' },
+      headers: { 'Content-Type': 'application/zip', ...csrfHeader() },
       body: buf,
     });
     const data = await res.json();
@@ -2414,7 +2421,7 @@
 
   async function loadKeys() {
     try {
-      const res = await fetch('/api/keys');
+      const res = await fetch('/api/keys', { headers: csrfHeader() });
       if (!res.ok) return;
       renderKeys(await res.json());
     } catch {}
@@ -2478,7 +2485,7 @@
         confirmText: 'Revoke', danger: true,
       });
       if (!ok) return;
-      await fetch('/api/keys/' + k.id, { method: 'DELETE' });
+      await fetch('/api/keys/' + k.id, { method: 'DELETE', headers: csrfHeader() });
       loadKeys();
     });
     if (k.broken) acts.append(del);
@@ -2579,7 +2586,9 @@
   (async () => {
     try {
       const s = await fetch('/api/auth/session').then((r) => r.json());
-      if (s.authenticated) return showApp();
+      // Signed in but holding no token (the page came from a cache or a frame) is treated as
+      // signed out: signing in again hands one back.
+      if (s.authenticated && CSRF) return showApp();
       SETUP = !!s.needsSetup;
     } catch {}
     showLock();

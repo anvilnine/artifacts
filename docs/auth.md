@@ -181,6 +181,16 @@ Give CLI and MCP their own least-privilege keys (e.g. `publish`) so a leaked tok
 
 The `/api/artifacts*` and `/api/config` routes accept the **admin session cookie as well as** a bearer key — that is how the dashboard calls them without carrying a token in the browser. `/mcp` stays bearer-only.
 
+Every call made with the session cookie must also send the session's CSRF token in an
+`X-Artifacts-Csrf` header. `POST /api/auth/login`, `POST /api/auth/setup` and
+`POST /api/auth/password` return it as `csrf`, and the dashboard page carries it in a
+`<meta name="artifacts-csrf">` tag when a signed-in browser opens it. A call with the cookie and
+no token is treated as unauthenticated. The token exists for installs that serve artifacts from
+the dashboard's own origin: a published page there gets the cookie attached to its requests, but
+it cannot read the token, so it cannot call the API as the admin. Serving artifacts from their own
+origin is still the rule. The one exception is `GET /api/artifacts/:slug/qr`, which an `<img>` loads
+without script. Bearer callers send no token.
+
 ## Artifact visibility (a third, per-artifact credential)
 
 Separate from admin/keys, each artifact can be `public`, `private` (the **default**), or `password` — see [Visibility](api.md#visibility). Viewing a gated artifact uses neither the admin session nor an API key.

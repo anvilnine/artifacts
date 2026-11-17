@@ -105,6 +105,7 @@ const {
   ensureSessionSecret,
   issueSession,
   sessionPrincipal,
+  sessionCsrf,
   identify,
   requireApiKey,
   requireAuth,
@@ -1605,6 +1606,9 @@ const APP_HEADERS = {
   'X-Content-Type-Options': 'nosniff',
   'Referrer-Policy': 'no-referrer',
   'Cache-Control': 'no-store',
+  // A page that opens the dashboard in a popup (an artifact served from this origin, say) gets a
+  // severed handle rather than a same-origin window it could read the CSRF token out of.
+  'Cross-Origin-Opener-Policy': 'same-origin',
 };
 
 // Strict extension -> MIME map covering every extension the zip validator allows
@@ -2066,7 +2070,7 @@ app.get('/api/artifacts/:slug/link', requireAuth('read'), async (req, res, next)
 // token expires and can be revoked, and a printed code cannot be reissued, so a QR that
 // carries one turns into a dead sticker. A non-public artifact still needs its link or its
 // password after the scan; the QR only gets the visitor to the door.
-app.get('/api/artifacts/:slug/qr', requireAuth('read'), async (req, res, next) => {
+app.get('/api/artifacts/:slug/qr', requireAuth('read', { csrf: false }), async (req, res, next) => {
   try {
     const { slug } = req.params;
     const meta = SLUG_RE.test(slug) ? await readMeta(slug) : null;
@@ -2173,11 +2177,11 @@ app.post('/api/auth/setup', async (req, res, next) => {
       a.admin = admin;
     });
     await ensureSessionSecret();
-    await issueSession(res, username);
+    const csrf = await issueSession(res, username);
     // Whoever reaches an instance with no admin yet claims it. Log it so a takeover during
     // that window is visible in the same stream as the login and unlock events.
     logAuth('setup', { ip: clientIp(req), username, outcome: 'ok' });
-    res.status(201).json({ username });
+    res.status(201).json({ username, csrf });
   } catch (err) {
     next(err);
   }
@@ -2202,8 +2206,8 @@ app.post('/api/auth/login', async (req, res, next) => {
       logAuth('login', { ip, username: typeof username === 'string' ? username : null, outcome: 'fail' });
       throw new ApiError(401, 'invalid credentials');
     }
-    await issueSession(res, username);
-    res.json({ username });
+    const csrf = await issueSession(res, username);
+    res.json({ username, csrf });
   } catch (err) {
     next(err);
   }
@@ -2227,7 +2231,10 @@ app.post('/api/auth/logout', async (req, res, next) => {
     // Only a caller already holding a live session triggers the rotation. An anonymous POST
     // still answers 200 and writes nothing, so the route cannot be used to sign the operator
     // out, and a browser whose cookie already lapsed keeps getting the answer it expects.
-    const principal = sessionPrincipal(req);
+    // The CSRF token is required here as on every other session route, so a page on the
+    // dashboard's origin cannot sign every device out. Without it this answers like an
+    // anonymous call: the cookie is cleared and nothing is rotated.
+    const principal = sessionPrincipal(req, { csrf: true });
     if (principal) {
       const rotated = crypto.randomBytes(32).toString('hex');
       await update((a) => {
@@ -2264,8 +2271,8 @@ app.post('/api/auth/password', requireSession, async (req, res, next) => {
       a.admin = { username: a.admin.username, ...hashed };
       a.adminSecret = rotated;
     });
-    await issueSession(res, auth.admin.username);
-    res.json({ ok: true });
+    const csrf = await issueSession(res, auth.admin.username);
+    res.json({ ok: true, csrf });
   } catch (err) {
     next(err);
   }
@@ -2779,6 +2786,15 @@ function dashboardPage() {
   return dashboardPageCache;
 }
 
+// Is this request a browser opening the page itself, rather than script fetching it, a frame or a
+// prefetch? Sec-Fetch-* cannot be set from script. A browser too old to send them is let through,
+// since refusing it would lock its operator out of the dashboard.
+function topLevelNavigation(req) {
+  const mode = req.get('sec-fetch-mode');
+  const dest = req.get('sec-fetch-dest');
+  return (mode === undefined || mode === 'navigate') && (dest === undefined || dest === 'document');
+}
+
 app.get('/', (req, res) => {
   res.set(APP_HEADERS);
   // no-store rather than no-cache: this is the one page carrying the admin session, and the
@@ -2786,8 +2802,17 @@ app.get('/', (req, res) => {
   // well by not writing it to disk at all.
   res.set('Cache-Control', 'no-store');
   const page = dashboardPage();
-  res.set('ETag', page.tag);
-  res.type('html').send(page.html);
+  // The CSRF token goes into the page only for a signed-in browser opening it. See csrfFor in
+  // lib/auth.js for why script on this origin must not be able to read it.
+  const csrf = topLevelNavigation(req) ? sessionCsrf(req) : null;
+  if (!csrf) {
+    res.set('ETag', page.tag);
+    return res.type('html').send(page.html);
+  }
+  const meta = `<meta name="artifacts-csrf" content="${csrf}">`;
+  const html = page.html.replace('</head>', `${meta}\n</head>`);
+  res.set('ETag', `W/"${crypto.createHash('sha1').update(html).digest('base64url')}"`);
+  res.type('html').send(html);
 });
 
 // Which errors get to name themselves lives in lib/errors.js so a test can hand it the shapes

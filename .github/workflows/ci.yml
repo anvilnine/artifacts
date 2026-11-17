@@ -145,19 +145,30 @@ jobs:
               const sig = crypto.createHmac("sha256", a.adminSecret).update(body).digest("base64url");
               return body + "." + sig;
             };
-            fs.writeFileSync("/tmp/forged-noexp.cookie", sign({ sub: "ci-claimer" }));
-            fs.writeFileSync("/tmp/forged-nullexp.cookie", sign({ sub: "ci-claimer", exp: null }));
-            fs.writeFileSync("/tmp/forged-live.cookie", sign({ sub: "ci-claimer", exp: Date.now() + 600000 }));
+            // Each cookie gets its CSRF token too (lib/auth.js csrfFor), so a 401 below is about
+            // the payload and not about a missing header.
+            const csrf = (cookie) => crypto.createHmac("sha256", a.adminSecret).update("csrf." + cookie).digest("base64url");
+            for (const [shape, payload] of [
+              ["noexp", { sub: "ci-claimer" }],
+              ["nullexp", { sub: "ci-claimer", exp: null }],
+              ["live", { sub: "ci-claimer", exp: Date.now() + 600000 }],
+            ]) {
+              const cookie = sign(payload);
+              fs.writeFileSync("/tmp/forged-" + shape + ".cookie", cookie);
+              fs.writeFileSync("/tmp/forged-" + shape + ".csrf", csrf(cookie));
+            }
           '
           for shape in noexp nullexp; do
             code=$(curl -s -o /dev/null -w '%{http_code}' \
-              --cookie "artifacts_session=$(cat /tmp/forged-$shape.cookie)" "$BASE/api/keys")
+              --cookie "artifacts_session=$(cat /tmp/forged-$shape.cookie)" \
+              -H "X-Artifacts-Csrf: $(cat /tmp/forged-$shape.csrf)" "$BASE/api/keys")
             [ "$code" = "401" ] || { echo "FAIL: a session cookie with a $shape payload answered $code on /api/keys, expected 401"; exit 1; }
           done
           # The control: same signature path, a real exp, still admitted. Without it the two
           # checks above would pass on a server that refuses every session cookie.
           code=$(curl -s -o /dev/null -w '%{http_code}' \
-            --cookie "artifacts_session=$(cat /tmp/forged-live.cookie)" "$BASE/api/keys")
+            --cookie "artifacts_session=$(cat /tmp/forged-live.cookie)" \
+            -H "X-Artifacts-Csrf: $(cat /tmp/forged-live.csrf)" "$BASE/api/keys")
           [ "$code" = "200" ] || { echo "FAIL: a session cookie with a live exp answered $code on /api/keys, expected 200"; exit 1; }
           echo "ok: a session cookie with no usable exp is refused, and one with a live exp is not"
           # A cookie value the browser sends back can hold a stray percent sign, which used to
@@ -563,9 +574,10 @@ jobs:
           JSON='Content-Type: application/json'
           # Change the seeded admin's password on replica B. The job seeds the account from
           # env, so there is no unclaimed setup route to go through here.
-          curl -sf -X POST http://localhost:3001/api/auth/login -H "$JSON" -c /tmp/jar \
-            -d '{"username":"ci-admin","password":"ci-admin-password"}' > /dev/null
+          csrf=$(curl -sf -X POST http://localhost:3001/api/auth/login -H "$JSON" -c /tmp/jar \
+            -d '{"username":"ci-admin","password":"ci-admin-password"}' | sed -E 's/.*"csrf":"([^"]*)".*/\1/')
           curl -sf -X POST http://localhost:3001/api/auth/password -H "$JSON" -b /tmp/jar \
+            -H "X-Artifacts-Csrf: $csrf" \
             -d '{"currentPassword":"ci-admin-password","newPassword":"second-password"}' > /dev/null
           # One write on each replica, B first and A last. Order is the whole test: a replica
           # keeps whatever it wrote itself, so only a later write by the OTHER replica can

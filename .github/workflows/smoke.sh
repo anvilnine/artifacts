@@ -1212,8 +1212,13 @@ echo "ok: per-key redirect count"
 ADMIN_USER=${ARTIFACTS_ADMIN_USERNAME:-}
 ADMIN_PASS=${ARTIFACTS_ADMIN_PASSWORD:-}
 if [ -n "$ADMIN_USER" ] && [ -n "$ADMIN_PASS" ]; then
-  hdr=$(curl -s -D - -o /dev/null -c /tmp/sessjar -X POST "$BASE/api/auth/login" -H "$JSON" \
+  hdr=$(curl -s -D - -o /tmp/sessbody -c /tmp/sessjar -X POST "$BASE/api/auth/login" -H "$JSON" \
     -d "{\"username\":\"$ADMIN_USER\",\"password\":\"$ADMIN_PASS\"}")
+  # Every cookie-authenticated API call also carries the session's CSRF token, which the login
+  # answer hands back. See csrfFor in lib/auth.js.
+  csrf=$(sed -E 's/.*"csrf":"([^"]*)".*/\1/' /tmp/sessbody)
+  [ -n "$csrf" ] && [ "$csrf" != "$(cat /tmp/sessbody)" ] || fail "login returned no csrf token"
+  CSRF="X-Artifacts-Csrf: $csrf"
   # The flags are read off the Set-Cookie line itself. Grepping the whole header block would
   # let another header answer for them.
   cookie_line=$(echo "$hdr" | grep -i '^set-cookie: artifacts_session=' || true)
@@ -1223,11 +1228,27 @@ if [ -n "$ADMIN_USER" ] && [ -n "$ADMIN_PASS" ]; then
   echo "$cookie_line" | grep -qi 'path=/' || fail "session cookie is not scoped to Path=/"
   echo "ok: login sets an HttpOnly SameSite=Strict session cookie"
 
-  # No Authorization header on any of these three: the cookie is the whole credential.
-  code=$(curl -s -o /dev/null -w '%{http_code}' -b /tmp/sessjar "$BASE/api/artifacts")
+  # No Authorization header on any of these: the cookie and its CSRF token are the credential.
+  code=$(curl -s -o /dev/null -w '%{http_code}' -b /tmp/sessjar -H "$CSRF" "$BASE/api/artifacts")
   expect_code 200 "$code" "session cookie reaches the artifact API"
-  code=$(curl -s -o /dev/null -w '%{http_code}' -b /tmp/sessjar "$BASE/api/keys")
+  code=$(curl -s -o /dev/null -w '%{http_code}' -b /tmp/sessjar -H "$CSRF" "$BASE/api/keys")
   expect_code 200 "$code" "session cookie reaches the key API"
+  # The cookie alone is refused. On a single-host install, uploaded HTML runs on the dashboard's
+  # origin and the browser attaches the cookie to its requests too.
+  code=$(curl -s -o /dev/null -w '%{http_code}' -b /tmp/sessjar "$BASE/api/keys")
+  expect_code 401 "$code" "session cookie without its csrf token"
+  code=$(curl -s -o /dev/null -w '%{http_code}' -b /tmp/sessjar -X POST "$BASE/api/keys" -H "$JSON" \
+    -d '{"name":"ci-csrf-probe","scopes":["full"]}')
+  expect_code 401 "$code" "minting a key with the session cookie alone"
+  # The dashboard page carries the token for a browser opening it, and not for script fetching it.
+  curl -s -b /tmp/sessjar -H 'Sec-Fetch-Mode: navigate' -H 'Sec-Fetch-Dest: document' "$BASE/" \
+    | grep -qF "<meta name=\"artifacts-csrf\" content=\"$csrf\">" || fail "the dashboard page lacks the csrf token"
+  if curl -s -b /tmp/sessjar -H 'Sec-Fetch-Mode: cors' -H 'Sec-Fetch-Dest: empty' "$BASE/" | grep -qF '<meta name="artifacts-csrf"'; then
+    fail "a fetch() of the dashboard page got the csrf token"
+  fi
+  curl -s -D - -o /dev/null "$BASE/" | grep -qi '^cross-origin-opener-policy: same-origin' \
+    || fail "the dashboard page has no Cross-Origin-Opener-Policy"
+  echo "ok: the session needs its csrf token, which only a navigated dashboard page carries"
   curl -s -b /tmp/sessjar "$BASE/api/auth/session" | grep -q '"authenticated":true' \
     || fail "session endpoint does not see the cookie"
   echo "ok: session endpoint reports the live session"
@@ -1252,23 +1273,29 @@ if [ -n "$ADMIN_USER" ] && [ -n "$ADMIN_PASS" ]; then
   # and the check above passes. Prove the value is the real credential before the replay reads
   # anything into a 401: without this, mangling the extraction and dropping the fix both stay
   # green together.
-  code=$(curl -s -o /dev/null -w '%{http_code}' -H "Cookie: artifacts_session=$session_token" "$BASE/api/keys")
+  code=$(curl -s -o /dev/null -w '%{http_code}' -H "Cookie: artifacts_session=$session_token" -H "$CSRF" "$BASE/api/keys")
   expect_code 200 "$code" "the extracted cookie value is the live credential"
 
   # The rotation is gated on the caller already holding a session. An anonymous POST has to
   # answer 200 and write nothing, or the route is a way for anybody to sign the operator out.
   code=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/api/auth/logout")
   expect_code 200 "$code" "an anonymous logout"
-  code=$(curl -s -o /dev/null -w '%{http_code}' -b /tmp/sessjar "$BASE/api/keys")
+  code=$(curl -s -o /dev/null -w '%{http_code}' -b /tmp/sessjar -H "$CSRF" "$BASE/api/keys")
   expect_code 200 "$code" "the operator's session survives an anonymous logout"
+  # Same for a logout that carries the cookie and not the token: it may clear that cookie, but
+  # it must not rotate the secret and sign every device out.
+  code=$(curl -s -o /dev/null -w '%{http_code}' -H "Cookie: artifacts_session=$session_token" -X POST "$BASE/api/auth/logout")
+  expect_code 200 "$code" "a logout without the csrf token"
+  code=$(curl -s -o /dev/null -w '%{http_code}' -b /tmp/sessjar -H "$CSRF" "$BASE/api/keys")
+  expect_code 200 "$code" "the operator's session survives a logout without the csrf token"
 
-  curl -s -b /tmp/sessjar -c /tmp/sessjar -o /dev/null -X POST "$BASE/api/auth/logout"
-  code=$(curl -s -o /dev/null -w '%{http_code}' -b /tmp/sessjar "$BASE/api/keys")
+  curl -s -b /tmp/sessjar -c /tmp/sessjar -o /dev/null -X POST "$BASE/api/auth/logout" -H "$CSRF"
+  code=$(curl -s -o /dev/null -w '%{http_code}' -b /tmp/sessjar -H "$CSRF" "$BASE/api/keys")
   expect_code 401 "$code" "logout drops the session"
 
   # The cookie is a signed payload with a 30 day expiry and no server-side record, so clearing
   # it in one browser leaves every captured copy live. Logout has to refuse the token itself.
-  code=$(curl -s -o /dev/null -w '%{http_code}' -H "Cookie: artifacts_session=$session_token" "$BASE/api/keys")
+  code=$(curl -s -o /dev/null -w '%{http_code}' -H "Cookie: artifacts_session=$session_token" -H "$CSRF" "$BASE/api/keys")
   expect_code 401 "$code" "a session token captured before logout is replayed after it"
   echo "ok: logout invalidates the session token, not just the browser cookie"
 
