@@ -390,13 +390,14 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci
-      - name: Start MinIO + create bucket
+      # MinIO no longer publishes minio/minio to Docker Hub, so the pull is denied. moto's
+      # server mode speaks the same S3 API on a local port, takes any credentials, and installs
+      # from PyPI with no registry login.
+      - name: Start an S3 server (moto) + create bucket
         run: |
-          docker run -d --name minio -p 9000:9000 \
-            -e MINIO_ROOT_USER=minioadmin -e MINIO_ROOT_PASSWORD=minioadmin \
-            minio/minio server /data
-          for i in $(seq 1 30); do
-            curl -sf http://127.0.0.1:9000/minio/health/ready && break
+          pipx run --spec 'moto[server]==5.1.22' moto_server -H 127.0.0.1 -p 9000 > moto.log 2>&1 &
+          for i in $(seq 1 60); do
+            curl -sf http://127.0.0.1:9000/moto-api/ > /dev/null && break
             sleep 1
           done
           aws --endpoint-url http://127.0.0.1:9000 s3 mb s3://artifacts

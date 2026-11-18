@@ -2108,6 +2108,30 @@ echo "ok: duplicate a pdf"
 curl -sf -X DELETE "$BASE/api/artifacts/ci-pdf" -H "$AUTH" > /dev/null
 rm -r "$PDF_DIR"
 
+# --- app builds: an apk uploads raw, gets an install page, and downloads byte for byte ---
+# The fixture is a real aapt2 build (test/fixtures/app/build.sh). The private install-token
+# flow needs an https BASE_URL for the Install button, so it is covered by
+# test/app-routes.test.js rather than here.
+APP_FIXTURE="$REPO_DIR/test/fixtures/app/sample.apk"
+code=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/api/artifacts/app?slug=ci-apk&visibility=public" \
+  -H "$AUTH" -H 'Content-Type: application/octet-stream' --data-binary "@$APP_FIXTURE")
+expect_code 201 "$code" "publish an apk"
+page=$(curl -s "$BASE/a/ci-apk")
+echo "$page" | grep -qF 'Kiln Demo' || fail "the apk install page does not name the app"
+echo "$page" | grep -qF 'href="/a/ci-apk/Kiln-Demo-2.3.1.apk" download' || fail "the apk install page has no download link"
+APP_DL=$(mktemp)
+curl -sf -o "$APP_DL" "$BASE/a/ci-apk/Kiln-Demo-2.3.1.apk" || fail "the apk download failed"
+cmp -s "$APP_DL" "$APP_FIXTURE" || fail "the apk download is not the uploaded file"
+rm "$APP_DL"
+code=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/api/artifacts" -H "$AUTH" -H "$JSON" \
+  -d '{"type":"apk","content":"eA==","slug":"ci-apk-json"}')
+expect_code 400 "$code" "an apk sent through the JSON publish path"
+code=$(curl -s -o /dev/null -w '%{http_code}' -X PUT "$BASE/api/artifacts/ci-apk" -H "$AUTH" -H "$JSON" \
+  -d '{"content":"<p>x</p>"}')
+expect_code 400 "$code" "a typeless JSON replace of an apk"
+curl -sf -X DELETE "$BASE/api/artifacts/ci-apk" -H "$AUTH" > /dev/null
+echo "ok: app build upload, install page and download"
+
 # --- dashboard: the served shell parses and still lines up with its own markup ---
 # Nothing else in CI loads `/`, so a broken inline script in public/index.html used to
 # ship green. No browser here; see the header of dashboard-check.mjs for what that

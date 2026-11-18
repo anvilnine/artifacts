@@ -37,13 +37,18 @@ with `get_artifact_source` first and send the edited XML to `update_artifact` wi
 See [BPMN process maps](formats.md#bpmn-process-maps).
 
 `get_artifact_source` needs the `read` scope. It returns two text blocks: JSON with `slug`, `type`
-and `title`, then the stored source. For a redirect the source is its target. A pdf or a zip site
-is refused, because one is binary and the other is many files; use the [CLI](cli.md) `source`
-command for a pdf.
+and `title`, then the stored source. For a redirect the source is its target. A pdf, an app build
+or a zip site is refused, because the first two are binary and a zip site is many files; use the
+[CLI](cli.md) `source` command for a pdf or a build.
+
+App builds (`apk`, `aab`, `ipa`) have no publish tool: a build is tens of megabytes of binary.
+Publish one with the [CLI](cli.md) (`artifacts publish Kiln.ipa`) or `POST /api/artifacts/app`.
+Once it exists, it lists, renames, expires, tags and deletes through these tools like any other
+artifact, and `list_artifacts` carries what was read from it under `app`.
 
 `list_artifacts` returns what `GET /api/artifacts` returns: `slug`, `type`, `title`, `createdAt`,
 `updatedAt` and `tags` on every entry, plus whichever of `project`, `expiresAt`, `frame`,
-`visibility`, `disabled`, `files`, `target`, `description`, `ogImage`, `pdf` and `hasPassword` the
+`visibility`, `disabled`, `files`, `target`, `description`, `ogImage`, `pdf`, `app` and `hasPassword` the
 artifact has set. `pdf` is a PDF artifact's viewer settings (`{mode, download}`), present only on
 one somebody configured; set them from the [REST API](api.md) or the CLI. `target` is a redirect's destination, absent on a redirect published before the server
 stored targets on the artifact. No password hashes and no tokens.

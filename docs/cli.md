@@ -20,9 +20,9 @@ export ARTIFACTS_API_KEY=...
 ## Commands
 
 ```
-artifacts publish <file> [--slug s] [--title t] [--tags a,b] [--project p] [--description d] [--og-image url] [--expires ISO] [--type html|jsx|tsx|md|bpmn|pdf|redirect] [--frame on|off] [--visibility public|private|password] [--password pw]
+artifacts publish <file> [--slug s] [--title t] [--tags a,b] [--project p] [--description d] [--og-image url] [--expires ISO] [--type html|jsx|tsx|md|bpmn|pdf|redirect|apk|aab|ipa] [--frame on|off] [--visibility public|private|password] [--password pw]
 artifacts deploy <dir|zip> [--slug s] [--title t] [--tags a,b] [--project p] [--description d] [--og-image url] [--expires ISO] [--visibility public|private|password] [--password pw]
-artifacts update <slug> <file> [--title t] [--tags a,b] [--project p] [--description d] [--og-image url] [--type html|jsx|tsx|md|bpmn|pdf|redirect]
+artifacts update <slug> <file> [--title t] [--tags a,b] [--project p] [--description d] [--og-image url] [--type html|jsx|tsx|md|bpmn|pdf|redirect|apk|aab|ipa]
 artifacts list [--tag t] [--project p]
 artifacts rename <slug> <new-slug>
 artifacts disable <slug> | enable <slug>
@@ -48,6 +48,14 @@ artifacts sweep [--apply]        # host-side cleanup, see Sweep below
 ```
 
 Type is inferred from the file extension (`.html`, `.jsx`, `.tsx`, `.md`, `.bpmn`, `.pdf`); pass `--type` to override. `update` always sends a type, so the file you hand it decides what the artifact becomes: pointing it at a `.html` file rewrites an md artifact as an html page and deletes the markdown source. The type on the way in has to match the type you want on the way out, and `--type` says it when the extension does not. An extension the CLI cannot place is an error before anything is sent, so a `.txt` never converts an artifact by accident. A `.pdf` is read as bytes and sent base64-encoded, and `source` writes bytes too, so `artifacts source q3-report -o copy.pdf` gives back the file that went up. A redirect has no extension to infer from, so it needs `--type redirect` and a file holding the target URL: `artifacts publish target.txt --type redirect --slug pricing`. Repoint one the same way with `update`: `artifacts update pricing new-target.txt --type redirect`, which keeps the title and everything else. The target cannot carry a username or password, and cannot point back at the slug it is published under. `keys list` prints how many redirects each key has minted, on keys that have minted any. `deploy` zips a directory for you and posts it to the zip endpoint. `tag` replaces an artifact's tags (`none` clears them); `list --tag` shows only artifacts carrying that tag.
+
+An `.apk`, `.aab` or `.ipa` publishes an install page. The file goes up raw to `POST /api/artifacts/app`, and the CLI prints the link on stdout and the app's name, version and type on stderr, so `url=$(artifacts publish Kiln.ipa)` captures only the link. `update` with a build swaps it under the same slug and keeps the link, which is what a CI step that ships every build to one tester link wants:
+
+```bash
+artifacts update kiln-beta build/ios/ipa/Kiln.ipa
+```
+
+`source` on an app artifact writes the build file. See [App builds](formats.md#app-builds-apk-aab-ipa).
 
 `pdf` sets a PDF artifact's viewer controls, one setting per call: a mode (`standard`, `presentation`, `minimal`), `download-on` / `download-off`, or `default` to reset both. Turning downloads off only removes the viewer's buttons; the file's URL still answers with the bytes. See [PDF](formats.md#pdf).
 
