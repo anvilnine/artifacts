@@ -1,7 +1,6 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import zlib from 'node:zlib';
 import { fileURLToPath } from 'node:url';
 
 import AdmZip from 'adm-zip';
@@ -33,7 +32,19 @@ import {
   parseKeyInput,
 } from './lib/auth.js';
 import { SOURCE_EXT, dropOrphanObjects, dropStaleObjects } from './lib/artifact-files.js';
+import {
+  APP_MIME,
+  appDownloadName,
+  appInfo,
+  appMaxBytes,
+  buildInstallManifest,
+  inspectAppBuild,
+  ipaInstallBlocker,
+  isAppType,
+} from './lib/app-build.js';
+import { appPageSlots, guessPlatform } from './lib/app-page.js';
 import { prepareBpmn } from './lib/bpmn.js';
+import { readZipEntry } from './lib/zip-entry.js';
 import { createConfigStore } from './lib/config.js';
 import { ApiError, clientFacingError } from './lib/errors.js';
 import { createWriteQueue, WRITE_CEILING_MS } from './lib/write-queue.js';
@@ -167,6 +178,7 @@ const MD_SHELL = await fs.readFile(path.join(__dirname, 'shells', 'md.html'), 'u
 const FRAME_SHELL = await fs.readFile(path.join(__dirname, 'shells', 'frame.html'), 'utf8');
 const PDF_SHELL = await fs.readFile(path.join(__dirname, 'shells', 'pdf.html'), 'utf8');
 const BPMN_SHELL = await fs.readFile(path.join(__dirname, 'shells', 'bpmn.html'), 'utf8');
+const APP_SHELL = await fs.readFile(path.join(__dirname, 'shells', 'app.html'), 'utf8');
 const PASSWORD_SHELL = await fs.readFile(path.join(__dirname, 'shells', 'password.html'), 'utf8');
 const NOT_FOUND_SHELL = await fs.readFile(path.join(__dirname, 'shells', 'not-found.html'), 'utf8');
 // The console is a shell like any other now: read once, branding filled per request.
@@ -233,6 +245,34 @@ function unlockValid(req, meta) {
   // Same rule as verifyCapToken: issueUnlock always writes a real number here, so a cookie
   // without one is refused rather than read as "no expiry set". Number.isFinite because
   // Infinity is a number and is never in the past.
+  return Number.isFinite(p.exp) && p.exp > Date.now();
+}
+
+// Install tokens. The fetches that install an app build do not come from the browser tab that
+// holds the unlock cookie: after an itms-services:// tap, iOS's install daemon fetches the
+// manifest and then the IPA, and an Android download manager can fetch an APK on its own. None
+// of them carry the cookie, so on a private or password artifact the install page hands them a
+// signed token in the query string instead.
+//
+// `t`, not `k`: the capability-link middleware below answers any `?k=` with a 302 that strips it
+// and sets a cookie, which an install daemon would follow straight into a 404. This token is
+// read in place on the build's own routes and nowhere else. It binds the slug and the epoch, so
+// Rotate link revokes it with everything else, and it lives a few hours because the page mints a
+// fresh one on every view.
+const INSTALL_TOKEN_TTL_MS = 6 * 60 * 60 * 1000;
+
+function signInstallToken(meta) {
+  return signSession(
+    { typ: 'install', slug: meta.slug, epoch: metaEpoch(meta), exp: Date.now() + INSTALL_TOKEN_TTL_MS },
+    auth.sessionSecret,
+  );
+}
+
+function installTokenValid(req, meta) {
+  const token = typeof req.query.t === 'string' ? req.query.t : '';
+  if (!token) return false;
+  const p = verifySession(token, auth.sessionSecret);
+  if (!p || p.typ !== 'install' || p.slug !== meta.slug || p.epoch !== metaEpoch(meta)) return false;
   return Number.isFinite(p.exp) && p.exp > Date.now();
 }
 
@@ -420,6 +460,70 @@ function buildBpmnHtml(meta, xml) {
     // can be hand-edited, the same reason pdfDownloadName re-checks it.
     FILENAME: JSON.stringify(SLUG_RE.test(meta.slug) ? `${meta.slug}.bpmn` : 'diagram.bpmn'),
   });
+}
+
+// ---- app builds: the install page and its files ----
+
+// Does this artifact's build need a token on its file URLs? Only a gated one: a public build's
+// files open to anyone holding the link, the same as its page.
+function needsInstallToken(meta) {
+  return meta.visibility === 'private' || meta.visibility === 'password';
+}
+
+// The path a build downloads from, named for the file that lands on disk. `app.<ext>` answers
+// too (serveAppFile), as a stable name for scripts that do not want to know the version.
+function appFilePath(meta) {
+  return `/a/${meta.slug}/${appDownloadName(meta)}`;
+}
+
+function withInstallToken(urlPath, token) {
+  return token ? `${urlPath}?t=${encodeURIComponent(token)}` : urlPath;
+}
+
+// The install page, built per request from meta.json. Each view of a gated build mints a fresh
+// install token, so the links on the page always have hours left on them.
+function buildAppHtml(meta, req) {
+  const token = needsInstallToken(meta) ? signInstallToken(meta) : '';
+  const manifestUrl = `${BASE_URL}${withInstallToken(`/a/${meta.slug}/manifest.plist`, token)}`;
+  // What the QR code opens on the phone. A private build gets its capability link, which the
+  // reader of this page already holds. A password build gets the bare link and asks the phone
+  // for the password, so the code on the screen is not a way around it.
+  const qrTarget = meta.visibility === 'private' ? tokenedUrl(meta) : canonicalUrl(meta);
+  const slots = appPageSlots(meta, {
+    urls: {
+      download: withInstallToken(appFilePath(meta), token),
+      install: `itms-services://?action=download-manifest&url=${encodeURIComponent(manifestUrl)}`,
+    },
+    qrSvg: qrSvg(qrTarget, { scale: 4, margin: 0 }),
+    https: BASE_URL.startsWith('https://'),
+    platform: guessPlatform(req.get('user-agent') || ''),
+  });
+  return fillShell(APP_SHELL, { ...slots, SOCIAL: socialTags(meta, canonicalUrl(meta)) });
+}
+
+// The files under an app build's slug: the build itself, and for an ipa the manifest iOS reads
+// after an Install tap. The caller has passed the gate (cookie or install token) and the expiry
+// check. Anything else under the slug is a 404.
+async function serveAppFile(req, res, meta) {
+  const rel = req.params[0];
+  res.set(ARTIFACT_HEADERS);
+  if (meta.type === 'ipa' && rel === 'manifest.plist') {
+    // The IPA URL inside carries a token when the build is gated: the one this request came
+    // with if it had one, else a fresh one for a reader who opened the manifest with a cookie.
+    let token = '';
+    if (needsInstallToken(meta)) token = installTokenValid(req, meta) ? req.query.t : signInstallToken(meta);
+    res.set('Cache-Control', 'no-store');
+    return res.type('application/xml; charset=utf-8').send(buildInstallManifest({
+      ipaUrl: `${BASE_URL}${withInstallToken(appFilePath(meta), token)}`,
+      info: appInfo(meta),
+      title: meta.title,
+    }));
+  }
+  if (rel === appDownloadName(meta) || rel === `app.${meta.type}`) {
+    res.set('Content-Disposition', `attachment; filename="${appDownloadName(meta)}"`);
+    return serveObject(req, res, `${meta.slug}/source.${meta.type}`);
+  }
+  return notFound(res);
 }
 
 // md artifacts render at serve time so a config change shows up on the next view. That
@@ -653,40 +757,13 @@ function extractSiteFiles(zip) {
   // without limit: a 50 MB upload of deflated zeros is tens of GB in memory.
   let remaining = ZIP_MAX_UNCOMPRESSED;
   for (const f of files) {
-    f.data = readZipEntry(f.entry, remaining);
+    f.data = readZipEntry(f.entry, remaining, ZIP_TOO_BIG);
     remaining -= f.data.length;
   }
   return files;
 }
 
 const ZIP_TOO_BIG = 'zip uncompressed size exceeds 100 MB';
-
-// One entry's bytes, inflated with a hard ceiling of `remaining` bytes. Stored and deflated are
-// the two methods every zip tool writes; anything else, and encrypted entries, are refused.
-function readZipEntry(entry, remaining) {
-  const name = entry.entryName;
-  if (entry.header.flags & 1) throw new ApiError(400, `encrypted zip entries are not supported: ${name}`);
-  const method = entry.header.method;
-  const raw = entry.getCompressedData();
-  let data;
-  if (method === 0) {
-    data = raw;
-  } else if (method === 8) {
-    try {
-      data = zlib.inflateRawSync(raw, { maxOutputLength: Math.max(1, remaining) });
-    } catch (err) {
-      if (err?.code === 'ERR_BUFFER_TOO_LARGE') throw new ApiError(400, ZIP_TOO_BIG);
-      throw new ApiError(400, `zip entry could not be decompressed: ${name}`);
-    }
-  } else {
-    throw new ApiError(400, `unsupported zip compression method ${method}: ${name}`);
-  }
-  if (data.length > remaining) throw new ApiError(400, ZIP_TOO_BIG);
-  if (typeof zlib.crc32 === 'function' && zlib.crc32(data) !== entry.header.crc >>> 0) {
-    throw new ApiError(400, `zip entry is corrupt: ${name}`);
-  }
-  return data;
-}
 
 // Chained on the target slug like every other write: the 409 below is a read followed by a
 // write, so a zip deploy and an inline publish naming one slug both used to answer 201 and the
@@ -757,6 +834,101 @@ async function storeZipArtifact(buffer, finalSlug, { title, description, ogImage
   await storage.flush?.();
   if (meta.tokenEpoch !== undefined) await ensureSessionSecret();
   return { slug: finalSlug, url: tokenedUrl(meta), files: files.length, visibility: meta.visibility || 'public' };
+}
+
+// ---------------------------------------------------------------------------
+// App builds (apk, aab, ipa)
+// ---------------------------------------------------------------------------
+
+// POST /api/artifacts/app makes a new artifact; PUT /api/artifacts/:slug/app swaps the build
+// under an existing one. The swap keeps the slug, the link, the visibility and every setting,
+// which is the point of a tester link: the same URL serves each new build.
+//
+// The build is read before the write chain is joined. It is CPU work on the request's own bytes
+// (a zip directory walk, two small inflates, a SHA-256) and needs no lock, and a bad file should
+// be refused without holding the slug.
+async function saveAppArtifact(buffer, input, { replace = false } = {}) {
+  const wanted = wantedSlug(input.slug);
+  if (wanted !== undefined && !SLUG_RE.test(wanted)) {
+    throw new ApiError(400, 'slug must match [a-z0-9][a-z0-9-]{2,63}');
+  }
+  const expect = typeof input.type === 'string' && input.type ? input.type : undefined;
+  const { type, app } = inspectAppBuild(buffer, { expect });
+  const finalSlug = wanted || nanoid();
+  return withMetaChain(finalSlug, () => storeAppArtifact(buffer, finalSlug, type, app, input, replace));
+}
+
+async function storeAppArtifact(buffer, finalSlug, type, app, input, replace) {
+  const { title, description, ogImage, expiresAt, tags, project, visibility, password } = input;
+  const expiry = expiresAt !== undefined ? parseExpiresAt(expiresAt) : undefined;
+  const tagList = tags !== undefined ? parseTags(tags) : undefined;
+  const projectName = project !== undefined ? parseProject(project) : undefined;
+  const summary = description !== undefined ? parseDescription(description) : undefined;
+  const previewImage = ogImage !== undefined ? parseOgImage(ogImage) : undefined;
+  if (visibility !== undefined && !VISIBILITIES.includes(visibility)) {
+    throw new ApiError(400, 'visibility must be public, private, or password');
+  }
+  if (visibility === 'password' && (typeof password !== 'string' || !password)) {
+    throw new ApiError(400, 'password is required when visibility is "password"');
+  }
+
+  const existing = await readMeta(finalSlug);
+  if (existing && !replace) throw new ApiError(409, `slug "${finalSlug}" already exists`);
+  if (replace && !existing) throw new ApiError(404, `slug "${finalSlug}" not found`);
+  // A new build replaces a build. Turning a page or a site into an install page through this
+  // door would delete its content as a side effect of an upload, so that stays a delete and a
+  // fresh publish.
+  if (existing && !isAppType(existing.type)) {
+    throw new ApiError(400, `slug "${finalSlug}" is a ${existing.type} artifact; only an apk, aab or ipa can be replaced with a new build`);
+  }
+
+  await storage.put(`${finalSlug}/source.${type}`, buffer, { contentType: APP_MIME[type] });
+  const now = new Date().toISOString();
+  const meta = {
+    ...existing,
+    slug: finalSlug,
+    type,
+    // A new artifact is named after the app. A replace keeps the title it had unless one is sent:
+    // someone may have renamed it from the dashboard, and the next CI upload should not undo that.
+    title: title !== undefined ? (title || app.name || finalSlug) : (existing?.title || app.name || finalSlug),
+    app,
+    createdAt: existing?.createdAt || now,
+    updatedAt: now,
+  };
+  delete meta.pdf;
+  delete meta.target;
+  delete meta.keyId;
+  if (expiresAt !== undefined) meta.expiresAt = expiry;
+  if (tagList !== undefined) meta.tags = tagList.length ? tagList : undefined;
+  if (projectName !== undefined) meta.project = projectName || undefined;
+  if (summary !== undefined) meta.description = summary || undefined;
+  if (previewImage !== undefined) meta.ogImage = previewImage || undefined;
+  const effVisibility = visibility !== undefined ? visibility : existing ? undefined : DEFAULT_VISIBILITY;
+  if (effVisibility === 'password') {
+    meta.visibility = 'password';
+    meta.password = await hashPassword(password);
+  } else if (effVisibility === 'private') {
+    meta.visibility = 'private';
+    delete meta.password;
+  } else if (effVisibility === 'public') {
+    delete meta.visibility;
+    delete meta.password;
+  }
+  seedTokenEpoch(meta);
+  await storage.put(`${finalSlug}/meta.json`, JSON.stringify(meta, null, 2), {
+    contentType: 'application/json',
+  });
+  // An ipa replaced by an apk leaves source.ipa behind otherwise.
+  await dropStaleObjects(storage, finalSlug, existing?.type, type);
+  await storage.flush?.();
+  if (meta.tokenEpoch !== undefined) await ensureSessionSecret();
+  return {
+    slug: finalSlug,
+    url: tokenedUrl(meta),
+    type,
+    visibility: meta.visibility || 'public',
+    app: { name: app.name, id: app.id, version: app.version, build: app.build, size: app.size },
+  };
 }
 
 // Accepts an array of strings or a comma-separated string (JSON bodies, zip
@@ -882,6 +1054,14 @@ async function storeArtifact(finalSlug, input, { replace = false, keyId = null }
   if (!TYPES.includes(type)) {
     throw new ApiError(400, `type must be one of: ${TYPES.join(', ')}`);
   }
+  // App builds run 20 to 200 MB, past what a JSON body carries, so they have an endpoint of
+  // their own that takes the raw file.
+  if (isAppType(type)) {
+    throw new ApiError(
+      400,
+      `an ${type} is uploaded as raw bytes: POST /api/artifacts/app for a new build, or PUT /api/artifacts/:slug/app to replace one`,
+    );
+  }
   const existing = await readMeta(finalSlug);
   if (existing && !replace) {
     throw new ApiError(409, `slug "${finalSlug}" already exists`);
@@ -901,6 +1081,13 @@ async function storeArtifact(finalSlug, input, { replace = false, keyId = null }
     throw new ApiError(
       400,
       'cannot replace a pdf without a type: pass type "pdf" to send new bytes, or another type to convert it and delete the file',
+    );
+  }
+  // Same door as the pdf one above, for the same reason: a build cannot be rebuilt from a reply.
+  if (isAppType(existing?.type) && input.type === undefined) {
+    throw new ApiError(
+      400,
+      `cannot replace an ${existing.type} without a type: send a new build to PUT /api/artifacts/${finalSlug}/app, or pass another type to convert it and delete the build`,
     );
   }
 
@@ -968,6 +1155,8 @@ async function storeArtifact(finalSlug, input, { replace = false, keyId = null }
   // do; converting away from pdf drops the settings, since nothing would read them again.
   if (type !== 'pdf') delete meta.pdf;
   else if (pdf !== undefined) meta.pdf = pdfSettingsForMeta(parsePdfSettings(pdf, pdfSettings(existing)));
+  // Nothing reaches here as an app build, so a record that was one drops what it read from it.
+  delete meta.app;
   if (tagList !== undefined) meta.tags = tagList.length ? tagList : undefined;
   if (projectName !== undefined) meta.project = projectName || undefined;
   // Both keep their stored value when the field is absent, the way tags and project do, so a
@@ -1142,6 +1331,8 @@ async function copyArtifact(sourceSlug, targetSlug, body, keyId) {
     updatedAt: new Date().toISOString(),
   };
   if (source.type === 'zip' && typeof source.files === 'number') meta.files = source.files;
+  // The build file came across with copySlug, so what was read from it comes across too.
+  if (isAppType(source.type) && source.app && typeof source.app === 'object') meta.app = source.app;
   if (source.type === 'redirect') {
     meta.target = copiedTarget;
     // The copy is a new hop and belongs to whoever made it, not to whoever published the
@@ -1195,7 +1386,7 @@ function seedTokenEpoch(meta) {
 // (tokenEpoch) are dropped, and hasPassword exposes state without the hash.
 const PUBLIC_META_FIELDS = [
   'slug', 'type', 'title', 'files', 'target', 'description', 'ogImage', 'createdAt', 'updatedAt',
-  'expiresAt', 'frame', 'tags', 'project', 'visibility', 'disabled', 'pdf',
+  'expiresAt', 'frame', 'tags', 'project', 'visibility', 'disabled', 'pdf', 'app',
 ];
 function publicMeta(meta) {
   const out = {};
@@ -1629,6 +1820,7 @@ const EXT_MIME = {
   mp3: 'audio/mpeg', wav: 'audio/wav', ogg: 'audio/ogg',
   mp4: 'video/mp4', webm: 'video/webm',
   pdf: 'application/pdf', wasm: 'application/wasm',
+  apk: APP_MIME.apk, aab: APP_MIME.aab, ipa: APP_MIME.ipa,
   webmanifest: 'application/manifest+json',
 };
 
@@ -1828,6 +2020,15 @@ app.get('/a/:slug', async (req, res) => {
     return res.redirect(301, target);
   }
 
+  // An app build's install page is never framed. The Install button has to navigate the top
+  // window (itms-services:// does nothing inside an iframe on iOS), and the page carries its own
+  // header, so the toolbar would only stack a second title over the first.
+  if (isAppType(meta.type)) {
+    if (!(await storage.head(`${slug}/source.${meta.type}`).catch(() => null))) return notFound(res);
+    res.set(ARTIFACT_HEADERS);
+    return res.type('html').send(buildAppHtml(meta, req));
+  }
+
   // Framed view: serve the wrapper page (toolbar + iframe → ?raw=1). `?raw=1`
   // is the escape hatch the iframe uses to load the bare artifact.
   // A sub-frame load (the toolbar iframe, and any navigation the user makes inside it) carries
@@ -1909,6 +2110,13 @@ app.get('/a/:slug/source', async (req, res, next) => {
     res.set('Content-Disposition', `attachment; filename="${pdfDownloadName(meta)}"`);
     return serveObject(req, res, `${slug}/source.pdf`);
   }
+  // An app build's source is the build itself, sent the way the pdf's is: as its own type, as
+  // an attachment, under the name the install page's download button uses.
+  if (isAppType(meta.type)) {
+    res.set(ARTIFACT_HEADERS);
+    res.set('Content-Disposition', `attachment; filename="${appDownloadName(meta)}"`);
+    return serveObject(req, res, `${slug}/source.${meta.type}`);
+  }
   // meta.type comes off disk unvalidated, and a bare SOURCE_EXT lookup walks the prototype, so a
   // hand-edited "constructor" built a key out of a function body. Same guard ownedKeys uses.
   if (!Object.hasOwn(SOURCE_EXT, meta.type)) return notFound(res);
@@ -1922,9 +2130,13 @@ app.get('/a/:slug/*', async (req, res) => {
   const { slug } = req.params;
   const meta = SLUG_RE.test(slug) ? await readMeta(slug) : null;
   if (!meta || meta.disabled) return notFound(res);
-  if (!artifactUnlocked(req, meta)) return notFound(res);
+  // An app build's files also open to an install token, for the fetches that carry no cookie.
+  // See signInstallToken.
+  const appBuild = isAppType(meta.type);
+  if (!artifactUnlocked(req, meta) && !(appBuild && installTokenValid(req, meta))) return notFound(res);
   keepOutOfSharedCaches(res, meta);
   if (isExpired(meta)) return expiredFor(req, res);
+  if (appBuild) return serveAppFile(req, res, meta);
   // A pdf artifact owns one sub-path: the file its viewer loads. `?download=1` sends the same
   // bytes as an attachment, which is the direct-download link the viewer's Download button and
   // anything else that wants the file point at.
@@ -2019,6 +2231,38 @@ app.post('/api/artifacts/zip', requireAuth('publish'), zipBody, async (req, res,
     }
     const { slug, title, description, ogImage, expiresAt, tags, project, visibility, password } = req.query;
     res.status(201).json(await saveZipArtifact(req.body, { slug, title, description, ogImage, expiresAt, tags, project, visibility, password }));
+  } catch (err) {
+    next(err);
+  }
+});
+
+// App builds arrive as the raw file, any Content-Type: the bytes are checked for what they are,
+// so a client that labels an IPA application/octet-stream and one that sends the APK MIME type
+// both work. requireAuth runs first, so nobody below publish scope gets a body buffered.
+const appBody = express.raw({ type: () => true, limit: appMaxBytes() });
+
+function appQuery(query) {
+  const { slug, type, title, description, ogImage, expiresAt, tags, project, visibility, password } = query;
+  return { slug, type, title, description, ogImage, expiresAt, tags, project, visibility, password };
+}
+
+app.post('/api/artifacts/app', requireAuth('publish'), appBody, async (req, res, next) => {
+  try {
+    if (!Buffer.isBuffer(req.body) || !req.body.length) {
+      throw new ApiError(400, 'raw build body required: send the .apk, .aab or .ipa file as the request body');
+    }
+    res.status(201).json(await saveAppArtifact(req.body, appQuery(req.query)));
+  } catch (err) {
+    next(err);
+  }
+});
+
+app.put('/api/artifacts/:slug/app', requireAuth('publish'), appBody, async (req, res, next) => {
+  try {
+    if (!Buffer.isBuffer(req.body) || !req.body.length) {
+      throw new ApiError(400, 'raw build body required: send the .apk, .aab or .ipa file as the request body');
+    }
+    res.json(await saveAppArtifact(req.body, { ...appQuery(req.query), slug: req.params.slug }, { replace: true }));
   } catch (err) {
     next(err);
   }
@@ -2669,7 +2913,7 @@ function createMcpServer(scopes = SCOPES, keyId = null) {
     {
       title: 'Get artifact source',
       description:
-        'Read back the source of an artifact by slug: the HTML, JSX/TSX, Markdown or BPMN XML as stored, or a redirect\'s target. The first content block is JSON naming slug, type and title; pass that type to update_artifact. A bpmn published without layout comes back with the layout the server added. pdf and zip sites are refused: one is binary and the other is many files.',
+        'Read back the source of an artifact by slug: the HTML, JSX/TSX, Markdown or BPMN XML as stored, or a redirect\'s target. The first content block is JSON naming slug, type and title; pass that type to update_artifact. A bpmn published without layout comes back with the layout the server added. pdf, app builds (apk, aab, ipa) and zip sites are refused: the first two are binary and a zip site is many files.',
       inputSchema: { slug: z.string() },
     },
     async ({ slug }) => {
@@ -2682,6 +2926,9 @@ function createMcpServer(scopes = SCOPES, keyId = null) {
       }
       if (meta.type === 'pdf') {
         throw new Error(`a pdf is binary: download it with the CLI instead (artifacts source ${slug} -o file.pdf)`);
+      }
+      if (isAppType(meta.type)) {
+        throw new Error(`an ${meta.type} is a binary app build: download it with the CLI instead (artifacts source ${slug} -o app.${meta.type})`);
       }
       let text;
       if (meta.type === 'redirect') {

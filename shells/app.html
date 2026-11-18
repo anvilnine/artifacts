@@ -1,0 +1,257 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="robots" content="noindex, nofollow">
+<meta name="format-detection" content="telephone=no">
+<title>{{TITLE}}</title>
+{{SOCIAL}}
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Archivo:wght@700&family=IBM+Plex+Mono:wght@400;500&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  /* Light by default, Anvil Nine "Molten Steel" in dark, the same pair the pdf and markdown
+     shells use, so an install page reads like the rest of the viewer chrome. */
+  :root {
+    color-scheme: light dark;
+    --bg: #f0ece7;
+    --card: #ffffff;
+    --fg: #1f2328;
+    --muted: #59636e;
+    --line: #e2dcd5;
+    --line-strong: #d0c8bf;
+    --accent: #c73d1d;
+    --accent-fg: #ffffff;
+    --accent-hover: #a8331a;
+    --quiet-bg: #f6f3ef;
+    --warn-bg: #fff4e0; --warn-fg: #7a4b00; --warn-line: #f0d39a;
+    --stop-bg: #fdecea; --stop-fg: #8a1f12; --stop-line: #f2c0b8;
+    --info-bg: #f6f3ef; --info-fg: #3d444c; --info-line: #e2dcd5;
+    --shadow: 0 1px 2px rgb(31 35 40 / 0.06), 0 12px 32px -12px rgb(31 35 40 / 0.18);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0b0d0f;
+      --card: #101317;
+      --fg: #edeae4;
+      --muted: #9da3a9;
+      --line: #242b33;
+      --line-strong: #333d47;
+      --accent: #f0502a;
+      --accent-fg: #ffffff;
+      --accent-hover: #ff7550;
+      --quiet-bg: #15191e;
+      --warn-bg: #2a2010; --warn-fg: #f3c77a; --warn-line: #4d3a17;
+      --stop-bg: #2b1310; --stop-fg: #ff9d80; --stop-line: #5a2418;
+      --info-bg: #15191e; --info-fg: #cfccc5; --info-line: #242b33;
+      --shadow: 0 1px 0 rgb(255 255 255 / 0.03) inset, 0 16px 40px -16px rgb(0 0 0 / 0.7);
+    }
+  }
+
+  * { box-sizing: border-box; }
+  html { -webkit-text-size-adjust: 100%; }
+  body {
+    margin: 0;
+    min-height: 100vh;
+    background: var(--bg);
+    color: var(--fg);
+    font: 400 15px/1.55 Inter, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    padding: max(24px, env(safe-area-inset-top)) 16px max(32px, env(safe-area-inset-bottom));
+  }
+
+  main {
+    max-width: 920px;
+    margin: 0 auto;
+    display: grid;
+    gap: 16px;
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .card {
+    background: var(--card);
+    border: 1px solid var(--line);
+    border-radius: 16px;
+    box-shadow: var(--shadow);
+  }
+
+  /* ---- header ---- */
+  .hero { padding: 28px 24px 24px; }
+  .id { display: flex; align-items: center; gap: 16px; }
+  .tile {
+    flex: 0 0 auto;
+    width: 72px; height: 72px;
+    border-radius: 22%;
+    display: grid; place-items: center;
+    background: linear-gradient(145deg, var(--tile-a), var(--tile-b));
+    color: #fff;
+    font: 700 34px/1 Archivo, Inter, system-ui, sans-serif;
+    letter-spacing: -0.02em;
+    box-shadow: inset 0 0 0 1px rgb(255 255 255 / 0.14), 0 6px 16px -6px var(--tile-b);
+    user-select: none;
+  }
+  h1 {
+    margin: 0;
+    font: 700 26px/1.15 Archivo, Inter, system-ui, sans-serif;
+    letter-spacing: -0.015em;
+    overflow-wrap: anywhere;
+  }
+  .sub {
+    margin-top: 6px;
+    font: 500 12px/1.4 "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+    letter-spacing: 0.02em;
+    color: var(--muted);
+  }
+
+  .panel { margin-top: 22px; display: grid; gap: 12px; }
+  .panel:empty { display: none; }
+
+  /* ---- buttons ---- */
+  .btn {
+    display: flex; align-items: center; justify-content: center; gap: 8px;
+    min-height: 50px; padding: 12px 18px;
+    border-radius: 12px;
+    font: 600 16px/1.2 Inter, system-ui, sans-serif;
+    text-decoration: none;
+    transition: background-color 120ms ease, border-color 120ms ease, transform 80ms ease;
+    -webkit-tap-highlight-color: transparent;
+  }
+  .btn:active { transform: scale(0.985); }
+  .btn-primary { background: var(--accent); color: var(--accent-fg); }
+  .btn-primary:hover { background: var(--accent-hover); }
+  .btn-quiet {
+    background: var(--quiet-bg); color: var(--fg);
+    border: 1px solid var(--line);
+    font-size: 15px; min-height: 46px;
+  }
+  .btn-quiet:hover { border-color: var(--line-strong); }
+  .btn .dim { font-weight: 500; opacity: 0.72; }
+  .btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+  /* ---- notes and steps ---- */
+  .note {
+    margin: 0; padding: 11px 14px;
+    border-radius: 10px; border: 1px solid var(--info-line);
+    background: var(--info-bg); color: var(--info-fg);
+    font-size: 14px;
+  }
+  .note-warn { background: var(--warn-bg); color: var(--warn-fg); border-color: var(--warn-line); }
+  .note-stop { background: var(--stop-bg); color: var(--stop-fg); border-color: var(--stop-line); }
+  .note-quiet { background: transparent; border-color: transparent; padding: 0 2px; color: var(--muted); font-size: 13px; }
+
+  .steps {
+    margin: 4px 0 0; padding: 0;
+    list-style: none; counter-reset: step;
+    display: grid; gap: 10px;
+  }
+  .steps li {
+    counter-increment: step;
+    position: relative;
+    padding-left: 34px;
+    font-size: 14px;
+    color: var(--fg);
+  }
+  .steps li::before {
+    content: counter(step);
+    position: absolute; left: 0; top: -1px;
+    width: 22px; height: 22px;
+    border-radius: 50%;
+    display: grid; place-items: center;
+    border: 1px solid var(--line-strong);
+    font: 500 11px/1 "IBM Plex Mono", ui-monospace, monospace;
+    color: var(--muted);
+  }
+  .steps strong { font-weight: 600; }
+
+  .cmd {
+    margin: 0; padding: 12px 14px;
+    border-radius: 10px;
+    background: var(--quiet-bg); border: 1px solid var(--line);
+    white-space: pre-wrap; overflow-wrap: anywhere;
+    font: 400 12.5px/1.6 "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  }
+
+  /* ---- device switch: the body class picks one panel ---- */
+  .for-ios, .for-android, .for-desktop { display: none; }
+  body.p-ios .for-ios, body.p-android .for-android, body.p-desktop .for-desktop { display: grid; }
+
+  /* ---- QR, computers only ---- */
+  .qr {
+    display: grid; grid-template-columns: auto 1fr; gap: 18px; align-items: center;
+    padding: 16px; border-radius: 12px;
+    border: 1px dashed var(--line-strong);
+  }
+  .qr .code {
+    width: 132px; height: 132px; padding: 8px;
+    background: #fff; border-radius: 10px;
+  }
+  .qr .code svg { display: block; width: 100%; height: 100%; }
+  .qr p { margin: 0; font-size: 14px; color: var(--muted); }
+  .qr strong { display: block; color: var(--fg); font-weight: 600; font-size: 15px; margin-bottom: 4px; }
+  .no-qr .qr { display: none; }
+
+  /* ---- details ---- */
+  .details { padding: 8px 24px; }
+  dl { margin: 0; }
+  .row {
+    display: grid; grid-template-columns: 112px minmax(0, 1fr); gap: 12px;
+    padding: 12px 0;
+    border-top: 1px solid var(--line);
+  }
+  .row:first-child { border-top: 0; }
+  dt { color: var(--muted); font-size: 13px; padding-top: 1px; }
+  dd { margin: 0; font-size: 14px; }
+  dd.mono { font: 400 13px/1.5 "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, monospace; }
+  dd.wrap { overflow-wrap: anywhere; }
+  .hash { color: var(--muted); font-size: 12px; }
+
+  @media (min-width: 820px) {
+    body { padding-top: 64px; }
+    main { grid-template-columns: minmax(0, 1.1fr) minmax(0, 1fr); align-items: start; gap: 20px; }
+    .hero { padding: 32px; }
+    .details { padding: 8px 28px; }
+  }
+  @media (prefers-reduced-motion: reduce) { .btn { transition: none; } .btn:active { transform: none; } }
+</style>
+</head>
+<body class="p-{{PLATFORM}} t-{{TYPE}} {{QR_CLASS}}">
+<main>
+  <section class="card hero" aria-labelledby="app-name">
+    <div class="id">
+      <div class="tile" style="{{TILE_STYLE}}" aria-hidden="true">{{TILE_LETTER}}</div>
+      <div>
+        <h1 id="app-name">{{NAME}}</h1>
+        <div class="sub">{{SUBLINE}}</div>
+      </div>
+    </div>
+
+    <div class="panel for-ios">{{PANEL_IOS}}</div>
+    <div class="panel for-android">{{PANEL_ANDROID}}</div>
+    <div class="panel for-desktop">
+      {{PANEL_DESKTOP}}
+      <div class="qr">
+        <div class="code" role="img" aria-label="QR code that opens this page on a phone">{{QR}}</div>
+        <p><strong>Open on your phone</strong>{{QR_CAPTION}}</p>
+      </div>
+      {{DESKTOP_DOWNLOAD}}
+    </div>
+  </section>
+
+  <section class="card details" aria-label="Build details">
+    <dl>{{DETAILS}}</dl>
+  </section>
+</main>
+<script>
+  // The server guessed the platform from the User-Agent. An iPad in its default desktop mode
+  // reports itself as a Mac, and only touch support gives it away, so that one case is fixed
+  // up here before anyone can tap the wrong panel.
+  (function () {
+    var b = document.body;
+    var ua = navigator.userAgent || '';
+    var ipad = /Macintosh/.test(ua) && navigator.maxTouchPoints > 1;
+    var p = /iPhone|iPad|iPod/.test(ua) || ipad ? 'ios' : /Android/.test(ua) ? 'android' : 'desktop';
+    b.classList.remove('p-ios', 'p-android', 'p-desktop');
+    b.classList.add('p-' + p);
+  })();
+</script>
+</body>
+</html>

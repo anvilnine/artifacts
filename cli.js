@@ -14,9 +14,9 @@ import { createStorage } from './storage/index.js';
 const USAGE = `artifacts — publish to a self-hosted artifacts instance
 
 Usage:
-  artifacts publish <file> [--slug s] [--title t] [--tags a,b] [--project p] [--description d] [--og-image url] [--expires ISO] [--type html|jsx|tsx|md|bpmn|pdf|redirect] [--frame on|off] [--visibility public|private|password] [--password pw]
+  artifacts publish <file> [--slug s] [--title t] [--tags a,b] [--project p] [--description d] [--og-image url] [--expires ISO] [--type html|jsx|tsx|md|bpmn|pdf|redirect|apk|aab|ipa] [--frame on|off] [--visibility public|private|password] [--password pw]
   artifacts deploy <dir|zip> [--slug s] [--title t] [--tags a,b] [--project p] [--description d] [--og-image url] [--expires ISO] [--visibility public|private|password] [--password pw]
-  artifacts update <slug> <file> [--title t] [--tags a,b] [--project p] [--description d] [--og-image url] [--type html|jsx|tsx|md|bpmn|pdf|redirect]
+  artifacts update <slug> <file> [--title t] [--tags a,b] [--project p] [--description d] [--og-image url] [--type html|jsx|tsx|md|bpmn|pdf|redirect|apk|aab|ipa]
   artifacts list [--tag t] [--project p]
   artifacts rename <slug> <new-slug>
   artifacts disable <slug>
@@ -43,6 +43,9 @@ Usage:
 Maintenance (runs on the server host against its own storage, not over HTTP):
   artifacts sweep [--apply] [--older-than <hours>]
 
+An .apk, .aab or .ipa file publishes an install page. \`update\` with one swaps the build and keeps
+the link.
+
 Connection (flags override env):
   --url   server origin        [env: ARTIFACTS_URL]
   --key   API key              [env: ARTIFACTS_API_KEY]
@@ -50,7 +53,28 @@ Connection (flags override env):
 The key can be a managed key (scoped) or the bootstrap ARTIFACTS_API_KEY.
 Minting keys (keys create/list/revoke) requires the bootstrap admin key.`;
 
-const EXT_TYPES = { '.html': 'html', '.htm': 'html', '.jsx': 'jsx', '.tsx': 'tsx', '.md': 'md', '.markdown': 'md', '.bpmn': 'bpmn', '.pdf': 'pdf' };
+const EXT_TYPES = {
+  '.html': 'html', '.htm': 'html', '.jsx': 'jsx', '.tsx': 'tsx', '.md': 'md', '.markdown': 'md',
+  '.bpmn': 'bpmn', '.pdf': 'pdf', '.apk': 'apk', '.aab': 'aab', '.ipa': 'ipa',
+};
+
+// App builds go to their own endpoint as the raw file, with the other settings in the query
+// string, the way a zip deploy does.
+const APP_TYPES = new Set(['apk', 'aab', 'ipa']);
+
+async function sendAppBuild(method, apiPath, file, type, settings) {
+  const params = new URLSearchParams({ type });
+  for (const [k, v] of Object.entries(settings)) if (v !== undefined && v !== '') params.set(k, v);
+  const out = JSON.parse(await api(method, `${apiPath}?${params}`, {
+    body: await fs.readFile(file),
+    contentType: 'application/octet-stream',
+  }));
+  const app = out.app || {};
+  const version = app.version ? ` ${app.version}${app.build && app.build !== app.version ? ` (${app.build})` : ''}` : '';
+  console.log(out.url);
+  console.error(`${app.name || out.slug}${version} · ${out.type}`);
+  return out;
+}
 
 const { values: opts, positionals } = parseArgs({
   options: {
@@ -128,7 +152,7 @@ function fail(message) {
 function inferType(file) {
   if (opts.type) return opts.type;
   const type = EXT_TYPES[path.extname(file).toLowerCase()];
-  if (!type) fail(`cannot infer type from "${file}": pass --type html|jsx|tsx|md|bpmn|pdf|redirect`);
+  if (!type) fail(`cannot infer type from "${file}": pass --type html|jsx|tsx|md|bpmn|pdf|redirect|apk|aab|ipa`);
   return type;
 }
 
@@ -177,6 +201,20 @@ switch (command) {
       fail('--visibility must be public, private, or password');
     }
     const publishType = inferType(args[0]);
+    if (APP_TYPES.has(publishType)) {
+      await sendAppBuild('POST', '/api/artifacts/app', args[0], publishType, {
+        slug: opts.slug,
+        title: opts.title,
+        tags: opts.tags,
+        project: opts.project,
+        description: opts.description,
+        ogImage: opts['og-image'],
+        expiresAt: opts.expires,
+        visibility: opts.visibility,
+        password: opts.password,
+      });
+      break;
+    }
     const content = await readContent(args[0], publishType);
     const out = await apiJson('POST', '/api/artifacts', {
       content,
@@ -230,6 +268,18 @@ switch (command) {
   case 'update': {
     need(2, '<slug> <file> [--title t] [--type t]');
     const updateType = inferType(args[1]);
+    if (APP_TYPES.has(updateType)) {
+      await sendAppBuild('PUT', `/api/artifacts/${args[0]}/app`, args[1], updateType, {
+        title: opts.title,
+        tags: opts.tags,
+        project: opts.project,
+        description: opts.description,
+        ogImage: opts['og-image'],
+        visibility: opts.visibility,
+        password: opts.password,
+      });
+      break;
+    }
     const content = await readContent(args[1], updateType);
     const out = await apiJson('PUT', `/api/artifacts/${args[0]}`, {
       content,

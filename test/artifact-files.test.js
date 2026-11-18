@@ -203,8 +203,11 @@ function memStore(namespaces, { age = 24 * 7, mtime = true } = {}) {
 test('orphanKeys names every content key the type does not own', () => {
   assert.deepEqual(orphanKeys('s', 'md').sort(), [
     's/index.html',
+    's/source.aab',
+    's/source.apk',
     's/source.bpmn',
     's/source.html',
+    's/source.ipa',
     's/source.jsx',
     's/source.pdf',
     's/source.tsx',
