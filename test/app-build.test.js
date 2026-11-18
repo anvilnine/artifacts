@@ -169,7 +169,10 @@ test('install page: an installable IPA gets an Install button and the profile st
 
   const ent = slots({ slug: 's', type: 'ipa', app: inspectAppBuild(makeIpa({ profile: { kind: 'enterprise' } })).app });
   assert.match(ent.PANEL_IOS, /VPN &amp; Device Management/);
-  assert.match(ent.PANEL_IOS, /Example Team/);
+  assert.match(ent.PANEL_IOS, /trust the developer profile/);
+  assert.doesNotMatch(ent.PANEL_IOS + ent.DETAILS, /Example Team/);
+  assert.equal(inspectAppBuild(makeIpa({ profile: { kind: 'enterprise' } })).app.profile.team, undefined);
+  assert.match(ent.DETAILS, /Team ID.*ABCDE12345/);
 });
 
 test('install page: a blocked IPA explains itself and offers no Install button', () => {

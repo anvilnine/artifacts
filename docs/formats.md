@@ -403,7 +403,9 @@ The type comes from what is inside the archive, not from the file name:
 
 From those it stores the app name, the bundle id or package name, the version and build number,
 the minimum OS, the file size and a SHA-256 of the file. For an IPA it also reads the provisioning
-profile: which kind it is, the team, the expiry date and how many devices it lists. The device
+profile: which kind it is, the team ID, the expiry date and how many devices it lists. The team
+name is left out, because for a solo developer it is a legal name on a page anyone with the link
+can open. The device
 UDIDs themselves are not stored. An Android build marked `debuggable` says so on the page.
 
 Everything is read once, at upload, into the artifact's record. The page renders from that record,
