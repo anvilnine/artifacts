@@ -5,7 +5,7 @@
 </p>
 
 <p align="center">
-  POST HTML, a React component, Markdown, a PDF, or a zipped static site. Get back an unguessable URL on your own domain.
+  POST HTML, a React component, Markdown, a PDF, a zipped static site, or an Android or iOS build. Get back an unguessable URL on your own domain.
 </p>
 
 <p align="center">
@@ -43,14 +43,15 @@ It runs as one container with a single admin account and, by default, no databas
 
 ## Features
 
-- **Content types.** HTML, JSX/TSX (a single React component, no build step), Markdown, BPMN 2.0 process maps, PDF, and zipped static sites.
+- **Content types.** HTML, JSX/TSX (a single React component, no build step), Markdown, BPMN 2.0 process maps, PDF, zipped static sites, and APK, AAB and IPA app builds.
 - **Agent-native, human-friendly.** A built-in MCP server lets Claude Code, Codex, or any MCP client publish with one tool call. Humans get a drag-and-drop web UI at `/` (behind an admin login) and a [CLI](docs/cli.md).
 - **Two-tier auth.** An admin logs into the dashboard with a password; CLI and MCP carry scoped, revocable [API keys](docs/auth.md) (`read` / `publish` / `full`) with optional expiry, so you never share one master secret.
 - **Private by default, with per-artifact visibility.** A new artifact is `private`, shared through a signed capability link (`?k=…`) you can rotate to revoke. Switch any artifact to `public` (anyone with the bare link) or password-protected. Nothing is discoverable by default: unguessable slugs, `noindex` everywhere. See [visibility](docs/api.md#visibility).
-- **Optional viewer frame.** A slim top toolbar (title, copy link, hide) like Claude, Gemini, and ChatGPT artifacts. Toggle it globally in Settings or per artifact; `?raw=1` serves the bare content. Redirects are never framed.
+- **Optional viewer frame.** A slim top toolbar (title, copy link, hide) like Claude, Gemini, and ChatGPT artifacts. Toggle it globally in Settings or per artifact; `?raw=1` serves the bare content. Redirects and app install pages are never framed.
 - **Markdown render settings.** Pick the reading font, content width, base font size, and starting theme for every Markdown artifact in Settings. Markdown renders from its source on each view, so a change shows on existing artifacts too. Framed Markdown gets a navbar button that cycles Auto, Light, and Dark for that reader. A fenced `mermaid` code block is drawn as a diagram that follows the theme. See [docs/formats.md](docs/formats.md#markdown-render-settings).
 - **BPMN process maps.** Publish a BPMN 2.0 file and it gets a diagram viewer with pan, zoom, and SVG or `.bpmn` download. The XML is checked on publish, and a file with no diagram layout gets one drawn for it, pools and lanes included, so an agent can write the process and leave the coordinates to the server. See [docs/formats.md](docs/formats.md#bpmn-process-maps).
 - **PDF hosting.** Publish a PDF and it gets a viewer page plus a direct-download link. Three per-artifact viewer modes (standard, presentation, minimal) and a download toggle that removes the viewer's buttons. The toggle is a convenience, not protection: the file's URL still answers with the bytes. See [docs/formats.md](docs/formats.md#pdf).
+- **Over-the-air app installs.** Drop an `.apk`, `.aab` or `.ipa` and it gets an install page. An iPhone or iPad gets an Install button, an Android phone gets the download and the steps after it, and a computer gets a QR code to move the tester to their phone. The page shows the version, build number, bundle or package id, minimum OS and SHA-256, all read from the build at upload. For an IPA it also reads the provisioning profile: Ad Hoc or Development with its device count, Enterprise, or App Store. A build that cannot install from a link (signed for the App Store, an expired profile, or a server on plain HTTP) says why instead of showing a button that fails. Upload a new build to the same slug and testers keep one link. An `.aab` is a Play Console upload, so its page says so and shows the `bundletool` commands. See [docs/formats.md](docs/formats.md#app-builds-apk-aab-ipa).
 - **Redirects.** `type: "redirect"` turns a slug into a short link that answers an HTTP 301 at the server, where other hosts fall back to a JavaScript bounce. The target must be an absolute http(s) URL and cannot carry credentials, and the response is uncacheable, so repointing the slug takes effect on the next visit. Repoint one from the row menu in the dashboard, or with a `PUT`. Read the cost of running an open redirector on your domain first: [docs/formats.md](docs/formats.md#redirects).
 - **Embeddable.** A public artifact drops into any page as one `<iframe>`. The row menu writes the tag for you, pointing at `?raw=1` so the frame holds the artifact and not a second toolbar. Private and password-protected artifacts stay unembeddable on purpose, and the unlock prompt refuses to be framed at all. See [docs/embedding.md](docs/embedding.md).
 - **QR code per artifact.** Every artifact has a QR of its permanent URL, from the row menu in the dashboard, `GET /api/artifacts/:slug/qr`, or `artifacts qr <slug>`. SVG or PNG, generated in-process: no QR library, no third-party image service, nothing about your artifacts leaves the box. See [the API reference](docs/api.md).
@@ -63,8 +64,8 @@ It runs as one container with a single admin account and, by default, no databas
 | From | How | Credential |
 |---|---|---|
 | A browser | Drop files on the dashboard at `/`, or paste into **New** | Admin login |
-| The terminal | `artifacts publish page.html` or `artifacts deploy ./dist` ([CLI](docs/cli.md)) | Scoped API key |
-| Any HTTP client | `POST /api/artifacts` ([REST API](docs/api.md)) | Scoped API key |
+| The terminal | `artifacts publish page.html`, `artifacts publish app.ipa` or `artifacts deploy ./dist` ([CLI](docs/cli.md)) | Scoped API key |
+| Any HTTP client | `POST /api/artifacts`, or `POST /api/artifacts/app` with a build file ([REST API](docs/api.md)) | Scoped API key |
 | An agent | `publish_artifact` over the built-in [MCP server](docs/mcp.md) | Scoped API key |
 
 ## Screenshots
@@ -78,6 +79,16 @@ It runs as one container with a single admin account and, by default, no databas
     <td width="50%" valign="top">
       <img src="docs/screenshot-redirect-compose.png" alt="The New artifact form with type set to redirect"><br>
       <sub>The <b>New</b> form: type, visibility, slug, tags and project in one place.</sub>
+    </td>
+  </tr>
+  <tr>
+    <td width="50%" valign="top">
+      <img src="docs/screenshot-app-install-phone.png" alt="An install page for an iOS build on an iPhone, with an Install button and the steps after it"><br>
+      <sub>An IPA's install page on an iPhone: one tap, then what to do next for this build's profile.</sub>
+    </td>
+    <td width="50%" valign="top">
+      <img src="docs/screenshot-app-install-desktop.png" alt="An install page for an Android build on a computer, with a QR code and the build details"><br>
+      <sub>The same kind of page on a computer: a QR code for the phone, and what was read from the build.</sub>
     </td>
   </tr>
   <tr>
@@ -144,6 +155,7 @@ claude mcp add --transport http artifacts https://artifacts.example.com/mcp \
 | Set up login + scoped API keys | [docs/auth.md](docs/auth.md) |
 | Understand JSX/TSX rendering + zip validation | [docs/formats.md](docs/formats.md) |
 | Put an artifact inside another page | [docs/embedding.md](docs/embedding.md) |
+| Hand testers an APK or IPA to install from a link | [docs/formats.md](docs/formats.md#app-builds-apk-aab-ipa) |
 
 ## Storage
 
@@ -189,6 +201,12 @@ A <code>public</code> one, yes, as an <code>&lt;iframe&gt;</code> pointing at <c
 <summary><b>Can CI publish a preview of every pull request?</b></summary>
 <br>
 Yes. Give CI its own scoped key, build the site for its subpath, and run <code>artifacts deploy</code>. Both patterns (one stable preview, or one per pull request) are in <a href="docs/ci-preview.md">docs/ci-preview.md</a>.
+</details>
+
+<details>
+<summary><b>Can testers install my iOS or Android build from the link?</b></summary>
+<br>
+Yes, for an <code>.apk</code>, and for an <code>.ipa</code> signed with an Ad Hoc, Development or Enterprise profile. iOS only installs from a link served over HTTPS, and an Ad Hoc or Development build only installs on the devices listed in its profile. An App Store build and an <code>.aab</code> cannot install from any link, and their pages say so. Builds up to 200 MB by default (<code>APP_MAX_MB</code>). See <a href="docs/formats.md#app-builds-apk-aab-ipa">app builds</a>.
 </details>
 
 <details>

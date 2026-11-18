@@ -47,6 +47,7 @@ Or keep the configuration in a file: `cp .env.example .env`, edit it, then `npm 
 | `PORT` | no | `3000` | Listen port |
 | `TRUST_PROXY` | no | `none` | Client-IP source for rate limiting: `none` (socket address), `cloudflare` (`CF-Connecting-IP`), or `xff` (last hop of `X-Forwarded-For`). See the security note below. |
 | `DEFAULT_VISIBILITY` | no | `private` | Visibility for a new artifact when the caller gives none: `private` or `public`. Ships `private` (opt in to public). |
+| `APP_MAX_MB` | no | `200` | Largest app build (`.apk`, `.aab`, `.ipa`) the upload routes accept, in MB. The file is held in memory while it is checked. A value that is not a number from 1 to 4096 uses 200. See [app builds](formats.md#app-builds-apk-aab-ipa). |
 | `CAP_TOKEN_TTL_DAYS` | no | `30` | Lifetime of a capability share link (`?k=` token) for `private`/`password` artifacts. A value that is not a positive number (a typo, `0`, a negative) logs a warning and uses 30. |
 
 Day-to-day, give CLI and MCP clients scoped [managed API keys](auth.md) rather than the bootstrap key. Auth state (the admin account, two HMAC secrets, and the managed keys) persists under a reserved `auth.json` object through the storage backend, so it survives a restart on any backend that is itself durable (see [storage backends](#storage-backends)) with no migration. Like the frame config, it is loaded at boot and cached in memory; every write reloads it, so the cache is also as fresh as the last write this process made.

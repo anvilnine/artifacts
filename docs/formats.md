@@ -372,6 +372,147 @@ for a working, fully self-contained Flutter web app.
 > edge-to-edge, append `?raw=1` to the URL or turn the frame off for that artifact
 > (`artifacts frame <slug> off`).
 
+## App builds (APK, AAB, IPA)
+
+Upload an Android or iOS build and it gets an install page at `/a/{slug}`. The page is for testers:
+whoever opens the link on a phone can install the build from there.
+
+The build goes up as the raw file, on its own endpoint, because release builds run from 20 MB to a
+few hundred:
+
+```bash
+curl -s -X POST "https://artifacts.example.com/api/artifacts/app?slug=kiln-beta&visibility=private" \
+  -H "Authorization: Bearer $ARTIFACTS_API_KEY" --data-binary @Kiln.ipa
+# {"slug":"kiln-beta","url":"https://artifacts.example.com/a/kiln-beta?k=…","type":"ipa",
+#  "visibility":"private","app":{"name":"Kiln","id":"com.example.kiln","version":"2.3.1","build":"42","size":42992811}}
+```
+
+The CLI routes the three extensions there on its own (`artifacts publish Kiln.ipa`), and the
+dashboard takes a dropped file or one picked from the New form, with an upload percentage while it
+goes up.
+
+### What the server reads from the build
+
+The type comes from what is inside the archive, not from the file name:
+
+| Type | How it is recognised | Where the details come from |
+|---|---|---|
+| `ipa` | `Payload/<App>.app/Info.plist` | `Info.plist` (binary or XML) and `embedded.mobileprovision` |
+| `apk` | `AndroidManifest.xml` at the root | the binary XML manifest |
+| `aab` | `base/manifest/AndroidManifest.xml` | the protobuf manifest that aapt2 writes into a bundle |
+
+From those it stores the app name, the bundle id or package name, the version and build number,
+the minimum OS, the file size and a SHA-256 of the file. For an IPA it also reads the provisioning
+profile: which kind it is, the team, the expiry date and how many devices it lists. The device
+UDIDs themselves are not stored. An Android build marked `debuggable` says so on the page.
+
+Everything is read once, at upload, into the artifact's record. The page renders from that record,
+so viewing it never opens the archive. A `?type=` on the upload is optional; when it is sent and
+the file is a different kind of build, the upload is a `400` that names both.
+
+An IPA's name is `CFBundleDisplayName`, then `CFBundleName`, then the `.app` folder's name. An
+Android build's name is its `android:label` when that is plain text. A label that points at a
+string resource is not resolved, because that means reading `resources.arsc`, so those builds show
+the artifact title instead: the slug, unless you set one.
+
+### The install page
+
+One page serves three readers. The server guesses which from the User-Agent so the first paint is
+right, and a few lines of script on the page fix the one case it gets wrong: an iPad in its default
+desktop mode reports itself as a Mac.
+
+- **iPhone and iPad, IPA**: an Install button (`itms-services://`). After the tap, the steps that
+  match the profile: Developer Mode for an Ad Hoc or Development build, trusting the developer in
+  VPN & Device Management for an Enterprise one. Ad Hoc and Development builds also say how many
+  devices the profile lists, since only those devices can install it.
+- **Android, APK**: a Download button, then where to find the file, the "install unknown apps"
+  prompt and the Install tap. A build signed with a different key than the copy already installed
+  will not update it, and the page says so.
+- **A computer**: a QR code that opens the page on a phone, and a plain download link. The code
+  carries the capability link for a private build, which the reader already holds, and the bare
+  link for a password build, so the phone asks for the password.
+- **Any device, AAB**: an App Bundle is what Google Play takes and no phone installs it. The page
+  says that and shows the two `bundletool` commands that turn it into an installable APK set.
+
+An IPA that cannot install from a link shows the reason in place of the button:
+
+| Situation | What the page says to do |
+|---|---|
+| Signed for the App Store (no device list, not Enterprise) | Export again with an Ad Hoc, Development or Enterprise profile, or use TestFlight |
+| No provisioning profile | Export with one of those profiles |
+| Profile expired | Rebuild with a current profile |
+| `BASE_URL` is `http://` | Serve the host over HTTPS: iOS refuses a manifest or IPA over plain HTTP |
+
+A profile that expires within 14 days gets a warning under the button.
+
+There is no app icon on the page. iOS stores icons in a crushed PNG variant browsers cannot draw,
+and an APK's icon sits behind its resource table, so the page draws a tile from the app's first
+letter on a colour taken from its id. Every build of one app gets the same tile.
+
+App install pages are never framed: the Install button has to navigate the top window, and the
+page carries its own header.
+
+### URLs
+
+| URL | What it serves |
+|---|---|
+| `/a/{slug}` | the install page |
+| `/a/{slug}/{Name}-{version}.{ext}` | the build, as an attachment under that name (what the page links to) |
+| `/a/{slug}/app.{ext}` | the same file at a name that never changes, for scripts |
+| `/a/{slug}/manifest.plist` | IPA only: the manifest iOS fetches after an Install tap |
+| `/a/{slug}/source` | the build, the same as every other type's `/source` |
+
+The download name keeps to letters, digits, `.`, `_` and `-`. Anything else under the slug is a
+404.
+
+### Private and password builds
+
+iOS does not fetch the manifest or the IPA from Safari. After the Install tap, a system process
+fetches both, and it carries none of Safari's cookies. Android download managers can do the same
+with an APK. So on a `private` or `password` build, every file link on the page carries an install
+token, `?t=…`.
+
+- The token opens the build's files (the build and `manifest.plist`) and nothing else: not the
+  page, not `/source`, not another slug.
+- It is minted each time the page is viewed, by someone who got past the gate, and lasts 6 hours.
+- It binds the slug and the link epoch, so **Rotate link** revokes it along with every capability
+  link and unlock cookie.
+- It is a different parameter from `?k=` on purpose. A `?k=` link is exchanged for a cookie with a
+  302, which an install process would follow into a 404.
+
+### A new build on the same link
+
+`PUT /api/artifacts/{slug}/app` with the new file swaps the build and keeps everything else: the
+slug, the link, visibility, tags, project and title. The page shows the new version on the next
+view. From the CLI that is `artifacts update kiln-beta Kiln.ipa`, and the dashboard row menu has
+**Upload new build…**.
+
+The new build can be a different kind (an APK in place of an IPA); the old file is deleted. A page
+or a site cannot be turned into an app build this way, and an app build cannot be overwritten by a
+JSON `PUT` that leaves out `type`, because the build could not be rebuilt from anything the caller
+sent. Both are a `400`.
+
+### Size
+
+The cap is `APP_MAX_MB`, 200 by default. The whole file is held in memory while it is checked, so
+the cap is also what one upload can cost in RAM. Two limits outside this server are worth knowing:
+
+- Cloudflare's Free and Pro plans refuse request bodies over 100 MB. A tunnel or proxied DNS record
+  in front of the host applies that limit before the upload reaches the server.
+- The `git`, `postgres` and `sqlite` backends store every byte of every build, and git keeps old
+  ones in history. Builds of this size belong on `local` or `s3`.
+
+### What hosting builds costs you
+
+- Anyone with a publish key can put an installable binary on your domain. Browser download
+  protection and mail filters judge a domain partly by what it serves, so a key that leaks can get
+  the domain flagged. Give CI its own key, scoped to `publish`, and revoke it when the pipeline is
+  retired.
+- The server reads the build's manifest and does not check its signature. The phone does that at
+  install time. A tampered build fails there, not at upload.
+- An installable build of an unreleased app is the kind of file that leaks. New artifacts are
+  `private` by default; keep builds that way unless a public link is the point.
+
 ## Redirects
 
 `type: "redirect"` turns a slug into a short link. The content is the target URL, and a visit answers a real HTTP 301 with the target in `Location`. Nothing is rendered, so there is no page to view and no JavaScript bounce.
@@ -490,4 +631,4 @@ The fields are for the preview card in a chat window, not for a search result.
 
 ## Viewer frame
 
-Every type above except redirects can render inside a slim top **frame** — a toolbar with the title, a copy-link button, and a hide toggle — with the artifact itself isolated in an iframe. Toggle it globally from the web UI's **Settings** panel (or `artifacts config`), and override it per artifact (`artifacts frame <slug> on|off|default`). Append `?raw=1` to any URL to view the artifact with no frame. Full behavior in [docs/api.md](api.md#viewer-frame).
+Every type above except redirects and app builds can render inside a slim top **frame** (a toolbar with the title, a copy-link button, and a hide toggle), with the artifact itself isolated in an iframe. Toggle it globally from the web UI's **Settings** panel (or `artifacts config`), and override it per artifact (`artifacts frame <slug> on|off|default`). Append `?raw=1` to any URL to view the artifact with no frame. Full behavior in [docs/api.md](api.md#viewer-frame).
