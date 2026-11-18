@@ -12,30 +12,32 @@
   <a href="https://github.com/anvilnine/artifacts/actions/workflows/ci.yml"><img src="https://github.com/anvilnine/artifacts/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License: MIT"></a>
   <a href="package.json"><img src="https://img.shields.io/badge/node-%E2%89%A522-brightgreen.svg" alt="Node >= 22"></a>
+  <a href="#quick-start"><img src="https://img.shields.io/badge/docker-ghcr.io-2496ED.svg?logo=docker&logoColor=white" alt="Docker image on ghcr.io"></a>
+  <a href="https://registry.modelcontextprotocol.io/v0.1/servers?search=io.github.anvilnine/artifacts"><img src="https://img.shields.io/badge/MCP-registry-E2552D.svg" alt="Listed in the MCP registry"></a>
 </p>
 
 <p align="center">
-  <a href="#quick-start">Quick start</a> ·
-  <a href="docs/deploy.md">Deploy</a> ·
-  <a href="docs/api.md">API</a> ·
-  <a href="docs/cli.md">CLI</a> ·
-  <a href="docs/mcp.md">MCP</a> ·
-  <a href="SECURITY.md">Security</a>
+  <a href="#features">Features</a> •
+  <a href="#quick-start">Quick start</a> •
+  <a href="#documentation">Docs</a> •
+  <a href="docs/deploy.md">Deploy</a> •
+  <a href="docs/api.md">API</a> •
+  <a href="docs/cli.md">CLI</a> •
+  <a href="docs/mcp.md">MCP</a> •
+  <a href="#faq">FAQ</a> •
+  <a href="#security">Security</a>
 </p>
 
 <p align="center">
   <img src="docs/screenshot-framed.png" alt="Dashboard: publish, group by project, and manage artifacts" width="880"><br>
-  <em>Dashboard: publish, group by project, and manage</em>
+  <sub>The dashboard: drop files to publish, group by project, copy a link.</sub>
 </p>
 
-<p align="center">
-  <img src="docs/screenshot-view-framed.png" alt="A published artifact served with the viewer topbar" width="880"><br>
-  <em>A published artifact served with the viewer topbar</em>
-</p>
+---
 
 ## About
 
-AI assistants produce a lot of shareable output: dashboards, prototypes, reports, small apps. Claude's hosted artifacts work well, but the URLs live on someone else's infrastructure. This is the self-hosted version, about 1,100 lines. You POST content, it serves the rendered result at an unguessable URL on a domain you control.
+AI assistants produce a lot of shareable output: dashboards, prototypes, reports, small apps. Claude's hosted artifacts work well, but the URLs live on someone else's infrastructure. This is the self-hosted version. You POST content, it serves the rendered result at an unguessable URL on a domain you control.
 
 It runs as one container with a single admin account and, by default, no database. Each artifact is a directory of plain files under `/data`, so backing up that directory backs up everything. On hosts that wipe local disk on restart, point it at durable external storage instead (an S3-compatible bucket, a git remote, or Postgres) by setting `STORAGE_BACKEND`. See [deploying](docs/deploy.md#storage-backends).
 
@@ -56,7 +58,39 @@ It runs as one container with a single admin account and, by default, no databas
 - **Lifecycle controls.** Custom slugs, rename, tags, disable without deleting, auto-expire, delete.
 - **Abuse-resistant.** Login and unlock endpoints are rate-limited per client IP (failures only), and password hashing runs off the event loop, so a burst of guesses slows those two routes instead of stalling the server. Set `TRUST_PROXY` for the real client IP behind Cloudflare or a reverse proxy. See [deploying](docs/deploy.md#rate-limiting-and-the-edge).
 
+## Ways to publish
+
+| From | How | Credential |
+|---|---|---|
+| A browser | Drop files on the dashboard at `/`, or paste into **New** | Admin login |
+| The terminal | `artifacts publish page.html` or `artifacts deploy ./dist` ([CLI](docs/cli.md)) | Scoped API key |
+| Any HTTP client | `POST /api/artifacts` ([REST API](docs/api.md)) | Scoped API key |
+| An agent | `publish_artifact` over the built-in [MCP server](docs/mcp.md) | Scoped API key |
+
+## Screenshots
+
+<table>
+  <tr>
+    <td width="50%" valign="top">
+      <img src="docs/screenshot-view-framed.png" alt="A published artifact served with the viewer topbar"><br>
+      <sub>A published artifact with the optional viewer frame: title, copy link, hide.</sub>
+    </td>
+    <td width="50%" valign="top">
+      <img src="docs/screenshot-redirect-compose.png" alt="The New artifact form with type set to redirect"><br>
+      <sub>The <b>New</b> form: type, visibility, slug, tags and project in one place.</sub>
+    </td>
+  </tr>
+  <tr>
+    <td colspan="2">
+      <img src="docs/screenshot-redirect-rows.png" alt="Two redirect artifacts in the dashboard list, each showing its target URL"><br>
+      <sub>Redirects in the list show where they point.</sub>
+    </td>
+  </tr>
+</table>
+
 ## Quick start
+
+### 1. Run it
 
 Clone, configure, start:
 
@@ -75,7 +109,8 @@ docker run -d -p 3000:3000 -v artifacts-data:/data \
   ghcr.io/anvilnine/artifacts:latest
 ```
 
-Publish something:
+### 2. Publish something
+
 
 ```bash
 curl -s -X POST https://artifacts.example.com/api/artifacts \
@@ -85,7 +120,9 @@ curl -s -X POST https://artifacts.example.com/api/artifacts \
 # {"slug":"hello","url":"https://artifacts.example.com/a/hello"}
 ```
 
-Let Claude Code publish for you:
+### 3. Let an agent publish
+
+Add the MCP server to Claude Code. Codex and other clients are in [docs/mcp.md](docs/mcp.md).
 
 ```bash
 claude mcp add --transport http artifacts https://artifacts.example.com/mcp \
@@ -97,12 +134,68 @@ claude mcp add --transport http artifacts https://artifacts.example.com/mcp \
 | I want to… | Read |
 |---|---|
 | Deploy it (Docker, compose, Coolify, bare node, env vars) | [docs/deploy.md](docs/deploy.md) |
+| Keep artifacts in a private GitHub repo | [docs/storage-github.md](docs/storage-github.md) |
+| Keep artifacts in a Forgejo or Gitea repo | [docs/storage-forgejo.md](docs/storage-forgejo.md) |
+| Run on Coolify with MinIO as durable storage | [docs/coolify-minio.md](docs/coolify-minio.md) |
+| Publish preview deploys from GitHub Actions | [docs/ci-preview.md](docs/ci-preview.md) |
 | Use the REST API (incl. zip sites and tags) | [docs/api.md](docs/api.md) |
 | Publish from the terminal | [docs/cli.md](docs/cli.md) |
 | Hook up Claude Code / Codex / any agent | [docs/mcp.md](docs/mcp.md) |
 | Set up login + scoped API keys | [docs/auth.md](docs/auth.md) |
 | Understand JSX/TSX rendering + zip validation | [docs/formats.md](docs/formats.md) |
 | Put an artifact inside another page | [docs/embedding.md](docs/embedding.md) |
+
+## Storage
+
+One container, a single admin account, and no database by default. Pick a backend with `STORAGE_BACKEND`:
+
+| Backend | Where artifacts live | Guide |
+|---|---|---|
+| `local` (default) | Plain files under `DATA_DIR` (`/data`) | [Deploying](docs/deploy.md#storage-backends) |
+| `s3` | Any S3-compatible bucket: R2, B2, MinIO, Spaces, Wasabi, GCS interop | [S3](docs/deploy.md#s3-and-s3-compatible-r2-b2-minio-spaces-wasabi-gcs-interop), [Coolify + MinIO](docs/coolify-minio.md) |
+| `git` | A git remote, one commit per change | [GitHub](docs/storage-github.md), [Forgejo](docs/storage-forgejo.md) |
+| `postgres` | A Postgres table | [Postgres](docs/deploy.md#postgres) |
+| `sqlite` | One SQLite file, through Node's built-in `node:sqlite` | [SQLite](docs/deploy.md#sqlite) |
+
+The optional backends load their dependency only when selected.
+
+## FAQ
+
+<details>
+<summary><b>How do I back it up?</b></summary>
+<br>
+On the default <code>local</code> backend every artifact is a directory of plain files under <code>/data</code>. Back up that directory and you have backed up everything. On the other backends, back up the bucket, repo or database.
+</details>
+
+<details>
+<summary><b>My host wipes local disk on restart. Will I lose artifacts?</b></summary>
+<br>
+On the <code>local</code> backend, yes. Fly Machines without a volume, Cloud Run and Heroku dynos all start fresh. Set <code>STORAGE_BACKEND</code> to <code>s3</code>, <code>git</code> or <code>postgres</code> and the container holds no state. See <a href="docs/deploy.md#storage-backends">storage backends</a>.
+</details>
+
+<details>
+<summary><b>Who can see a new artifact?</b></summary>
+<br>
+Only people holding its capability link (<code>?k=…</code>). New artifacts are <code>private</code> unless you set <code>DEFAULT_VISIBILITY=public</code>. Rotate the link to revoke every copy already handed out (<code>artifacts rotate &lt;slug&gt;</code>). Links expire after <code>CAP_TOKEN_TTL_DAYS</code>, 30 by default. See <a href="docs/api.md#visibility">visibility</a>.
+</details>
+
+<details>
+<summary><b>Can I embed an artifact in another site?</b></summary>
+<br>
+A <code>public</code> one, yes, as an <code>&lt;iframe&gt;</code> pointing at <code>/a/&lt;slug&gt;?raw=1</code>. A private artifact shows as an empty frame and the password prompt refuses to be framed. See <a href="docs/embedding.md">embedding</a>.
+</details>
+
+<details>
+<summary><b>Can CI publish a preview of every pull request?</b></summary>
+<br>
+Yes. Give CI its own scoped key, build the site for its subpath, and run <code>artifacts deploy</code>. Both patterns (one stable preview, or one per pull request) are in <a href="docs/ci-preview.md">docs/ci-preview.md</a>.
+</details>
+
+<details>
+<summary><b>It sits behind Cloudflare. Does rate limiting still see the real client IP?</b></summary>
+<br>
+Set <code>TRUST_PROXY=cloudflare</code> to read <code>CF-Connecting-IP</code>, or <code>TRUST_PROXY=xff</code> behind another reverse proxy. See <a href="docs/deploy.md#rate-limiting-and-the-edge">rate limiting and the edge</a>.
+</details>
 
 ## Development
 
@@ -156,6 +249,7 @@ This project stands on other people's open source. All of the following are MIT 
 **Runtime**
 - [express](https://github.com/expressjs/express) for the HTTP server
 - [marked](https://github.com/markedjs/marked) for Markdown rendering
+- [bpmn-moddle](https://github.com/bpmn-io/bpmn-moddle) for reading and checking BPMN 2.0 files
 - [nanoid](https://github.com/ai/nanoid) for unguessable slug generation
 - [adm-zip](https://github.com/cthackers/adm-zip) for zip site extraction
 - [zod](https://github.com/colinhacks/zod) for request validation
