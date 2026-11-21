@@ -17,7 +17,7 @@ try {
   const zip = new AdmZip();
   zip.addFile('index.html', Buffer.from('<p>private zip</p><img src="asset.svg">'));
   zip.addFile('asset.svg', Buffer.from('<svg xmlns="http://www.w3.org/2000/svg" width="2" height="2"/>'));
-  assert.equal((await s.api('POST', '/api/artifacts/zip?slug=browser-zip&frame=false', zip.toBuffer(), {
+  assert.equal((await s.api('POST', '/api/artifacts/zip?slug=browser-zip', zip.toBuffer(), {
     'Content-Type': 'application/zip',
   })).status, 201);
   const p=await ctx.newPage(); await p.goto(s.base);
@@ -36,7 +36,9 @@ try {
   await p.locator('.slug').filter({ hasText: 'browser-zip' }).first().click();
   const site = await opened;
   await site.waitForURL('**/a/browser-zip/');
-  await site.waitForFunction(() => document.querySelector('img')?.naturalWidth === 2);
+  const asset = site.frameLocator('iframe').locator('img[src="asset.svg"]');
+  await asset.waitFor();
+  assert.equal(await asset.evaluate(async img => { await img.decode(); return img.naturalWidth; }), 2);
   assert.equal((await fetch(s.base+'/a/browser-private')).status,404);
   assert.equal((await fetch(s.base+'/a/browser-zip/asset.svg')).status,404);
 } finally {await b?.close();await s.stop();}
