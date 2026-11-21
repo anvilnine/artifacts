@@ -377,6 +377,8 @@
   .item-body { min-width: 0; flex: 1; }
   .item-line { display: flex; align-items: center; gap: 9px; flex-wrap: wrap; }
   .slug { font-family: var(--f-mono); font-size: 14px; font-weight: 600; color: var(--rose); }
+  button.slug { background: none; border: 0; border-radius: 0; padding: 0; box-shadow: none; text-align: left; }
+  button.slug:hover { text-decoration: underline; }
   .item.off .slug { text-decoration: line-through; }
   .badge {
     font-family: var(--f-mono); font-size: 10px; font-weight: 500; letter-spacing: .06em; text-transform: uppercase; color: var(--steel);
@@ -937,8 +939,7 @@
   function showApp() {
     $('lock').style.display = 'none';
     $('app').style.display = 'block';
-    loadList();
-    loadConfig();
+    loadConfig().finally(loadList);
   }
 
   function showLock() {
@@ -1344,8 +1345,23 @@
   // The QR is served by the API, so the img tag carries the session cookie and no code here
   // parses SVG. It encodes the canonical /a/<slug> URL, which is why a private artifact gets
   // the extra line: scanning it gets the visitor to the door, not through it.
+  function canonicalLink(a) {
+    return serverBaseUrl + '/a/' + a.slug + (a.type === 'zip' ? '/' : '');
+  }
+
+  function gated(a) {
+    return a.visibility === 'private' || a.visibility === 'password';
+  }
+
+  async function shareLink(a) {
+    if (!gated(a)) return canonicalLink(a);
+    const res = await fetch('/api/artifacts/' + a.slug + '/link', { headers: headers(), cache: 'no-store' });
+    if (!res.ok) throw new Error('Link unavailable');
+    return (await res.json()).url;
+  }
+
   function openQr(a) {
-    const canonical = serverBaseUrl + '/a/' + a.slug + (a.type === 'zip' ? '/' : '');
+    const canonical = canonicalLink(a);
     const box = document.createElement('div');
     box.className = 'qrbox';
 
@@ -1414,11 +1430,10 @@
   // QR dialog is: the origin an operator has this console open on is not always the origin
   // artifact links use, and this string leaves the building.
   function openEmbed(a) {
-    const path = '/a/' + a.slug + (a.type === 'zip' ? '/' : '') + '?raw=1';
     // ?raw=1 rather than the bare link: a frame load already gets the bare page through
     // Sec-Fetch-Dest, but a browser that does not send that header would get the toolbar page,
     // which refuses to be framed, and the embed would come up empty for those readers only.
-    const src = serverBaseUrl + path;
+    const src = canonicalLink(a) + '?raw=1';
     // The frame's accessible name, so a screen reader announces the artifact instead of
     // "iframe". It lands inside an attribute in text somebody pastes, so the characters that
     // could close that attribute go first.
@@ -1964,13 +1979,33 @@
       // line 1 — slug, type badge, state pills
       const line = document.createElement('div');
       line.className = 'item-line';
-      const link = document.createElement('a');
-      link.className = 'slug'; link.target = '_blank';
-      // A redirect sends this tab to a third-party origin, so pin the rel rather than
-      // leaning on the browser's implied noopener.
-      link.rel = 'noopener noreferrer';
-      link.href = '/a/' + a.slug; link.textContent = a.slug;
-      if (a.type === 'redirect') link.title = 'Follows the redirect';
+      const unavailable = expired || a.disabled;
+      const nonPublic = gated(a);
+      const link = document.createElement(unavailable ? 'span' : nonPublic ? 'button' : 'a');
+      link.className = 'slug';
+      link.textContent = a.slug;
+      if (!unavailable && nonPublic) {
+        link.type = 'button';
+        link.title = 'Open this artifact in a new tab';
+        link.addEventListener('click', async () => {
+          // Reserve the tab during the click, before the authenticated request yields.
+          const tab = window.open('about:blank', '_blank');
+          if (tab) tab.opener = null;
+          try {
+            const url = await shareLink(a);
+            if (tab) tab.location.replace(url);
+            else location.assign(url);
+          } catch {
+            if (tab) tab.close();
+            toast('Could not open this artifact. Reload the list and try again.', true);
+          }
+        });
+      } else if (!unavailable) {
+        link.href = canonicalLink(a);
+        link.target = '_blank';
+        link.rel = 'noopener noreferrer';
+        if (a.type === 'redirect') link.title = 'Follows the redirect';
+      }
       line.appendChild(link);
       const badge = document.createElement('span');
       badge.className = 'badge'; badge.textContent = a.type;
@@ -2040,9 +2075,9 @@
       const actions = document.createElement('div');
       actions.className = 'item-actions';
 
-      const nonPublic = a.visibility === 'private' || a.visibility === 'password';
       const copy = actBtn('Copy', 'copy');
-      copy.title = expired
+      copy.disabled = !!a.disabled;
+      copy.title = a.disabled ? 'Enable this artifact before sharing it' : expired
         ? 'This artifact has expired, so its link no longer opens'
         : 'Copy the share link';
       copy.addEventListener('click', async () => {
@@ -2055,15 +2090,7 @@
         }
         const ok = await busy(copy, 'Copying…', async () => {
           try {
-            // Public: the bare link is the share link. Non-public: mint a fresh capability
-            // link (?k=…) on demand so the token is never persisted in the list rows.
-            let link = location.origin + '/a/' + a.slug + (a.type === 'zip' ? '/' : '');
-            if (nonPublic) {
-              const res = await fetch('/api/artifacts/' + a.slug + '/link', { headers: headers() });
-              if (!res.ok) throw new Error();
-              link = (await res.json()).url;
-            }
-            await navigator.clipboard.writeText(link);
+            await navigator.clipboard.writeText(await shareLink(a));
             return true;
           } catch {
             return false;

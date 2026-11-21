@@ -538,7 +538,14 @@ switch (command) {
     need(1, '<slug> [-o file]');
     // Read as bytes, the way qr does: a pdf artifact's source is the file itself, and
     // decoding it as text would write a corrupt copy to -o.
-    const res = await fetch(`${url}/a/${args[0]}/source`);
+    const slug = encodeURIComponent(args[0]);
+    let res = await fetch(`${url}/a/${slug}/source`);
+    if (res.status === 404 && key) {
+      await res.body?.cancel();
+      res = await fetch(`${url}/api/artifacts/${slug}/source`, {
+        headers: { Authorization: `Bearer ${key}` }, redirect: 'error',
+      });
+    }
     const body = Buffer.from(await res.arrayBuffer());
     if (!res.ok) fail(`${res.status} ${res.statusText}: ${body.toString('utf8').trim()}`);
     if (opts.output) {

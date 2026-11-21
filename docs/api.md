@@ -20,6 +20,7 @@ PUT    /api/config           {frame?: {enabled?, default?}, md?: {font?, width?,
 GET    /a/:slug              rendered artifact, framed when active (public unless private/password)
 GET    /a/:slug?k=<token>    capability-link exchange: sets the unlock cookie, 302s to a clean URL (private/password)
 GET    /a/:slug?raw=1        bare artifact without the frame
+GET    /api/artifacts/:slug/source  original source with read scope (non-zip artifacts)
 GET    /a/:slug/source       original uploaded source, text/plain (for a redirect, the stored target; for a pdf, the file as an attachment)
 GET    /a/:slug/file.pdf     a pdf artifact's file, application/pdf (?download=1 for an attachment; a falsy value renders inline)
 GET    /a/:slug/<Name>-<version>.<ext>  an app build's file as an attachment; also at /a/:slug/app.<ext> (?t=<install token> on private/password builds)

@@ -30,7 +30,8 @@ test('the dashboard row menu offers an embed snippet', () => {
 test('the snippet loads the bare artifact from the server base URL', () => {
   const page = read('public/index.html');
   const build = page.slice(page.indexOf('function openEmbed('), page.indexOf('const collapsed'));
-  assert.ok(build.includes('serverBaseUrl'), 'the snippet is not built from the server base URL');
+  assert.match(page, /function canonicalLink\(a\) \{\s*return serverBaseUrl/);
+  assert.ok(build.includes('canonicalLink(a)'), 'the snippet is not built from the server base URL');
   assert.ok(build.includes('?raw=1'), 'the snippet does not load the artifact without the toolbar');
   assert.ok(build.includes('<iframe'), 'the snippet is not an iframe tag');
 });

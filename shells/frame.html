@@ -84,7 +84,7 @@
   <div id="bar">{{BRAND}}
     <span id="title">{{TITLE}}</span>
     {{THEME_BTN}}
-    <button id="copy" type="button" title="Copy link to this artifact">Copy link</button>
+    {{COPY_BTN}}
     <button id="hide" type="button" title="Hide this frame">&#9650; Hide</button>
   </div>
 
@@ -109,18 +109,18 @@
     document.getElementById('hide').addEventListener('click', function () { setHidden(true); });
     document.getElementById('reveal').addEventListener('click', function () { setHidden(false); });
 
-    document.getElementById('copy').addEventListener('click', function () {
+    document.getElementById('copy')?.addEventListener('click', function () {
       var url = location.origin + location.pathname; // canonical URL, no ?raw=1
       var btn = this;
-      function done() {
+      function done(ok) {
         var prev = btn.textContent;
-        btn.textContent = 'Copied';
+        btn.textContent = ok ? 'Copied' : 'Copy failed';
         setTimeout(function () { btn.textContent = prev; }, 1200);
       }
       if (navigator.clipboard && navigator.clipboard.writeText) {
-        navigator.clipboard.writeText(url).then(done).catch(done);
+        navigator.clipboard.writeText(url).then(() => done(true), () => done(false));
       } else {
-        done();
+        done(false);
       }
     });
 

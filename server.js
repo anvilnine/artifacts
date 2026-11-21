@@ -582,6 +582,7 @@ function buildFrameHtml(meta, rawUrl) {
     TITLE: escapeHtml(meta.title || meta.slug),
     SOCIAL: socialTags(meta, canonicalUrl(meta), socialBranding(config.current.branding, BASE_URL)),
     RAW_URL: escapeHtml(rawUrl),
+    COPY_BTN: meta.visibility === 'private' ? '' : '<button id="copy" type="button" title="Copy link to this artifact">Copy link</button>',
     THEME_BTN: meta.type === 'md' || meta.type === 'bpmn'
       ? '<button id="theme" type="button" title="Cycle theme (auto, light, dark)">Auto</button>'
       : '',
@@ -2079,16 +2080,20 @@ app.get('/a/:slug', async (req, res) => {
   serveObject(req, res, `${slug}/index.html`);
 });
 
-app.get('/a/:slug/source', async (req, res, next) => {
+app.get('/a/:slug/source', (req, res, next) => serveSource(req, res, next, false).catch(next));
+app.get('/api/artifacts/:slug/source', requireAuth('read'), (req, res, next) =>
+  serveSource(req, res, next, true).catch(next));
+
+async function serveSource(req, res, next, authenticated) {
   const { slug } = req.params;
   const meta = SLUG_RE.test(slug) ? await readMeta(slug) : null;
   if (!meta || meta.disabled) return notFound(res);
   // Unlock before expiry so a locked artifact yields the canonical 404, never a 410 that
   // would leak existence.
-  if (!artifactUnlocked(req, meta)) return notFound(res);
+  if (!authenticated && !artifactUnlocked(req, meta)) return notFound(res);
   keepOutOfSharedCaches(res, meta);
   if (isExpired(meta)) return expiredFor(req, res);
-  if (meta.type === 'zip') return next(); // zip sites serve /source as a site path
+  if (meta.type === 'zip') return authenticated ? notFound(res) : next(); // zip sites serve /source as a site path
   res.set({ 'X-Content-Type-Options': 'nosniff', 'Referrer-Policy': 'no-referrer' });
   // A redirect's "source" is its target, and the docs say so, so it answers with the same value
   // the 301 uses rather than the stored bytes. Streaming the body here let /source name one
@@ -2124,7 +2129,7 @@ app.get('/a/:slug/source', async (req, res, next) => {
   serveObject(req, res, `${slug}/source.${SOURCE_EXT[meta.type]}`, {
     forceType: 'text/plain; charset=utf-8',
   });
-});
+}
 
 app.get('/a/:slug/*', async (req, res) => {
   const { slug } = req.params;

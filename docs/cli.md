@@ -55,6 +55,8 @@ An `.apk`, `.aab` or `.ipa` publishes an install page. The file goes up raw to `
 artifacts update kiln-beta build/ios/ipa/Kiln.ipa
 ```
 
+For private or password-protected artifacts, `source` uses your configured read key. Public source still works without a key.
+
 `source` on an app artifact writes the build file. See [App builds](formats.md#app-builds-apk-aab-ipa).
 
 `pdf` sets a PDF artifact's viewer controls, one setting per call: a mode (`standard`, `presentation`, `minimal`), `download-on` / `download-off`, or `default` to reset both. Turning downloads off only removes the viewer's buttons; the file's URL still answers with the bytes. See [PDF](formats.md#pdf).
